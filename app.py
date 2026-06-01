@@ -18,6 +18,10 @@ from pathlib import Path
 from flask import Flask, send_from_directory
 from flask_cors import CORS
 
+from backend.runtime import configure_runtime, resource_dir
+
+configure_runtime()
+
 from backend.config import ensure_dirs
 from backend.auth import auth_bp
 from backend.accounts import accounts_bp
@@ -28,13 +32,7 @@ from backend.douyin_login import douyin_login_bp
 from backend.douyin_auth import douyin_auth_bp
 
 # ── Flask 应用 ────────────────────────────────────────────
-if getattr(sys, 'frozen', False):
-    # PyInstaller 打包后的临时解压目录
-    bundle_dir = Path(sys._MEIPASS)
-else:
-    bundle_dir = Path(__file__).resolve().parent
-
-static_folder_path = bundle_dir / "frontend"
+static_folder_path = resource_dir() / "frontend"
 
 app = Flask(
     __name__,

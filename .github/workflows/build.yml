@@ -10,6 +10,8 @@ on:
 jobs:
   build-windows:
     runs-on: windows-latest
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ms-playwright
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -25,6 +27,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
           pip install pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m playwright install chromium
 
       - name: Build Windows EXE
         run: |
@@ -33,7 +36,7 @@ jobs:
       - name: Compress Build Result
         shell: powershell
         run: |
-          Compress-Archive -Path dist\* -DestinationPath WeChat_MP_Tools_Windows.zip
+          Compress-Archive -Path "dist\WeChat MP Tools" -DestinationPath WeChat_MP_Tools_Windows.zip
 
       - name: Upload Windows Artifact
         uses: actions/upload-artifact@v4
@@ -44,6 +47,8 @@ jobs:
 
   build-macos:
     runs-on: macos-latest
+    env:
+      PLAYWRIGHT_BROWSERS_PATH: ms-playwright
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -59,15 +64,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
           pip install pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
+          python -m playwright install chromium
 
       - name: Build macOS APP
         run: |
           pyinstaller wechat_mp_tools.spec
+          codesign --force --deep --sign - "dist/WeChat MP Tools.app"
 
       - name: Compress Build Result
         run: |
           cd dist
-          zip -r ../WeChat_MP_Tools_macOS.zip *
+          ditto -c -k --keepParent "WeChat MP Tools.app" ../WeChat_MP_Tools_macOS.zip
 
       - name: Upload macOS Artifact
         uses: actions/upload-artifact@v4

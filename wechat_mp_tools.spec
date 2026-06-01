@@ -11,6 +11,10 @@ datas = [
     (os.path.join(project_root, 'frontend'), 'frontend'),
 ]
 
+playwright_browsers = os.path.join(project_root, 'ms-playwright')
+if os.path.isdir(playwright_browsers):
+    datas.append((playwright_browsers, 'ms-playwright'))
+
 # ── 依赖配置 ──────────────────────────────────────────────
 hiddenimports = [
     'flask',
@@ -36,6 +40,7 @@ hiddenimports = [
     'backend.douyin_sign',
     'backend.downloader',
     'backend.sign',
+    'backend.runtime',
     
     # pywebview 核心支持
     'webview',
@@ -59,6 +64,7 @@ if sys.platform == 'win32':
         'clr',
         'clr_loader',
         'webview.platforms.winforms',
+        'webview.platforms.edgechromium',
     ])
 
 block_cipher = None

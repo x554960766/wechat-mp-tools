@@ -2,7 +2,7 @@
 
 为了方便您使用和分发，本项目已经集成了 **PyInstaller** 跨平台打包规约。我们对项目代码进行了**智能路径适配**：
 1. **数据外置**：打包后，所有的 Cookie、历史记录、下载的文章数据均会自动保存在**可执行文件旁边**的 `data/` 目录中，完全不影响迁移和备份。
-2. **资源内置**：网页前端的 `frontend` 静态文件已完美配置打包进可执行文件中，无需手动拷贝。
+2. **资源内置**：网页前端的 `frontend` 静态文件、Playwright 运行所需的 Chromium 浏览器都会打包进程序中，无需用户手动安装 Python、Playwright 或 Chromium。
 
 ---
 
@@ -18,7 +18,7 @@
    - 打开您的 GitHub 仓库页面，点击顶部的 **Actions** 标签。
    - 看到名为 `Build WeChat MP Tools Executables` 的工作流，点击进入最新的一条记录。
    - 滚动到页面底部，即可在 **Artifacts (产物)** 栏直接下载已经打包压缩好的：
-     - 🎁 `WeChat-MP-Tools-Windows-Executable` (内含 `.exe` 绿色程序包，Windows 用户解压即用)
+     - 🎁 `WeChat-MP-Tools-Windows-Executable` (内含完整绿色程序包，Windows 用户解压后双击 `.exe` 即用)
      - 🎁 `WeChat-MP-Tools-macOS-Executable` (内含 `.app` 双击程序包)
 
 ---
@@ -34,7 +34,8 @@
 ### 2. 如何运行
 您可以直接在 Finder（访达）中双击运行 `WeChat MP Tools.app`：
 - **首次运行提示安全未知**：由于没有苹果官方的付费签名，首次双击可能会提示“无法打开”或“未知开发者”。请在 `dist/WeChat MP Tools.app` 上**右键 -> 打开**，然后在弹出的确认框中选择 **“打开”** 即可永久信任运行！
-- 启动后，它会自动在后台拉起 Flask 服务，并启动您的浏览器打开管理网页。
+- 启动后，它会自动在后台拉起 Flask 服务，并打开桌面窗口显示管理界面。
+- 如果应用启动后立刻关闭，请查看 `dist/wechat_mp_tools.log`，里面会记录真实异常。
 
 ---
 
@@ -57,6 +58,10 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 安装打包工具 PyInstaller
 pip install pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+# 下载会被打包进程序的 Chromium 浏览器
+$env:PLAYWRIGHT_BROWSERS_PATH="ms-playwright"
+python -m playwright install chromium
 ```
 
 ### 3. 一键编译打包
@@ -71,17 +76,18 @@ pyinstaller wechat_mp_tools.spec
 
 这个文件夹就是**绿色免安装版的完整程序包**！
 - 里面包含一个 **`WeChat MP Tools.exe`** 文件。
-- 双击运行这个 `.exe`，它将自动在浏览器中打开下载管理工具网页。
+- 双击运行这个 `.exe`，它将自动打开桌面窗口显示下载管理工具。
 - **打包分发**：您可以直接将 `WeChat MP Tools` 整个文件夹压缩为 `.zip` 发送给 Windows 用户，解压缩即可直接双击运行！
 
 ---
 
 ## ⚠️ 常见问题说明
 
-### 1. 启动扫码登录时提示“Playwright 缺失浏览器依赖”？
-由于我们将 Playwright 的 Chromium 浏览器保持外置以缩减程序体积，如果首次运行时系统没有安装该浏览器，程序会报错。
-- **解决方法**：只需在命令行中运行一次以下命令，Playwright 就会自动下载 Chromium 浏览器到您系统的公共缓存区：
-  ```bash
-  playwright install chromium
-  ```
-  执行完毕后，再次双击运行 `.exe` 或 `.app` 即可完美扫码登录！
+### 1. Windows 用户还需要安装 Python 或浏览器吗？
+不需要。GitHub Actions 产物会把 Python 运行时、项目依赖和 Playwright Chromium 一起放进 `WeChat MP Tools` 文件夹。
+
+### 2. macOS 下载后打不开？
+没有 Apple Developer ID 签名时，macOS 可能拦截首次运行。请右键 `WeChat MP Tools.app`，选择“打开”。如果是启动后秒退，请查看 `.app` 同级目录下的 `wechat_mp_tools.log`。
+
+### 3. Windows 打开没反应？
+请查看 `WeChat MP Tools\wechat_mp_tools.log`。如果缺少 WebView2，Windows 10/11 通常会自动带有；极少数精简系统需要安装 Microsoft Edge WebView2 Runtime。

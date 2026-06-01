@@ -11,10 +11,12 @@ import string
 import threading
 from pathlib import Path
 
+from backend.runtime import app_dir
+
 # ── 路径配置 ──────────────────────────────────────────────
 if getattr(sys, 'frozen', False):
-    # 打包后的可执行文件所在目录
-    SCRIPT_DIR = Path(sys.executable).resolve().parent
+    # 打包后数据保存在 exe 或 .app 旁边，避免写入应用包内部。
+    SCRIPT_DIR = app_dir()
 else:
     SCRIPT_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = SCRIPT_DIR / "data"
