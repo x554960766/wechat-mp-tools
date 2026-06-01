@@ -59,6 +59,18 @@ const ArticlesPage = {
                     </div>
                 </div>
 
+                <!-- 时间范围筛选栏 -->
+                <div class="toolbar" style="margin-top: calc(-1 * var(--spacing-sm)); padding-top: var(--spacing-sm); border-top: 1px dashed var(--border-color); width: 100%;">
+                    <div class="toolbar-left" style="flex-wrap: wrap;">
+                        <span style="font-size: 0.85rem; color: var(--text-muted);">时间筛选:</span>
+                        <input type="date" class="form-input" id="article-start-date" style="padding: 4px var(--spacing-sm); font-size: 0.85rem; width: auto;" onchange="ArticlesPage.applyDateFilter()">
+                        <span style="font-size: 0.85rem; color: var(--text-muted);">至</span>
+                        <input type="date" class="form-input" id="article-end-date" style="padding: 4px var(--spacing-sm); font-size: 0.85rem; width: auto;" onchange="ArticlesPage.applyDateFilter()">
+                        <button class="btn btn-secondary btn-sm" onclick="ArticlesPage.selectByDateRange()" style="padding: 4px 10px;">☑️ 勾选该范围</button>
+                        <button class="btn btn-secondary btn-sm" onclick="ArticlesPage.clearDateFilter()" style="padding: 4px 10px;">重置</button>
+                    </div>
+                </div>
+
                 <!-- 文章列表 -->
                 <div id="articles-list" class="article-list">
                     <div class="empty-state">
@@ -157,6 +169,12 @@ const ArticlesPage = {
 
         document.getElementById('articles-section').style.display = 'block';
         document.getElementById('search-article-input').value = '';
+        
+        const startDateEl = document.getElementById('article-start-date');
+        const endDateEl = document.getElementById('article-end-date');
+        if (startDateEl) startDateEl.value = '';
+        if (endDateEl) endDateEl.value = '';
+        
         this.updateSelectedCount();
 
         await this.loadArticles();
@@ -175,6 +193,7 @@ const ArticlesPage = {
 
             this.renderArticles();
             this.updatePagination();
+            this.applyDateFilter();
         } catch (err) {
             container.innerHTML = `<div class="empty-state"><p class="empty-state-desc">加载失败: ${err.message}</p></div>`;
         }
@@ -272,8 +291,93 @@ const ArticlesPage = {
     clearSearch() {
         document.getElementById('search-article-input').value = '';
         this.keyword = '';
+        const startDateEl = document.getElementById('article-start-date');
+        const endDateEl = document.getElementById('article-end-date');
+        if (startDateEl) startDateEl.value = '';
+        if (endDateEl) endDateEl.value = '';
         this.currentPage = 0;
         this.loadArticles();
+    },
+
+    applyDateFilter() {
+        const startVal = document.getElementById('article-start-date')?.value;
+        const endVal = document.getElementById('article-end-date')?.value;
+        
+        let startTimestamp = 0;
+        let endTimestamp = Infinity;
+
+        if (startVal) {
+            startTimestamp = new Date(startVal + 'T00:00:00').getTime() / 1000;
+        }
+        if (endVal) {
+            endTimestamp = new Date(endVal + 'T23:59:59').getTime() / 1000;
+        }
+
+        this.articles.forEach((article, idx) => {
+            const globalIdx = this.currentPage * this.pageSize + idx;
+            const item = document.querySelector(`.article-item[data-idx="${globalIdx}"]`);
+            if (item) {
+                const time = article.update_time || 0;
+                const match = time >= startTimestamp && time <= endTimestamp;
+                item.style.display = match ? 'flex' : 'none';
+            }
+        });
+    },
+
+    selectByDateRange() {
+        const startVal = document.getElementById('article-start-date')?.value;
+        const endVal = document.getElementById('article-end-date')?.value;
+        
+        if (!startVal && !endVal) {
+            Toast.warning('请先选择开始或结束日期');
+            return;
+        }
+
+        let startTimestamp = 0;
+        let endTimestamp = Infinity;
+
+        if (startVal) {
+            startTimestamp = new Date(startVal + 'T00:00:00').getTime() / 1000;
+        }
+        if (endVal) {
+            endTimestamp = new Date(endVal + 'T23:59:59').getTime() / 1000;
+        }
+
+        let selectedCount = 0;
+        this.articles.forEach((article, idx) => {
+            const time = article.update_time || 0;
+            if (time >= startTimestamp && time <= endTimestamp) {
+                const globalIdx = this.currentPage * this.pageSize + idx;
+                this.selectedArticles.add(globalIdx);
+                article._selected = true;
+                selectedCount++;
+            }
+        });
+
+        this.renderArticles();
+        this.updateSelectedCount();
+        this.applyDateFilter();
+        
+        if (selectedCount > 0) {
+            Toast.success(`已成功勾选 ${selectedCount} 篇符合时间范围的文章`);
+        } else {
+            Toast.info('当前页面未找到符合时间范围的文章');
+        }
+    },
+
+    clearDateFilter() {
+        const startInput = document.getElementById('article-start-date');
+        const endInput = document.getElementById('article-end-date');
+        if (startInput) startInput.value = '';
+        if (endInput) endInput.value = '';
+        
+        this.articles.forEach((article, idx) => {
+            const globalIdx = this.currentPage * this.pageSize + idx;
+            const item = document.querySelector(`.article-item[data-idx="${globalIdx}"]`);
+            if (item) {
+                item.style.display = 'flex';
+            }
+        });
     },
 
     updatePagination() {

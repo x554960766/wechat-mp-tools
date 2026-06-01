@@ -2,6 +2,10 @@ const DyUserPage = {
     user: null,
     videos: [],
     loading: false,
+    cursor: 0,
+    hasMore: false,
+    secUid: '',
+    loadingMore: false,
 
     render() {
         return `
@@ -57,6 +61,9 @@ const DyUserPage = {
                         <div id="dy-user-videos-empty" style="display: none; text-align: center; padding: var(--spacing-xl); color: var(--text-muted);">
                             暂无作品
                         </div>
+                        <div id="dy-user-more-container" style="text-align: center; display: none; padding: var(--spacing-md) 0; margin-top: var(--spacing-lg);">
+                            <button id="dy-user-more-btn" class="btn btn-secondary" onclick="DyUserPage.loadMore()" style="min-width: 150px;">加载更多</button>
+                        </div>
                     </div>
                 </div>
 
@@ -89,6 +96,10 @@ const DyUserPage = {
     async loadUser(secUid) {
         this.loading = true;
         this.showLoading();
+        this.secUid = secUid;
+        this.cursor = 0;
+        this.hasMore = false;
+        this.videos = [];
 
         try {
             // 获取用户详情
@@ -103,7 +114,7 @@ const DyUserPage = {
             this.renderUser();
 
             // 获取用户作品
-            await this.loadVideos(secUid);
+            await this.loadVideos();
         } catch (err) {
             Toast.show(err.message, 'error');
             this.showEmpty();
@@ -113,19 +124,46 @@ const DyUserPage = {
         }
     },
 
-    async loadVideos(secUid) {
+    async loadVideos() {
+        if (this.loadingMore) return;
+        this.loadingMore = true;
+
         try {
-            const res = await fetch(`/api/douyin/user-videos?sec_uid=${secUid}&max_cursor=0&count=18`);
+            const res = await fetch(`/api/douyin/user-videos?sec_uid=${this.secUid}&max_cursor=${this.cursor}&count=18`);
             const data = await res.json();
 
             if (data.error) {
                 throw new Error(data.error);
             }
 
-            this.videos = data.aweme_list || [];
+            const newVideos = data.aweme_list || [];
+            this.videos = this.videos.concat(newVideos);
+            this.cursor = data.max_cursor || 0;
+            this.hasMore = data.has_more || false;
+
             this.renderVideos();
         } catch (err) {
             console.error('加载作品失败:', err);
+            Toast.show('加载作品失败: ' + err.message, 'error');
+        } finally {
+            this.loadingMore = false;
+        }
+    },
+
+    async loadMore() {
+        if (this.loadingMore || !this.hasMore) return;
+        
+        const btn = document.getElementById('dy-user-more-btn');
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = '加载中...';
+        }
+        
+        await this.loadVideos();
+        
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = '加载更多';
         }
     },
 
@@ -151,10 +189,12 @@ const DyUserPage = {
     renderVideos() {
         const container = document.getElementById('dy-user-videos');
         const empty = document.getElementById('dy-user-videos-empty');
+        const moreContainer = document.getElementById('dy-user-more-container');
 
         if (this.videos.length === 0) {
             container.style.display = 'none';
             empty.style.display = 'block';
+            if (moreContainer) moreContainer.style.display = 'none';
             return;
         }
 
@@ -162,6 +202,10 @@ const DyUserPage = {
         container.style.display = 'grid';
 
         container.innerHTML = this.videos.map(video => this.renderVideoCard(video)).join('');
+
+        if (moreContainer) {
+            moreContainer.style.display = this.hasMore ? 'block' : 'none';
+        }
     },
 
     renderVideoCard(video) {
@@ -177,7 +221,7 @@ const DyUserPage = {
                     <img src="${cover}" alt="${title}" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover;">
                 </div>
                 <div style="padding: var(--spacing-md);">
-                    <h3 style="font-size: 0.95rem; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.4; color: var(--text-primary);">${title}</h3>
+                    <h3 style="font-size: 0.95rem; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.4; color: #ffffff;">${title}</h3>
                     <div style="display: flex; gap: var(--spacing-md); font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">
                         <span>❤️ ${likes}</span>
                         <span>💬 ${comments}</span>
@@ -255,5 +299,9 @@ const DyUserPage = {
     destroy() {
         this.user = null;
         this.videos = [];
+        this.cursor = 0;
+        this.hasMore = false;
+        this.secUid = '';
+        this.loadingMore = false;
     }
 };
