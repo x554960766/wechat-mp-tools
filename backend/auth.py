@@ -106,7 +106,10 @@ def _do_login():
         proxy_url = get_proxy_url(proxy_config)
 
         with sync_playwright() as p:
-            launch_args = ["--window-size=1280,900"]
+            launch_args = [
+                "--window-size=1280,900",
+                "--disable-blink-features=AutomationControlled"
+            ]
             launch_kwargs = {
                 "headless": True, # Headless 运行，避免弹窗
                 "args": launch_args,
@@ -122,7 +125,12 @@ def _do_login():
             with _login_lock:
                 _active_browser = browser
 
-            ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+            ctx = browser.new_context(
+                viewport={"width": 1280, "height": 900},
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            # 注入脚本，绕过 webdriver 检测
+            ctx.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             page = ctx.new_page()
 
             page.goto("https://mp.weixin.qq.com/", timeout=30000)
