@@ -1,0 +1,117 @@
+/* ============================================================
+   Douyin Sidebar Light Theme
+   Matches anYuJia/DY_video_downloader
+   ============================================================ */
+
+/* 抖音主题 - 重写变量 */
+body.dy-theme {
+    --bg-sidebar: #ffffff;
+    --border-color: rgba(0, 0, 0, 0.08);
+    --text-primary: #1d1d1f;
+    --text-secondary: #6e6e73;
+    --text-muted: #86868b;
+    --bg-glass-hover: rgba(0, 0, 0, 0.04);
+    --primary: #FE2C55;
+    --primary-light: #FE2C55;
+    
+    /* 让主内容区也变成浅色系，如果需要的话 */
+    --gradient-bg: #f5f5f7;
+    --bg-card: #ffffff;
+    --border-hover: rgba(0, 0, 0, 0.15);
+}
+
+/* 抖音系统切换器 */
+body.dy-theme .system-switcher {
+    background: #f5f5f7;
+    border: 1px solid rgba(0,0,0,0.05);
+}
+body.dy-theme .sys-btn {
+    color: #86868b;
+}
+body.dy-theme .sys-btn:hover {
+    color: #1d1d1f;
+}
+body.dy-theme .sys-btn.active {
+    background: #ffffff;
+    color: #1d1d1f;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+
+/* 导航分类标题 */
+.dy-nav-category {
+    padding: 12px 16px 4px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: #86868b;
+    text-transform: uppercase;
+}
+
+/* 抖音导航项 */
+body.dy-theme .nav-item {
+    color: #6e6e73;
+    border-radius: 8px;
+    margin: 2px 8px;
+    padding: 10px 12px;
+}
+body.dy-theme .nav-item:hover {
+    background: #f5f5f7;
+    color: #1d1d1f;
+    transform: none; /* 取消原来的位移效果 */
+}
+body.dy-theme .nav-item.active {
+    background: rgba(254, 44, 85, 0.1);
+    color: #FE2C55;
+    box-shadow: none; /* 取消左侧边框 */
+}
+body.dy-theme .nav-item.active .nav-icon {
+    color: #FE2C55;
+}
+
+/* 图标调整 */
+body.dy-theme .nav-icon {
+    width: 18px;
+    height: 18px;
+}
+body.dy-theme .nav-icon svg {
+    width: 18px;
+    height: 18px;
+}
+
+/* 卡片和主内容区域（如果是抖音主题下，统一卡片样式） */
+body.dy-theme .card {
+    background: #ffffff;
+    border: 1px solid rgba(0,0,0,0.08);
+    box-shadow: 0 4px 20px rgba(0,0,0,0.03);
+    color: #1d1d1f;
+}
+body.dy-theme .card-title {
+    color: #1d1d1f;
+}
+body.dy-theme .form-label {
+    color: #6e6e73;
+}
+body.dy-theme .form-input {
+    background: #ffffff;
+    border: 1px solid rgba(0,0,0,0.15);
+    color: #1d1d1f;
+}
+body.dy-theme .form-input:focus {
+    border-color: #FE2C55;
+    box-shadow: 0 0 0 3px rgba(254,44,85,0.15);
+}
+
+body.dy-theme .page-title {
+    background: none;
+    -webkit-text-fill-color: #1d1d1f;
+    color: #1d1d1f;
+}
+
+body.dy-theme .btn-primary {
+    background: #FE2C55;
+    color: white;
+    box-shadow: 0 4px 15px rgba(254, 44, 85, 0.3);
+}
+body.dy-theme .btn-primary:hover {
+    box-shadow: 0 6px 20px rgba(254, 44, 85, 0.4);
+    background: #ff4d73;
+}

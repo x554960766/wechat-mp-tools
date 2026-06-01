@@ -1,0 +1,198 @@
+/* ============================================================
+   WeChat Light Theme Override
+   Clean, premium light-mode styling matching WeChat's aesthetic
+   ============================================================ */
+
+body.wechat-theme {
+    /* 核心色彩 — 经典微信绿与浅色背景 */
+    --primary: #07c160;
+    --primary-light: #10d86e;
+    --primary-dark: #06ad56;
+    --primary-glow: rgba(7, 193, 96, 0.2);
+
+    --gradient-primary: linear-gradient(135deg, #07c160 0%, #10a65c 100%);
+    --gradient-bg: #f5f5f7;
+
+    --bg-primary: #ffffff;
+    --bg-secondary: #f5f5f7;
+    --bg-card: #ffffff;
+    --bg-card-hover: rgba(0, 0, 0, 0.02);
+    --bg-input: #f5f5f7;
+    --bg-sidebar: #ffffff;
+    --bg-glass: rgba(0, 0, 0, 0.02);
+    --bg-glass-hover: rgba(0, 0, 0, 0.04);
+
+    /* 文字与高对比度排版 */
+    --text-primary: #1d1d1f;
+    --text-secondary: #515154;
+    --text-muted: #86868b;
+    --text-accent: #07c160;
+
+    /* 边框 */
+    --border-color: rgba(0, 0, 0, 0.08);
+    --border-hover: rgba(0, 0, 0, 0.15);
+    --border-focus: rgba(7, 193, 96, 0.5);
+}
+
+/* 微信系统切换器 */
+body.wechat-theme .system-switcher {
+    background: #f5f5f7;
+    border: 1px solid rgba(0, 0, 0, 0.05);
+}
+body.wechat-theme .sys-btn {
+    color: #86868b;
+}
+body.wechat-theme .sys-btn:hover {
+    color: #1d1d1f;
+}
+body.wechat-theme .sys-btn.active {
+    background: #ffffff;
+    color: #1d1d1f;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+/* 微信导航项 */
+body.wechat-theme .nav-item {
+    color: #515154;
+}
+body.wechat-theme .nav-item:hover {
+    background: #f5f5f7;
+    color: #1d1d1f;
+    transform: none;
+}
+body.wechat-theme .nav-item.active {
+    background: rgba(7, 193, 96, 0.08);
+    color: #07c160;
+    box-shadow: none;
+}
+body.wechat-theme .nav-item.active .nav-icon {
+    color: #07c160;
+}
+
+/* 卡片与表单元素 */
+body.wechat-theme .card {
+    background: #ffffff;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.02);
+    color: #1d1d1f;
+}
+body.wechat-theme .card-title {
+    color: #1d1d1f;
+}
+body.wechat-theme .form-label {
+    color: #515154;
+}
+body.wechat-theme .form-input,
+body.wechat-theme .form-select,
+body.wechat-theme .form-textarea {
+    background: #ffffff;
+    border: 1px solid rgba(0, 0, 0, 0.15);
+    color: #1d1d1f;
+}
+body.wechat-theme .form-input:focus,
+body.wechat-theme .form-select:focus,
+body.wechat-theme .form-textarea:focus {
+    border-color: #07c160;
+    box-shadow: 0 0 0 3px rgba(7, 193, 96, 0.15);
+}
+
+/* 按钮样式优化 */
+body.wechat-theme .btn-primary {
+    background: var(--gradient-primary);
+    color: white;
+    box-shadow: 0 4px 15px rgba(7, 193, 96, 0.2);
+}
+body.wechat-theme .btn-primary:hover {
+    box-shadow: 0 6px 20px rgba(7, 193, 96, 0.3);
+    background: linear-gradient(135deg, #09da6d 0%, #11bd69 100%);
+}
+
+body.wechat-theme .btn-secondary {
+    background: #ffffff;
+    border: 1px solid rgba(0, 0, 0, 0.15);
+    color: #515154;
+}
+body.wechat-theme .btn-secondary:hover {
+    background: #f5f5f7;
+    border-color: rgba(0, 0, 0, 0.25);
+    color: #1d1d1f;
+}
+
+/* 滚动条 */
+body.wechat-theme ::-webkit-scrollbar-thumb {
+    background: rgba(0, 0, 0, 0.1);
+}
+body.wechat-theme ::-webkit-scrollbar-thumb:hover {
+    background: rgba(0, 0, 0, 0.2);
+}
+
+/* 状态点 */
+body.wechat-theme #user-status {
+    padding: 12px;
+    background: #ffffff;
+    border-radius: 12px;
+    border: 1px solid rgba(0, 0, 0, 0.05);
+}
+body.wechat-theme .status-text {
+    color: #515154;
+    font-weight: 500;
+}
+
+/* 列表与表格内容 */
+body.wechat-theme .data-table th {
+    background: rgba(0, 0, 0, 0.02);
+    color: var(--text-muted);
+}
+body.wechat-theme .data-table tr:hover td {
+    background: rgba(0, 0, 0, 0.01);
+}
+body.wechat-theme .history-item {
+    background: #ffffff;
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.01);
+}
+body.wechat-theme .history-item .history-title {
+    color: #1d1d1f;
+}
+
+body.wechat-theme .logo-icon {
+    box-shadow: 0 4px 15px rgba(7, 193, 96, 0.2);
+}
+body.wechat-theme .page-title {
+    background: none;
+    -webkit-text-fill-color: #1d1d1f;
+    color: #1d1d1f;
+}
+
+body.wechat-theme .article-item {
+    background: #ffffff;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+}
+body.wechat-theme .article-item:hover {
+    border-color: rgba(7, 193, 96, 0.3);
+    background: rgba(7, 193, 96, 0.01);
+}
+body.wechat-theme .article-item.selected {
+    background: rgba(7, 193, 96, 0.04);
+    border-color: #07c160;
+}
+body.wechat-theme .article-title {
+    color: #1d1d1f;
+}
+body.wechat-theme .article-digest {
+    color: #515154;
+}
+
+/* 弹窗与遮罩层 */
+body.wechat-theme .modal-dialog {
+    background: #ffffff;
+    border: 1px solid rgba(0, 0, 0, 0.1);
+    color: #1d1d1f;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.08);
+}
+body.wechat-theme .modal-title {
+    color: #1d1d1f;
+}
+body.wechat-theme .modal-body {
+    color: #515154;
+}
