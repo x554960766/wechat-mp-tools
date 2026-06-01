@@ -385,6 +385,9 @@ def _do_batch_download(task_id: str, articles: list, account_name: str):
                 error_msg = str(e)
             time.sleep(1)
 
+        if result.get("title"):
+            title = result["title"]
+
         downloaded_path = result.get("path") if success else None
 
         with _download_lock:
