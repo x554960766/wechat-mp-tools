@@ -4,3 +4,4 @@ requests>=2.31
 playwright>=1.40
 scrapling>=0.2
 pysocks>=1.7
+pywebview>=5.0
