@@ -36,12 +36,35 @@ hiddenimports = [
     'backend.douyin_sign',
     'backend.downloader',
     'backend.sign',
+    
+    # pywebview 核心支持
+    'webview',
+    'webview.platforms',
 ]
+
+# macOS Cocoa 支持
+if sys.platform == 'darwin':
+    hiddenimports.extend([
+        'webview.platforms.cocoa',
+        'objc',
+        'Cocoa',
+        'Foundation',
+        'WebKit',
+    ])
+
+# Windows WebView2 (winforms) 支持
+if sys.platform == 'win32':
+    hiddenimports.extend([
+        'pythonnet',
+        'clr',
+        'clr_loader',
+        'webview.platforms.winforms',
+    ])
 
 block_cipher = None
 
 a = Analysis(
-    ['app.py'],
+    ['main.py'],  # ── 入口点修改为 main.py ──
     pathex=[project_root],
     binaries=[],
     datas=datas,
@@ -77,7 +100,7 @@ if sys.platform == 'darwin':
         bootloader_ignore_signals=False,
         strip=False,
         upx=True,
-        console=False,  # 不显示黑色的终端终端窗口
+        console=False,  # 完全不显示后台终端窗口，纯 native 体验
         disable_windowed_traceback=False,
         argv_emulation=False,
         target_arch=None,
@@ -102,7 +125,7 @@ if sys.platform == 'darwin':
         }
     )
 elif sys.platform == 'win32':
-    # Windows 打包配置：打包为绿色免安装文件夹（启动速度最快，也最稳定）
+    # Windows 打包配置：打包为绿色免安装文件夹
     exe = EXE(
         pyz,
         a.scripts,
@@ -114,7 +137,7 @@ elif sys.platform == 'win32':
         strip=False,
         upx=True,
         upx_exclude=[],
-        console=True,  # Windows 建议显示控制台以查看后台运行日志，若不需要可改为 False
+        console=False,  # ── 关键修改：Windows 端也完全关闭黑窗口控制台 ──
         disable_windowed_traceback=False,
         argv_emulation=False,
         target_arch=None,
@@ -143,7 +166,7 @@ else:
         bootloader_ignore_signals=False,
         strip=False,
         upx=True,
-        console=True,
+        console=False,  # 纯窗口运行
         disable_windowed_traceback=False,
         argv_emulation=False,
         target_arch=None,
