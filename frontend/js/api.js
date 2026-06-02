@@ -78,6 +78,12 @@ const API = {
         download(articles, accountName) {
             return API.post('/api/articles/download', { articles, account_name: accountName });
         },
+        downloadRange(payload) {
+            return API.post('/api/articles/download-range', payload);
+        },
+        cancelDownload(taskId) {
+            return API.post(`/api/articles/download-cancel/${taskId}`);
+        },
         downloadByUrl(urls) {
             return API.post('/api/articles/download-url', { urls });
         },
@@ -89,6 +95,9 @@ const API = {
         },
         clearHistory() {
             return API.delete('/api/articles/history');
+        },
+        deleteHistory(index) {
+            return API.delete(`/api/articles/history/${index}`);
         },
         openFolder() { return API.post('/api/articles/open-folder'); },
         openFile(path) { return API.post('/api/articles/open-file', { path }); },
@@ -127,5 +136,14 @@ const API = {
         openFolder() { return API.post('/api/douyin/open-folder'); },
         openFile(path) { return API.post('/api/douyin/open-file', { path }); },
         openParent(path) { return API.post('/api/douyin/open-parent', { path }); },
+    },
+
+    // ── WeChat Channels API ──────────────────────────
+    channels: {
+        fetchVideoProfile(url) { return API.post('/api/channels/fetch_video_profile', { url }); },
+        download(url, description, createtime) { return API.post('/api/channels/download', { url, description, createtime }); },
+        openFolder() { return API.post('/api/channels/open-folder'); },
+        startCookieAcquisition() { return API.post('/api/channels/start_cookie_acquisition'); },
+        cookieAcquisitionStatus() { return API.get('/api/channels/cookie_acquisition_status', { showError: false }); },
     },
 };

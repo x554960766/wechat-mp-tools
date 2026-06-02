@@ -77,7 +77,7 @@ const App = {
     async checkAuthStatus() {
         try {
             const data = await API.auth.status();
-            this.updateLoginStatus(data.logged_in, data.may_expired);
+            this.updateLoginStatus(data.logged_in, data.expired || data.may_expired);
         } catch (err) {
             console.error('Failed to fetch auth status:', err);
             this.updateLoginStatus(false);

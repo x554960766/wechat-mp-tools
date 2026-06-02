@@ -17,6 +17,9 @@ from backend.config import (
 )
 
 
+MPVIDEO_RE = re.compile(r'(?:https?:)?//mpvideo\.qpic\.cn/[^"\'\s<>]+?\.mp4(?:\?[^"\'\s<>]+)?', re.I)
+
+
 def sanitize(name: str, mx: int = 60) -> str:
     """清理文件名"""
     return re.sub(r'[\\/*?:"<>|]', "_", name.strip())[:mx].rstrip("_") or "article"
@@ -49,6 +52,26 @@ def get_ext(url: str) -> str:
     fn = urlparse(url).path.rsplit("/", 1)[-1].split("?")[0]
     ext = fn.rsplit(".", 1)[-1] if "." in fn else ""
     return ext if 1 <= len(ext) <= 5 else "jpg"
+
+
+def get_video_ext(url: str) -> str:
+    path = urlparse(url).path
+    ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+    return ext if ext in {"mp4", "m3u8", "mov"} else "mp4"
+
+
+def normalize_url(url: str) -> str:
+    url = (
+        unescape(url)
+        .replace("\\x26amp;", "&")
+        .replace("\\u0026amp;", "&")
+        .replace("\\u0026", "&")
+        .replace("&amp;", "&")
+        .strip()
+    )
+    if url.startswith("//"):
+        return "https:" + url
+    return url
 
 
 def download_resource(url: str, path: Path) -> bool:
@@ -120,6 +143,99 @@ def replace_variants(html: str, orig: str, local: str) -> str:
     return out
 
 
+def _extract_video_iframes(html: str) -> list:
+    videos = []
+    for match in re.finditer(r'<iframe\b[^>]*class="[^"]*video_iframe[^"]*"[^>]*>', html, re.I):
+        iframe = match.group(0)
+        vid_match = re.search(r'data-mpvid="([^"]+)"', iframe)
+        src_match = re.search(r'data-src="([^"]+)"', iframe)
+        cover_match = re.search(r'data-cover="([^"]+)"', iframe)
+        if not vid_match and not src_match:
+            continue
+        vid = vid_match.group(1) if vid_match else ""
+        videos.append({
+            "vid": vid,
+            "iframe": iframe,
+            "src": normalize_url(src_match.group(1)) if src_match else "",
+            "cover": unquote(cover_match.group(1)).replace("&amp;", "&") if cover_match else "",
+            "start": match.start(),
+            "end": match.end(),
+        })
+    return videos
+
+
+def _extract_video_urls(html: str) -> list:
+    decoded = unescape(html).replace("\\/", "/")
+    urls = []
+    for url in MPVIDEO_RE.findall(decoded):
+        url = normalize_url(url).rstrip("\\")
+        if url not in urls:
+            urls.append(url)
+    return urls
+
+
+def _group_video_urls(urls: list) -> list:
+    groups = []
+    seen = {}
+    for url in urls:
+        path = urlparse(url).path
+        key = re.sub(r'\.f\d+\.mp4$', '', path, flags=re.I)
+        if key not in seen:
+            seen[key] = []
+            groups.append(seen[key])
+        seen[key].append(url)
+    return groups
+
+
+def _choose_video_url(candidates: list) -> str:
+    if not candidates:
+        return ""
+    for marker in (".f10004.", ".f10002.", ".f10104.", ".f10102."):
+        for url in candidates:
+            if marker in url:
+                return url
+    return candidates[0]
+
+
+def extract_article_content(raw_html: str) -> str:
+    marker = 'id="js_content"'
+    marker_pos = raw_html.find(marker)
+    if marker_pos < 0:
+        return raw_html
+
+    start_tag_begin = raw_html.rfind("<div", 0, marker_pos)
+    start_tag_end = raw_html.find(">", marker_pos)
+    if start_tag_begin < 0 or start_tag_end < 0:
+        return raw_html
+
+    end_candidates = [
+        raw_html.find('id="js_tags_preview_toast"', start_tag_end),
+        raw_html.find('id="js_article_bottom_bar"', start_tag_end),
+        raw_html.find('id="js_pc_qr_code"', start_tag_end),
+    ]
+    end_candidates = [pos for pos in end_candidates if pos > start_tag_end]
+    end = min(end_candidates) if end_candidates else len(raw_html)
+
+    content = raw_html[start_tag_end + 1:end]
+    last_close = content.rfind("</div>")
+    if last_close >= 0:
+        content = content[:last_close]
+    return content
+
+
+def replace_video_iframe(html: str, video: dict, local: str) -> str:
+    vid = video.get("vid", "")
+    if video.get("iframe") and video["iframe"] in html:
+        return html.replace(video["iframe"], local)
+    if not vid:
+        return html
+    pattern = re.compile(
+        r'<iframe\b(?=[^>]*class="[^"]*video_iframe[^"]*")(?=[^>]*data-mpvid="' + re.escape(vid) + r'")[^>]*>',
+        re.I,
+    )
+    return pattern.sub(local, html)
+
+
 def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> dict:
     """
     下载单篇文章
@@ -180,12 +296,9 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
                 media_dir.mkdir(parents=True, exist_ok=True)
 
     # 提取正文区域
-    content_match = re.search(
-        r'<div[^>]*id="js_content"[^>]*>(.*?)</div>\s*(?:<div|<script|$)',
-        raw_html,
-        re.DOTALL
-    )
-    content_html = content_match.group(1) if content_match else raw_html
+    content_html = extract_article_content(raw_html)
+    video_iframes = _extract_video_iframes(raw_html)
+    video_urls = _extract_video_urls(raw_html)
 
     # 下载图片
     url_map = {}
@@ -193,13 +306,14 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         img_urls = set()
         # 仅在文章正文 content_html 内提取图片，避免下载外部页眉、页脚、微信小图标等多余资源
         for m in re.finditer(r'data-src="([^"]*mmbiz[^"]*)"', content_html):
-            img_urls.add(m.group(1).replace("&amp;", "&"))
+            img_urls.add(normalize_url(m.group(1)))
         for m in re.finditer(r'src="([^"]*mmbiz[^"]*)"', content_html):
-            img_urls.add(m.group(1).replace("&amp;", "&"))
+            img_urls.add(normalize_url(m.group(1)))
+
+        video_covers = {normalize_url(v["cover"]) for v in video_iframes if v.get("cover")}
+        img_urls = {u for u in img_urls if u not in video_covers}
 
         for i, img_url in enumerate(img_urls, 1):
-            if img_url.startswith("//"):
-                img_url = "https:" + img_url
             ext = get_ext(img_url)
             fname = f"img_{i:03d}.{ext}"
             if download_resource(img_url, media_dir / fname):
@@ -207,23 +321,52 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
 
     # 下载视频
     if save_videos:
-        video_urls = set()
-        # 仅在文章正文 content_html 内提取视频
-        for m in re.finditer(r'src="([^"]*mpvideo[^"]*)"', content_html):
-            video_urls.add(m.group(1).replace("&amp;", "&"))
+        video_items = []
+        used_video_urls = set()
+        grouped_urls = _group_video_urls(video_urls)
+        for idx, video in enumerate(video_iframes):
+            candidates = grouped_urls[idx] if idx < len(grouped_urls) else []
+            vid_url = _choose_video_url(candidates)
+            if vid_url and vid_url not in used_video_urls:
+                video_items.append({**video, "url": vid_url})
+                used_video_urls.add(vid_url)
 
-        for i, vid_url in enumerate(video_urls, 1):
-            if vid_url.startswith("//"):
-                vid_url = "https:" + vid_url
+        if not video_items:
+            for group in grouped_urls:
+                vid_url = _choose_video_url(group)
+                if vid_url not in used_video_urls:
+                    video_items.append({"vid": "", "iframe": "", "src": "", "cover": "", "url": vid_url})
+                    used_video_urls.add(vid_url)
+
+        for i, video in enumerate(video_items, 1):
+            vid_url = video["url"]
             ext = get_ext(vid_url) or "mp4"
+            ext = get_video_ext(vid_url) if ext == "jpg" else ext
             fname = f"video_{i}.{ext}"
             if download_resource(vid_url, media_dir / fname):
                 url_map[vid_url] = f"media/{fname}"
+                if video.get("src"):
+                    url_map[video["src"]] = f"media/{fname}"
+                poster_attr = ""
+                if save_images and video.get("cover"):
+                    cover_ext = get_ext(video["cover"])
+                    cover_name = f"video_cover_{i}.{cover_ext}"
+                    if download_resource(video["cover"], media_dir / cover_name):
+                        poster_attr = f' poster="media/{cover_name}"'
+                        url_map[video["cover"]] = f"media/{cover_name}"
+                url_map[f"__video_iframe__{video.get('vid', i)}"] = (
+                    video,
+                    f'<video controls src="media/{fname}"{poster_attr}></video>',
+                )
 
     # 替换 URL
     localized = content_html
     for orig, local in url_map.items():
-        localized = replace_variants(localized, orig, local)
+        if orig.startswith("__video_iframe__"):
+            video, video_tag = local
+            localized = replace_video_iframe(localized, video, video_tag)
+        else:
+            localized = replace_variants(localized, orig, local)
     # 同时处理 data-src -> src 替换
     localized = re.sub(r'data-src="([^"]*)"', r'src="\1"', localized)
 
@@ -257,6 +400,7 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         "url": url,
         "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "resources_count": len(url_map),
+        "videos_count": len(video_iframes),
         "leftover_urls": len(find_mmbiz_urls(localized)),
         "has_clean_text": True,
         "clean_text_file": "content.txt",

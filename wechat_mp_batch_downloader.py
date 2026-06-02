@@ -8,7 +8,7 @@
   2. 配置目标公众号后运行：python3 wechat_mp_batch_downloader.py
 
 依赖：
-  pip install scrapling playwright requests && playwright install chromium
+  pip install scrapling playwright requests && python3 -m playwright install chromium chromium-headless-shell
 """
 
 import sys

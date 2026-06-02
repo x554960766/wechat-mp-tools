@@ -4,6 +4,8 @@
 const Router = {
     routes: {},
     currentPage: null,
+    currentKey: null,
+    pageCache: {},
 
     init() {
         // 注册路由
@@ -12,6 +14,8 @@ const Router = {
             'accounts': AccountsPage,
             'articles': ArticlesPage,
             'download': DownloadPage,
+            'history': HistoryPage,
+            'channels': ChannelsPage,
             'proxy': ProxyPage,
             'settings': SettingsPage,
             
@@ -29,6 +33,15 @@ const Router = {
 
         // 监听 hash 变化
         window.addEventListener('hashchange', () => this.handleRouting());
+        document.querySelectorAll('.nav-item').forEach(item => {
+            item.addEventListener('click', (event) => {
+                const page = item.getAttribute('data-page');
+                if (page && page === this.currentKey) {
+                    event.preventDefault();
+                    this.refreshCurrent();
+                }
+            });
+        });
 
         // 首次加载路由
         this.handleRouting();
@@ -44,16 +57,8 @@ const Router = {
             return;
         }
 
-        // 销毁上一个页面
-        if (this.currentPage && typeof this.currentPage.destroy === 'function') {
-            try {
-                this.currentPage.destroy();
-            } catch (err) {
-                console.error('Destroying page error:', err);
-            }
-        }
-
         this.currentPage = page;
+        this.currentKey = pageKey;
 
         // 更新导航栏激活状态
         this.updateNavUI(pageKey);
@@ -61,17 +66,36 @@ const Router = {
         const container = document.getElementById('page-container');
         if (!container) return;
 
+        Array.from(container.children).forEach(child => {
+            if (!child.classList.contains('route-page')) child.remove();
+        });
+
+        Object.values(this.pageCache).forEach(entry => {
+            if (entry.el) entry.el.style.display = 'none';
+        });
+
+        if (this.pageCache[pageKey]) {
+            this.pageCache[pageKey].el.style.display = 'block';
+            container.prepend(this.pageCache[pageKey].el);
+            return;
+        }
+
         // 显示加载动画
-        container.innerHTML = `
+        const pageEl = document.createElement('div');
+        pageEl.className = 'route-page';
+        pageEl.dataset.page = pageKey;
+        pageEl.innerHTML = `
             <div class="loading-screen">
                 <div class="spinner"></div>
                 <p>加载中...</p>
             </div>
         `;
+        container.prepend(pageEl);
 
         try {
             // 渲染 HTML
-            container.innerHTML = page.render();
+            pageEl.innerHTML = page.render();
+            this.pageCache[pageKey] = { page, el: pageEl };
 
             // 初始化新页面
             if (typeof page.init === 'function') {
@@ -79,7 +103,7 @@ const Router = {
             }
         } catch (err) {
             console.error('Routing load error:', err);
-            container.innerHTML = `
+            pageEl.innerHTML = `
                 <div style="text-align: center; padding: 40px; color: var(--error);">
                     <h3>❌ 页面加载失败</h3>
                     <p style="margin-top: var(--spacing-sm); color: var(--text-muted);">${err.message || err}</p>
@@ -87,6 +111,25 @@ const Router = {
                 </div>
             `;
         }
+    },
+
+    async refreshCurrent() {
+        if (!this.currentKey) return;
+        const cached = this.pageCache[this.currentKey];
+        if (!cached) {
+            await this.handleRouting();
+            return;
+        }
+        if (cached.page && typeof cached.page.destroy === 'function') {
+            try {
+                cached.page.destroy();
+            } catch (err) {
+                console.error('Destroying page error:', err);
+            }
+        }
+        delete this.pageCache[this.currentKey];
+        cached.el.remove();
+        await this.handleRouting();
     },
 
     updateNavUI(activeKey) {

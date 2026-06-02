@@ -7,6 +7,7 @@ import json
 import time
 import threading
 import requests as req
+import shutil
 from flask import Blueprint, jsonify, request, Response
 from datetime import datetime
 from pathlib import Path
@@ -32,6 +33,54 @@ def _get_session():
     return config["token"], config["cookie_str"]
 
 
+def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "") -> tuple:
+    """Fetch one WeChat publish page and return (articles, total)."""
+    token, cookie_str = _get_session()
+    headers = {**DEFAULT_HEADERS, "Cookie": cookie_str}
+    proxies = get_proxies_dict()
+    proxy_url = proxies.get("http") if proxies else None
+    is_searching = bool(keyword)
+    params = {
+        "sub": "search" if is_searching else "list",
+        "search_field": "7" if is_searching else "null",
+        "begin": str(begin),
+        "count": str(count),
+        "query": keyword,
+        "fakeid": fakeid,
+        "type": "101_1",
+        "free_publish_type": "1",
+        "sub_action": "list_ex",
+        "token": token,
+        "lang": "zh_CN",
+        "f": "json",
+        "ajax": "1",
+    }
+
+    resp = req.get(
+        f"{BASE_URL}/cgi-bin/appmsgpublish",
+        params=params,
+        headers=headers,
+        proxies=proxies,
+        timeout=30,
+    )
+
+    if resp.status_code != 200:
+        report_proxy_status(proxy_url, success=False)
+        raise RuntimeError(f"HTTP {resp.status_code}")
+
+    report_proxy_status(proxy_url, success=True)
+    data = resp.json()
+    base_resp = data.get("base_resp", {})
+    ret = base_resp.get("ret", 0)
+    if ret == 200003:
+        raise PermissionError("登录已过期，请重新扫码登录")
+    if ret != 0:
+        err_msg = base_resp.get("err_msg", "未知错误")
+        raise RuntimeError(f"API错误 (ret={ret}): {err_msg}")
+
+    return _parse_publish_response(data)
+
+
 @articles_bp.route("/list/<fakeid>", methods=["GET"])
 def get_articles(fakeid):
     """获取指定公众号的文章列表"""
@@ -40,60 +89,7 @@ def get_articles(fakeid):
     keyword = request.args.get("keyword", "").strip()
 
     try:
-        token, cookie_str = _get_session()
-    except RuntimeError as e:
-        return jsonify({"error": str(e)}), 401
-
-    proxy_url = None
-    try:
-        headers = {**DEFAULT_HEADERS, "Cookie": cookie_str}
-        proxies = get_proxies_dict()
-        if proxies:
-            proxy_url = proxies.get("http")
-
-        # 使用 appmsgpublish 接口
-        is_searching = bool(keyword)
-        params = {
-            "sub": "search" if is_searching else "list",
-            "search_field": "7" if is_searching else "null",
-            "begin": str(begin),
-            "count": str(count),
-            "query": keyword,
-            "fakeid": fakeid,
-            "type": "101_1",
-            "free_publish_type": "1",
-            "sub_action": "list_ex",
-            "token": token,
-            "lang": "zh_CN",
-            "f": "json",
-            "ajax": "1",
-        }
-
-        resp = req.get(
-            f"{BASE_URL}/cgi-bin/appmsgpublish",
-            params=params,
-            headers=headers,
-            proxies=proxies,
-            timeout=30,
-        )
-
-        if resp.status_code != 200:
-            report_proxy_status(proxy_url, success=False)
-            return jsonify({"error": f"HTTP {resp.status_code}"}), 500
-
-        report_proxy_status(proxy_url, success=True)
-        data = resp.json()
-        base_resp = data.get("base_resp", {})
-        ret = base_resp.get("ret", 0)
-
-        if ret == 200003:
-            return jsonify({"error": "登录已过期，请重新扫码登录"}), 401
-        if ret != 0:
-            err_msg = base_resp.get("err_msg", "未知错误")
-            return jsonify({"error": f"API错误 (ret={ret}): {err_msg}"}), 500
-
-        # 解析文章列表
-        articles, total_count = _parse_publish_response(data)
+        articles, total_count = _fetch_articles_page(fakeid, begin, count, keyword)
 
         return jsonify({
             "articles": articles,
@@ -102,8 +98,9 @@ def get_articles(fakeid):
             "count": len(articles),
         })
 
-    except req.RequestException as e:
-        report_proxy_status(proxy_url, success=False)
+    except PermissionError as e:
+        return jsonify({"error": str(e)}), 401
+    except (RuntimeError, req.RequestException) as e:
         return jsonify({"error": f"网络请求失败: {str(e)}"}), 500
 
 
@@ -247,6 +244,65 @@ def start_download():
     return jsonify({"task_id": task_id, "message": f"已启动下载任务，共 {len(articles)} 篇"})
 
 
+@articles_bp.route("/download-range", methods=["POST"])
+def start_range_download():
+    """按时间范围分页拉取文章并逐篇下载。"""
+    data = request.get_json() or {}
+    fakeid = data.get("fakeid", "")
+    account_name = data.get("account_name", "unknown")
+    start_time = data.get("start_time", 0)
+    end_time = data.get("end_time", 0)
+    keyword = data.get("keyword", "").strip()
+    page_size = int(data.get("page_size", 10) or 10)
+
+    if not fakeid:
+        return jsonify({"error": "缺少公众号 fakeid"}), 400
+    if not start_time or not end_time:
+        return jsonify({"error": "请选择完整的开始和结束日期"}), 400
+    if start_time > end_time:
+        return jsonify({"error": "开始日期不能晚于结束日期"}), 400
+
+    task_id = f"range_{int(time.time())}"
+    with _download_lock:
+        _download_tasks[task_id] = {
+            "status": "running",
+            "mode": "range",
+            "total": 0,
+            "completed": 0,
+            "failed": 0,
+            "scanned": 0,
+            "current": "",
+            "results": [],
+            "start_time": time.time(),
+            "cancel_requested": False,
+            "stop_reason": "",
+        }
+
+    thread = threading.Thread(
+        target=_do_range_download,
+        args=(task_id, fakeid, account_name, start_time, end_time, keyword, page_size),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({"task_id": task_id, "message": "已启动按时间范围下载任务"})
+
+
+@articles_bp.route("/download-cancel/<task_id>", methods=["POST"])
+def cancel_download(task_id):
+    """请求停止下载任务。"""
+    with _download_lock:
+        task = _download_tasks.get(task_id)
+        if not task:
+            return jsonify({"error": "任务不存在"}), 404
+        if task["status"] not in ("running",):
+            return jsonify({"message": "任务已结束"})
+        task["cancel_requested"] = True
+        task["status"] = "cancelling"
+        task["stop_reason"] = "用户请求停止"
+    return jsonify({"message": "正在停止下载任务"})
+
+
 @articles_bp.route("/download-url", methods=["POST"])
 def download_by_url():
     """通过 URL 下载单篇文章"""
@@ -328,11 +384,16 @@ def get_download_status(task_id):
 def get_history():
     """获取下载历史"""
     history = load_json(DOWNLOAD_HISTORY_FILE, [])
-    # 按时间倒序
-    history.sort(key=lambda x: x.get("time", 0), reverse=True)
+    indexed_history = []
+    for index, item in enumerate(history):
+        if isinstance(item, dict):
+            indexed = dict(item)
+            indexed["_index"] = index
+            indexed_history.append(indexed)
+    indexed_history.sort(key=lambda x: x.get("time", 0), reverse=True)
     # 限制返回数量
     limit = request.args.get("limit", 50, type=int)
-    return jsonify({"history": history[:limit], "total": len(history)})
+    return jsonify({"history": indexed_history[:limit], "total": len(indexed_history)})
 
 
 @articles_bp.route("/history", methods=["DELETE"])
@@ -340,6 +401,41 @@ def clear_history():
     """清空下载历史"""
     save_json(DOWNLOAD_HISTORY_FILE, [])
     return jsonify({"message": "历史已清空"})
+
+
+@articles_bp.route("/history/<int:index>", methods=["DELETE"])
+def delete_history_item(index):
+    """删除单条下载历史，并删除对应下载文件夹。"""
+    history = load_json(DOWNLOAD_HISTORY_FILE, [])
+    if index < 0 or index >= len(history):
+        return jsonify({"error": "历史记录不存在"}), 404
+
+    item = history[index]
+    path_str = item.get("path", "") if isinstance(item, dict) else ""
+    file_status = "no_path"
+    if path_str:
+        try:
+            path = Path(path_str)
+            if path.exists():
+                if path.is_dir():
+                    shutil.rmtree(path)
+                else:
+                    path.unlink()
+                file_status = "deleted"
+            else:
+                file_status = "missing"
+        except Exception as e:
+            return jsonify({"error": f"删除文件失败，记录未删除: {str(e)}"}), 500
+
+    history.pop(index)
+    save_json(DOWNLOAD_HISTORY_FILE, history)
+
+    messages = {
+        "deleted": "已删除下载文件和记录",
+        "missing": "下载文件已不存在，已删除记录",
+        "no_path": "记录没有文件路径，已删除记录",
+    }
+    return jsonify({"message": messages.get(file_status, "已删除记录"), "file_status": file_status})
 
 
 def _do_batch_download(task_id: str, articles: list, account_name: str):
@@ -356,6 +452,16 @@ def _do_batch_download(task_id: str, articles: list, account_name: str):
     history = load_json(DOWNLOAD_HISTORY_FILE, [])
 
     for i, article in enumerate(articles):
+        with _download_lock:
+            task = _download_tasks.get(task_id, {})
+            if task.get("cancel_requested") or task.get("status") == "cancelling":
+                task["status"] = "cancelled"
+                task["current"] = ""
+                task["end_time"] = time.time()
+                task["stop_reason"] = task.get("stop_reason") or "用户请求停止"
+                save_json(DOWNLOAD_HISTORY_FILE, history)
+                return
+
         link = article.get("link", "")
         title = article.get("title", f"article_{i+1}")
 
@@ -421,9 +527,174 @@ def _do_batch_download(task_id: str, articles: list, account_name: str):
 
     with _download_lock:
         task = _download_tasks[task_id]
-        task["status"] = "completed"
+        if task.get("status") == "cancelling":
+            task["status"] = "cancelled"
+            task["stop_reason"] = task.get("stop_reason") or "用户请求停止"
+        else:
+            task["status"] = "completed"
         task["current"] = ""
         task["end_time"] = time.time()
+
+
+def _download_article_into_task(task_id: str, article: dict, account_name: str, history: list, index: int = 0):
+    """Download one article and update task progress."""
+    from backend.downloader import download_single_article
+
+    settings = get_settings()
+    max_retries = settings.get("max_retries", 3)
+    out_dir = OUTPUT_DIR / account_name
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    link = article.get("link", "")
+    title = article.get("title", f"article_{index + 1}")
+
+    with _download_lock:
+        _download_tasks[task_id]["current"] = title
+
+    if not link:
+        with _download_lock:
+            _download_tasks[task_id]["failed"] += 1
+            _download_tasks[task_id]["results"].append({
+                "title": title, "success": False, "error": "无链接"
+            })
+        return
+
+    success = False
+    error_msg = ""
+    result = {}
+    for _ in range(max_retries):
+        try:
+            result = download_single_article(link, out_dir, title)
+            if result.get("success"):
+                success = True
+                break
+            error_msg = result.get("error", "未知错误")
+        except Exception as e:
+            error_msg = str(e)
+        time.sleep(1)
+
+    if result.get("title"):
+        title = result["title"]
+    downloaded_path = result.get("path") if success else None
+
+    with _download_lock:
+        if success:
+            _download_tasks[task_id]["completed"] += 1
+            _download_tasks[task_id]["results"].append({
+                "title": title, "success": True, "path": downloaded_path or str(out_dir / title)
+            })
+        else:
+            _download_tasks[task_id]["failed"] += 1
+            _download_tasks[task_id]["results"].append({
+                "title": title, "success": False, "error": error_msg
+            })
+
+    history.append({
+        "title": title,
+        "link": link,
+        "account": account_name,
+        "success": success,
+        "time": time.time(),
+        "error": error_msg if not success else None,
+        "path": downloaded_path,
+    })
+
+
+def _do_range_download(
+    task_id: str,
+    fakeid: str,
+    account_name: str,
+    start_time: int,
+    end_time: int,
+    keyword: str,
+    page_size: int,
+):
+    """分页拉取文章，下载时间范围内文章，遇到更早文章后停止。"""
+    settings = get_settings()
+    delay = settings.get("request_delay", 0.8)
+    history = load_json(DOWNLOAD_HISTORY_FILE, [])
+    begin = 0
+    downloaded_index = 0
+    stop = False
+
+    try:
+        while not stop:
+            with _download_lock:
+                task = _download_tasks.get(task_id, {})
+                if task.get("cancel_requested") or task.get("status") == "cancelling":
+                    task["status"] = "cancelled"
+                    task["current"] = ""
+                    task["end_time"] = time.time()
+                    task["stop_reason"] = task.get("stop_reason") or "用户请求停止"
+                    save_json(DOWNLOAD_HISTORY_FILE, history)
+                    return
+                task["current"] = f"正在获取第 {begin // page_size + 1} 页"
+
+            articles, total_count = _fetch_articles_page(fakeid, begin, page_size, keyword)
+            if not articles:
+                stop = True
+                with _download_lock:
+                    _download_tasks[task_id]["stop_reason"] = "没有更多文章"
+                break
+
+            with _download_lock:
+                _download_tasks[task_id]["scanned"] += len(articles)
+
+            for article in articles:
+                article_time = article.get("update_time") or 0
+                if article_time > end_time:
+                    continue
+                if article_time < start_time:
+                    stop = True
+                    with _download_lock:
+                        _download_tasks[task_id]["stop_reason"] = "已到达所选时间范围之前的文章"
+                    break
+
+                with _download_lock:
+                    task = _download_tasks.get(task_id, {})
+                    if task.get("cancel_requested") or task.get("status") == "cancelling":
+                        task["status"] = "cancelled"
+                        task["current"] = ""
+                        task["end_time"] = time.time()
+                        task["stop_reason"] = task.get("stop_reason") or "用户请求停止"
+                        save_json(DOWNLOAD_HISTORY_FILE, history)
+                        return
+                    task["total"] += 1
+
+                _download_article_into_task(task_id, article, account_name, history, downloaded_index)
+                downloaded_index += 1
+                time.sleep(delay)
+
+            begin += page_size
+            if total_count and begin >= total_count:
+                with _download_lock:
+                    _download_tasks[task_id]["stop_reason"] = "已扫描全部文章"
+                break
+
+        save_json(DOWNLOAD_HISTORY_FILE, history)
+        with _download_lock:
+            task = _download_tasks[task_id]
+            if task["status"] not in ("cancelled",):
+                task["status"] = "completed"
+            task["current"] = ""
+            task["end_time"] = time.time()
+
+    except PermissionError as e:
+        save_json(DOWNLOAD_HISTORY_FILE, history)
+        with _download_lock:
+            task = _download_tasks[task_id]
+            task["status"] = "failed"
+            task["current"] = ""
+            task["stop_reason"] = str(e)
+            task["end_time"] = time.time()
+    except Exception as e:
+        save_json(DOWNLOAD_HISTORY_FILE, history)
+        with _download_lock:
+            task = _download_tasks[task_id]
+            task["status"] = "failed"
+            task["current"] = ""
+            task["stop_reason"] = str(e)
+            task["end_time"] = time.time()
 
 
 @articles_bp.route("/open-folder", methods=["POST"])

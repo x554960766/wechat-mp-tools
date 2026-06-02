@@ -59,30 +59,12 @@ const DownloadPage = {
                         <span>失败: <strong id="url-download-failed">0</strong></span>
                         <span>总计: <strong id="url-download-total">0</strong></span>
                     </div>
-                    <div id="url-download-results" style="margin-top: 16px; max-height: 300px; overflow-y: auto;"></div>
-                </div>
-            </div>
-
-            <!-- 下载历史 -->
-            <div class="card" style="margin-top: var(--spacing-lg);">
-                <div class="card-header">
-                    <h3 class="card-title">📋 下载历史</h3>
-                    <div class="btn-group">
-                        <button class="btn btn-primary btn-sm" onclick="DownloadPage.openFolder()">📂 打开下载目录</button>
-                        <button class="btn btn-secondary btn-sm" onclick="DownloadPage.clearHistory()">清空历史</button>
-                    </div>
-                </div>
-                <div id="download-history">
-                    <div class="loading-screen" style="min-height: 100px;">
-                        <div class="spinner"></div>
+                    <div id="url-download-note" style="margin-top: 12px; color: var(--text-muted); font-size: 0.85rem;">
+                        下载完成后可在“下载历史”中查看文件列表。
                     </div>
                 </div>
             </div>
         `;
-    },
-
-    async init() {
-        await this.loadHistory();
     },
 
     destroy() {
@@ -140,7 +122,6 @@ const DownloadPage = {
                 if (task.status === 'completed' || task.status === 'failed') {
                     clearInterval(this._pollTimer);
                     this._pollTimer = null;
-                    await this.loadHistory();
                 }
             } catch (err) {
                 clearInterval(this._pollTimer);
@@ -171,15 +152,9 @@ const DownloadPage = {
             badge.textContent = '失败';
         }
 
-        const resultsContainer = document.getElementById('url-download-results');
-        if (task.results && task.results.length > 0) {
-            resultsContainer.innerHTML = task.results.map(r => `
-                <div class="download-result-item ${r.success ? 'success' : 'failed'}">
-                    <span>${r.success ? '✅' : '❌'}</span>
-                    <span style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${r.title}</span>
-                    ${r.error ? `<span style="font-size: 0.75rem; color: var(--text-muted);">${r.error}</span>` : ''}
-                </div>
-            `).join('');
+        const note = document.getElementById('url-download-note');
+        if (note && task.status === 'completed') {
+            note.innerHTML = '下载完成。请到 <a href="#history" style="color: var(--primary); text-decoration: none;">下载历史</a> 查看文件列表。';
         }
     },
 
@@ -197,52 +172,6 @@ const DownloadPage = {
         }
     },
 
-    async loadHistory() {
-        const container = document.getElementById('download-history');
-        if (!container) return;
-
-        try {
-            const data = await API.articles.history();
-            const history = data.history || [];
-
-            if (history.length === 0) {
-                container.innerHTML = `
-                    <div style="text-align: center; color: var(--text-muted); padding: 20px;">
-                        暂无下载历史
-                    </div>
-                `;
-                return;
-            }
-
-            container.innerHTML = `
-                <div class="history-list">
-                    ${history.slice(0, 30).map(item => {
-                        const time = item.time
-                            ? new Date(item.time * 1000).toLocaleString('zh-CN')
-                            : '';
-                        return `
-                            <div class="history-item" style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-                                <div style="display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0;">
-                                    <span class="history-status">${item.success ? '✅' : '❌'}</span>
-                                    <span class="history-title" style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${item.title}">${item.title}</span>
-                                    <span style="font-size: 0.78rem; color: var(--text-muted); flex-shrink: 0;">${item.account || ''}</span>
-                                    <span class="history-time" style="flex-shrink: 0;">${time}</span>
-                                </div>
-                                ${item.success && item.path ? `
-                                    <button class="btn btn-secondary btn-sm" onclick="DownloadPage.openFile('${item.path.replace(/\\/g, '\\\\')}')" style="padding: 2px 8px; font-size: 0.75rem; flex-shrink: 0;">
-                                        📂 打开目录
-                                    </button>
-                                ` : ''}
-                            </div>
-                        `;
-                    }).join('')}
-                </div>
-            `;
-        } catch (err) {
-            container.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 20px;">加载失败</div>';
-        }
-    },
-
     async openFolder() {
         try {
             await API.articles.openFolder();
@@ -252,28 +181,4 @@ const DownloadPage = {
         }
     },
 
-    async openFile(path) {
-        if (!path) {
-            Toast.warning('无效的路径');
-            return;
-        }
-        try {
-            await API.articles.openFile(path);
-            Toast.success('正在打开...');
-        } catch (err) {
-            // shown by API
-        }
-    },
-
-    async clearHistory() {
-        Modal.confirm('清空历史', '确定要清空所有下载历史记录吗？', async () => {
-            try {
-                await API.articles.clearHistory();
-                Toast.success('历史已清空');
-                await DownloadPage.loadHistory();
-            } catch (err) {
-                // shown by API
-            }
-        });
-    },
 };

@@ -17,6 +17,8 @@ from backend.config import (
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
+LOGIN_VALID_SECONDS = 4 * 24 * 60 * 60
+
 # 登录状态管理
 _login_state = {
     "status": "idle",       # idle / scanning / success / failed
@@ -28,12 +30,62 @@ _login_lock = threading.Lock()
 _active_browser = None      # 当前活跃的后台 Playwright 浏览器实例
 
 
+def _find_qrcode_element(page):
+    """Locate the visible WeChat login QR code across page variants."""
+    selectors = [
+        ".login__qrcode",
+        ".login_qrcode",
+        "[class*='qrcode'] img",
+        "[class*='qr'] img",
+        "img[src*='qrcode']",
+        "img",
+        "[class*='qrcode']",
+        "[class*='qr']",
+    ]
+
+    deadline = time.time() + 30
+    while time.time() < deadline:
+        for selector in selectors:
+            locator = page.locator(selector)
+            try:
+                count = locator.count()
+            except Exception:
+                continue
+
+            for index in range(min(count, 10)):
+                element = locator.nth(index)
+                try:
+                    box = element.bounding_box(timeout=1000)
+                    if not box:
+                        continue
+                    if box["width"] >= 80 and box["height"] >= 80:
+                        return element
+                except Exception:
+                    continue
+        time.sleep(0.5)
+
+    return None
+
+
 def _set_login_state(status: str, message: str = "", progress: int = 0, qrcode: str = ""):
     with _login_lock:
         _login_state["status"] = status
         _login_state["message"] = message
         _login_state["progress"] = progress
         _login_state["qrcode"] = qrcode
+
+
+def _credential_expiry(save_time: float) -> dict:
+    now = time.time()
+    expires_at = save_time + LOGIN_VALID_SECONDS if save_time else 0
+    remaining_seconds = max(0, int(expires_at - now)) if expires_at else 0
+    expired = not save_time or remaining_seconds <= 0
+    return {
+        "valid_days": 4,
+        "expires_at": expires_at,
+        "remaining_seconds": remaining_seconds,
+        "expired": expired,
+    }
 
 
 @auth_bp.route("/status", methods=["GET"])
@@ -58,17 +110,26 @@ def get_status():
             "message": "凭证不完整，请重新登录"
         })
 
-    # 检查凭证是否过期（粗略判断：超过 3 天提示可能过期）
-    elapsed = time.time() - save_time if save_time else float('inf')
-    may_expired = elapsed > 3 * 86400
+    expiry = _credential_expiry(save_time)
+    if expiry["expired"]:
+        return jsonify({
+            "logged_in": False,
+            "login_state": _login_state,
+            "token_preview": token[:8] + "...",
+            "save_time": save_time,
+            "may_expired": True,
+            **expiry,
+            "message": "登录已过期，请重新扫码登录"
+        })
 
     return jsonify({
         "logged_in": True,
         "login_state": _login_state,
         "token_preview": token[:8] + "...",
         "save_time": save_time,
-        "may_expired": may_expired,
-        "message": "凭证可能已过期，建议重新登录" if may_expired else "登录有效"
+        "may_expired": False,
+        **expiry,
+        "message": "登录有效"
     })
 
 
@@ -140,9 +201,9 @@ def _do_login():
 
             # 获取并截图二维码元素
             try:
-                qr_elem = page.wait_for_selector(".login__qrcode", timeout=20000)
+                qr_elem = _find_qrcode_element(page)
                 if not qr_elem:
-                    raise Exception("未能定位到登录二维码元素 (.login__qrcode)")
+                    raise Exception("未能定位到登录二维码元素")
                 
                 import base64
                 qr_bytes = qr_elem.screenshot(timeout=10000)

@@ -4,6 +4,22 @@
 const LoginPage = {
     _pollTimer: null,
 
+    formatDate(timestamp) {
+        return timestamp
+            ? new Date(timestamp * 1000).toLocaleString('zh-CN')
+            : '未知';
+    },
+
+    formatRemaining(seconds) {
+        if (!seconds || seconds <= 0) return '已过期';
+        const days = Math.floor(seconds / 86400);
+        const hours = Math.floor((seconds % 86400) / 3600);
+        const minutes = Math.floor((seconds % 3600) / 60);
+        if (days > 0) return `${days}天 ${hours}小时`;
+        if (hours > 0) return `${hours}小时 ${minutes}分钟`;
+        return `${Math.max(1, minutes)}分钟`;
+    },
+
     render() {
         return `
             <div class="page-header">
@@ -76,14 +92,14 @@ const LoginPage = {
         if (!container) return;
 
         if (data.logged_in) {
-            const saveTime = data.save_time
-                ? new Date(data.save_time * 1000).toLocaleString('zh-CN')
-                : '未知';
+            const saveTime = this.formatDate(data.save_time);
+            const expiresAt = this.formatDate(data.expires_at);
+            const remaining = this.formatRemaining(data.remaining_seconds);
 
             container.innerHTML = `
                 <div class="login-info-row">
                     <span class="login-info-label">状态</span>
-                    <span class="badge ${data.may_expired ? 'badge-warning' : 'badge-success'}">${data.may_expired ? '可能已过期' : '已登录'}</span>
+                    <span class="badge badge-success">已登录</span>
                 </div>
                 <div class="login-info-row">
                     <span class="login-info-label">Token</span>
@@ -92,6 +108,14 @@ const LoginPage = {
                 <div class="login-info-row">
                     <span class="login-info-label">登录时间</span>
                     <span class="login-info-value">${saveTime}</span>
+                </div>
+                <div class="login-info-row">
+                    <span class="login-info-label">到期时间</span>
+                    <span class="login-info-value">${expiresAt}</span>
+                </div>
+                <div class="login-info-row">
+                    <span class="login-info-label">剩余时间</span>
+                    <span class="login-info-value" style="color: var(--error); font-weight: 600;">${remaining}</span>
                 </div>
                 <div class="login-info-row">
                     <span class="login-info-label">提示</span>
@@ -115,7 +139,27 @@ const LoginPage = {
 
         } else {
             const loginState = data.login_state || {};
-            if (loginState.status === 'scanning') {
+            if (data.expired) {
+                const saveTime = this.formatDate(data.save_time);
+                const expiresAt = this.formatDate(data.expires_at);
+
+                container.innerHTML = `
+                    <div style="text-align: center;">
+                        <p style="color: var(--warning); font-weight: 600; margin-bottom: 12px;">登录已过期，请重新扫码登录</p>
+                        <div class="login-info-row">
+                            <span class="login-info-label">上次登录</span>
+                            <span class="login-info-value">${saveTime}</span>
+                        </div>
+                        <div class="login-info-row">
+                            <span class="login-info-label">到期时间</span>
+                            <span class="login-info-value">${expiresAt}</span>
+                        </div>
+                        <button class="btn btn-primary" style="margin-top: 16px;" onclick="LoginPage.startLogin()">
+                            重新登录
+                        </button>
+                    </div>
+                `;
+            } else if (loginState.status === 'scanning') {
                 container.innerHTML = `
                     <div style="text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px 0;">
                         ${loginState.qrcode ? `

@@ -889,6 +889,43 @@ body {
 }
 
 /* ── 文章列表项 ────────────────────────────────────────── */
+.article-controls {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+    padding: var(--spacing-md);
+    margin-bottom: var(--spacing-md);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: var(--bg-card);
+}
+
+.article-control-row {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    flex-wrap: wrap;
+}
+
+.article-date-row .form-input {
+    width: auto;
+    min-width: 150px;
+    padding: 6px var(--spacing-sm);
+}
+
+.article-date-label,
+.article-date-separator {
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+}
+
+.article-mode-switch {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    margin-left: auto;
+}
+
 .article-item {
     display: flex;
     gap: var(--spacing-md);
@@ -937,6 +974,12 @@ body {
 .article-info {
     flex: 1;
     min-width: 0;
+}
+
+.article-actions {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
 }
 
 .article-title {

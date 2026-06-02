@@ -61,7 +61,7 @@ pip install pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 下载会被打包进程序的 Chromium 浏览器
 $env:PLAYWRIGHT_BROWSERS_PATH="ms-playwright"
-python -m playwright install chromium
+python -m playwright install chromium chromium-headless-shell
 ```
 
 ### 3. 一键编译打包
@@ -85,6 +85,11 @@ pyinstaller wechat_mp_tools.spec
 
 ### 1. Windows 用户还需要安装 Python 或浏览器吗？
 不需要。GitHub Actions 产物会把 Python 运行时、项目依赖和 Playwright Chromium 一起放进 `WeChat MP Tools` 文件夹。
+
+本地源码运行时如果提示 `chromium_headless_shell` 不存在，请在项目目录执行：
+```bash
+python3 -m playwright install chromium chromium-headless-shell
+```
 
 ### 2. macOS 下载后打不开？
 没有 Apple Developer ID 签名时，macOS 可能拦截首次运行。请右键 `WeChat MP Tools.app`，选择“打开”。如果是启动后秒退，请查看 `.app` 同级目录下的 `wechat_mp_tools.log`。

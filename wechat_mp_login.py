@@ -3,7 +3,7 @@
 微信公众号后台自动登录工具
 运行后浏览器打开微信公众平台 → 扫码 → 自动保存 cookie + token
 
-依赖：pip install playwright && playwright install chromium
+依赖：pip install playwright && python3 -m playwright install chromium chromium-headless-shell
 保存路径：脚本所在目录 / data / wechat_mp_config.json
 """
 

@@ -28,7 +28,7 @@ wechat-mp-tools/
 ```bash
 cd /Users/apple/Downloads/wechat-mp-tools
 pip install playwright requests scrapling "scrapling[fetchers]"
-playwright install chromium
+python3 -m playwright install chromium chromium-headless-shell
 
 python3 wechat_mp_login.py
 ```
