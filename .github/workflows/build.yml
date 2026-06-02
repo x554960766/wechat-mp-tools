@@ -69,7 +69,8 @@ jobs:
       - name: Build macOS APP
         run: |
           pyinstaller wechat_mp_tools.spec
-          codesign --force --deep --sign - "dist/WeChat MP Tools.app"
+          # codesign --deep often fails on nested Chromium symlinks. If it fails, we ignore it as PyInstaller's built-in ad-hoc signing is sufficient.
+          codesign --force --deep --sign - "dist/WeChat MP Tools.app" || true
 
       - name: Compress Build Result
         run: |
