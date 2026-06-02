@@ -76,15 +76,37 @@ const App = {
 
     async checkAuthStatus() {
         try {
-            const data = await API.auth.status();
-            this.updateLoginStatus(data.logged_in, data.expired || data.may_expired);
+            // 微信登录状态
+            const wechatData = await API.auth.status();
+            
+            // 抖音登录状态
+            const dyRes = await fetch('/api/douyin-auth/status');
+            const dyData = await dyRes.json();
+            
+            const prevLoggedIn = this.isDouyinLoggedIn;
+            this.isDouyinLoggedIn = !!dyData.logged_in;
+            this.douyinAccountInfo = dyData.account_info || null;
+            
+            this.updateLoginStatus(
+                wechatData.logged_in, 
+                wechatData.expired || wechatData.may_expired,
+                this.isDouyinLoggedIn
+            );
+
+            if (this.isDouyinLoggedIn && !prevLoggedIn) {
+                const promptEl = document.getElementById('dy-login-prompt-page');
+                if (promptEl && promptEl.style.display === 'block') {
+                    promptEl.style.display = 'none';
+                    Router.refreshCurrent();
+                }
+            }
         } catch (err) {
             console.error('Failed to fetch auth status:', err);
-            this.updateLoginStatus(false);
+            this.updateLoginStatus(false, false, false);
         }
     },
 
-    updateLoginStatus(loggedIn, mayExpired = false) {
+    updateLoginStatus(loggedIn, mayExpired = false, dyLoggedIn = false) {
         const wechatDot = document.getElementById('login-status-dot');
         const wechatIndicator = document.getElementById('status-indicator');
         const wechatText = document.getElementById('status-text');
@@ -92,27 +114,28 @@ const App = {
         const dyIndicator = document.getElementById('dy-status-indicator');
         const dyText = document.getElementById('dy-status-text');
 
+        // 更新微信状态显示
         if (loggedIn) {
             if (mayExpired) {
                 if (wechatIndicator) wechatIndicator.className = 'status-dot expired';
                 if (wechatText) wechatText.textContent = '登录过期';
                 if (wechatDot) wechatDot.style.backgroundColor = 'var(--warning)';
-
-                if (dyIndicator) dyIndicator.className = 'status-dot warning';
-                if (dyText) dyText.textContent = 'Cookie 可能已过期';
             } else {
                 if (wechatIndicator) wechatIndicator.className = 'status-dot online';
                 if (wechatText) wechatText.textContent = '已登录';
                 if (wechatDot) wechatDot.style.backgroundColor = 'var(--success)';
-
-                if (dyIndicator) dyIndicator.className = 'status-dot online';
-                if (dyText) dyText.textContent = 'Cookie 已配置';
             }
         } else {
             if (wechatIndicator) wechatIndicator.className = 'status-dot offline';
             if (wechatText) wechatText.textContent = '未登录';
             if (wechatDot) wechatDot.style.backgroundColor = 'transparent';
+        }
 
+        // 更新抖音状态显示
+        if (dyLoggedIn) {
+            if (dyIndicator) dyIndicator.className = 'status-dot online';
+            if (dyText) dyText.textContent = 'Cookie 已配置';
+        } else {
             if (dyIndicator) dyIndicator.className = 'status-dot warning';
             if (dyText) dyText.textContent = '需要登录 Cookie';
         }

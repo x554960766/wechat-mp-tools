@@ -25,6 +25,86 @@ _dy_login_lock = threading.Lock()
 _active_browser = None
 
 
+# ── 抖音凭证验证缓存 ──────────────────────────────────────────
+_douyin_cache = {
+    "cookie": "",
+    "valid": False,
+    "account_info": None,
+    "last_check": 0.0
+}
+_douyin_cache_lock = threading.Lock()
+
+def validate_douyin_cached(cookie_str: str) -> dict | None:
+    """带 5 分钟内存缓存的抖音 Cookie 验证器"""
+    global _douyin_cache
+    
+    if not cookie_str or "sessionid" not in cookie_str:
+        return None
+        
+    now = time.time()
+    with _douyin_cache_lock:
+        # 如果 Cookie 相同且距离上次检查小于 300 秒，直接返回缓存结果
+        if _douyin_cache["cookie"] == cookie_str and (now - _douyin_cache["last_check"]) < 300.0:
+            return _douyin_cache["account_info"] if _douyin_cache["valid"] else None
+
+    # 执行真实网络请求校验
+    try:
+        import requests as req
+        from backend.config import get_proxies_dict
+        
+        session = req.Session()
+        session.headers.update({
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": "https://www.douyin.com/",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36",
+            "Cookie": cookie_str
+        })
+        proxies = get_proxies_dict()
+        if proxies:
+            session.proxies.update(proxies)
+            
+        resp = session.get("https://www.douyin.com/aweme/v1/web/user/profile/self/", timeout=8)
+        if resp.status_code == 200 and len(resp.content) > 0:
+            data = resp.json()
+            if data.get("status_code") == 0 and "user" in data:
+                user = data["user"]
+                
+                # 提取最高清的头像
+                avatar = ""
+                for size_key in ["avatar_thumb", "avatar_larger", "avatar_medium"]:
+                    size_dict = user.get(size_key, {})
+                    if size_dict and size_dict.get("url_list"):
+                        avatar = size_dict["url_list"][0]
+                        break
+                        
+                account_info = {
+                    "nickname": user.get("nickname", "未知用户"),
+                    "avatar": avatar,
+                    "unique_id": user.get("unique_id") or user.get("short_id") or "",
+                    "signature": user.get("signature", ""),
+                    "sec_uid": user.get("sec_uid", "")
+                }
+                
+                # 写入缓存
+                with _douyin_cache_lock:
+                    _douyin_cache["cookie"] = cookie_str
+                    _douyin_cache["valid"] = True
+                    _douyin_cache["account_info"] = account_info
+                    _douyin_cache["last_check"] = now
+                return account_info
+    except Exception as e:
+        print(f"Failed to validate Douyin Cookie: {e}")
+        
+    # 验证失败，写入缓存为失效
+    with _douyin_cache_lock:
+        _douyin_cache["cookie"] = cookie_str
+        _douyin_cache["valid"] = False
+        _douyin_cache["account_info"] = None
+        _douyin_cache["last_check"] = now
+    return None
+
+
 def _set_login_state(status: str, message: str = "", progress: int = 0, qrcode: str = ""):
     with _dy_login_lock:
         _dy_login_state["status"] = status
@@ -46,19 +126,43 @@ def get_status():
             "message": "未登录，请先登录抖音"
         })
 
-    # 判断 Cookie 有效性（此处简单判断有无 sessionid）
-    if "sessionid" in cookie:
+    # 进行真实的网络校验
+    account_info = validate_douyin_cached(cookie)
+    if account_info:
         return jsonify({
             "logged_in": True,
             "login_state": _dy_login_state,
-            "message": "登录有效"
+            "message": "登录有效",
+            "account_info": account_info
         })
     else:
+        # Cookie 已失效，自动清除
+        settings["douyin_cookie"] = ""
+        save_settings(settings)
         return jsonify({
             "logged_in": False,
             "login_state": _dy_login_state,
-            "message": "凭证失效或不完整，请重新登录"
+            "message": "凭证已失效或过期，请重新登录"
         })
+
+
+@douyin_login_bp.route("/logout", methods=["POST"])
+def logout():
+    """清除抖音登录凭证"""
+    settings = get_settings()
+    if "douyin_cookie" in settings:
+        settings["douyin_cookie"] = ""
+        save_settings(settings)
+    
+    # 清空缓存
+    global _douyin_cache
+    with _douyin_cache_lock:
+        _douyin_cache["cookie"] = ""
+        _douyin_cache["valid"] = False
+        _douyin_cache["account_info"] = None
+        _douyin_cache["last_check"] = 0.0
+        
+    return jsonify({"message": "已清除登录 Cookie"})
 
 
 @douyin_login_bp.route("/login", methods=["POST"])

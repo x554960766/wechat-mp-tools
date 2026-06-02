@@ -57,6 +57,73 @@ const Router = {
             return;
         }
 
+        // 抖音未登录页面访问限制拦截
+        const requiresDyLogin = ['dy_dashboard', 'dy_search', 'dy_user', 'dy_recommend', 'dy_downloads', 'dy_liked', 'dy_collections'].includes(pageKey);
+        const promptEl = document.getElementById('dy-login-prompt-page');
+        const hasParams = hash.includes('?');
+        
+        // 含有动态参数的路由（如 ?sec_uid= 或 ?fakeid=）每次重新渲染，避免缓存导致页面内容不更新
+        if (hasParams && this.pageCache[pageKey]) {
+            if (this.pageCache[pageKey].el) {
+                this.pageCache[pageKey].el.remove();
+            }
+            delete this.pageCache[pageKey];
+        }
+
+        if (requiresDyLogin && !App.isDouyinLoggedIn) {
+            this.currentPage = null;
+            this.currentKey = pageKey;
+            this.updateNavUI(pageKey);
+            
+            const container = document.getElementById('page-container');
+            if (container) {
+                Array.from(container.children).forEach(child => {
+                    if (!child.classList.contains('route-page')) child.remove();
+                });
+                
+                Object.values(this.pageCache).forEach(entry => {
+                    if (entry.el) entry.el.style.display = 'none';
+                });
+                
+                if (promptEl) {
+                    promptEl.style.display = 'block';
+                    container.prepend(promptEl);
+                } else {
+                    const newPromptEl = document.createElement('div');
+                    newPromptEl.id = 'dy-login-prompt-page';
+                    newPromptEl.className = 'route-page';
+                    newPromptEl.innerHTML = `
+                        <div class="empty-state animate-fade-in" style="padding: 80px 24px; text-align: center; max-width: 520px; margin: 60px auto; background: var(--bg-card); border-radius: 16px; border: 1px solid var(--border-color); box-shadow: var(--shadow-lg);">
+                            <div class="empty-state-icon" style="color: var(--warning); margin-bottom: 24px;">
+                                <svg viewBox="0 0 24 24" fill="none" width="80" height="80" style="display: inline-block;">
+                                    <path d="M12 2C6.48 2 2 6.48 2 12C2 17.52 6.48 22 12 22C17.52 22 22 17.52 22 12C22 6.48 17.52 2 12 2ZM12 5C13.66 5 15 6.34 15 8C15 9.66 13.66 11 12 11C10.34 11 9 9.66 9 8C9 6.34 10.34 5 12 5ZM12 19.2C9.5 19.2 7.29 17.92 6 15.98C6.03 13.99 10 12.9 12 12.9C13.99 12.9 17.97 13.99 18 15.98C16.71 17.92 14.5 19.2 12 19.2Z" fill="currentColor"/>
+                                </svg>
+                            </div>
+                            <h3 class="empty-state-title" style="font-size: 1.5rem; font-weight: 700; margin-bottom: 12px; color: var(--text-primary);">该页面需要登录抖音账号</h3>
+                            <p class="empty-state-desc" style="color: var(--text-secondary); margin-bottom: 32px; font-size: 0.95rem; line-height: 1.6;">
+                                当前您正在访问的页面包含抖音数据，需要有效登录凭证。<br>请先“扫码登录”以解锁全部功能。
+                            </p>
+                            <div style="display: flex; gap: 12px; justify-content: center;">
+                                <button class="btn btn-primary" onclick="Router.navigate('dy_login')" style="padding: 10px 24px; border-radius: 8px; font-weight: 500;">
+                                    🔑 扫码登录
+                                </button>
+                                <button class="btn btn-secondary" onclick="Router.navigate('dy_parse')" style="padding: 10px 24px; border-radius: 8px; font-weight: 500;">
+                                    🔗 解析链接
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                    container.prepend(newPromptEl);
+                }
+            }
+            return;
+        } else {
+            // 如果已登录或者是不需要登录的页面，隐藏提示卡片
+            if (promptEl) {
+                promptEl.style.display = 'none';
+            }
+        }
+
         this.currentPage = page;
         this.currentKey = pageKey;
 
