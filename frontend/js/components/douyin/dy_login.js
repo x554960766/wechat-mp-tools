@@ -118,6 +118,7 @@ const DyLoginComponent = {
     async checkStatus() {
         try {
             const data = await API.douyin.auth.status();
+            const logoutBtn = document.getElementById('btn-dy-logout');
 
             if (data.status === 'scanning') {
                 this.startBtn.disabled = true;
@@ -126,10 +127,34 @@ const DyLoginComponent = {
                 this.statusText.textContent = data.message || "请在浏览器窗口中扫码...";
                 this.statusText.style.color = "var(--primary)";
                 this.loginHint.style.display = 'block';
+                if (logoutBtn) logoutBtn.style.display = 'none';
             } else if (data.status === 'success') {
                 this.loginHint.style.display = 'none';
-                this.statusText.textContent = "✅ 登录成功！Cookie 已保存";
-                this.statusText.style.color = "var(--success)";
+                
+                const info = data.account_info || {};
+                this.statusText.innerHTML = `
+                    <div style="text-align: center; margin-bottom: var(--spacing-md);">
+                        <p style="color: var(--success); font-weight: 600; font-size: 1.2rem; margin-bottom: 20px;">✅ 抖音登录成功，Cookie 已就绪</p>
+                        ${info.nickname ? `
+                        <div class="douyin-profile-card animate-fade-in" style="display: flex; align-items: center; gap: 16px; max-width: 380px; margin: 0 auto; padding: 18px; background: rgba(29, 29, 31, 0.03); border-radius: 16px; border: 1px solid var(--border-color); text-align: left; box-shadow: var(--shadow-sm);">
+                            ${info.avatar ? `
+                                <img src="${info.avatar}" alt="Avatar" style="width: 64px; height: 64px; border-radius: 50%; border: 2px solid white; box-shadow: var(--shadow-sm); object-fit: cover;" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" />
+                                <div style="display: none; width: 64px; height: 64px; border-radius: 50%; background: #fe2c55; color: white; align-items: center; justify-content: center; font-size: 1.8rem; font-weight: 800; border: 2px solid white; box-shadow: var(--shadow-sm);">${info.nickname.charAt(0)}</div>
+                            ` : `
+                                <div style="width: 64px; height: 64px; border-radius: 50%; background: #fe2c55; color: white; display: flex; align-items: center; justify-content: center; font-size: 1.8rem; font-weight: 800; border: 2px solid white; box-shadow: var(--shadow-sm);">${info.nickname.charAt(0)}</div>
+                            `}
+                            <div style="flex: 1; overflow: hidden;">
+                                <h4 style="margin: 0; font-size: 1.2rem; font-weight: 800; color: var(--text-primary); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;">${info.nickname}</h4>
+                                <p style="margin: 4px 0 0 0; font-size: 0.82rem; color: var(--text-muted);">抖音号: ${info.unique_id || '未设定'}</p>
+                                ${info.signature ? `<p style="margin: 4px 0 0 0; font-size: 0.78rem; color: var(--text-secondary); text-overflow: ellipsis; overflow: hidden; white-space: nowrap;" title="${info.signature}">${info.signature}</p>` : ''}
+                            </div>
+                        </div>
+                        ` : `
+                        <p style="color: var(--text-secondary);">登录凭证有效，但未能获取个人资料</p>
+                        `}
+                    </div>
+                `;
+                this.statusText.style.color = "var(--text-primary)";
                 this.startBtn.disabled = false;
                 this.startBtn.innerHTML = `
                     <svg viewBox="0 0 24 24" fill="none" style="width: 20px; height: 20px; margin-right: 8px; display: inline-block; vertical-align: text-bottom;">
@@ -141,6 +166,28 @@ const DyLoginComponent = {
                 `;
                 this.cancelBtn.style.display = 'none';
 
+                // 显示一键退出登录按钮
+                if (!logoutBtn) {
+                    const newLogoutBtn = document.createElement('button');
+                    newLogoutBtn.id = 'btn-dy-logout';
+                    newLogoutBtn.className = 'btn btn-danger';
+                    newLogoutBtn.style.padding = '12px 32px';
+                    newLogoutBtn.style.fontSize = '1.1rem';
+                    newLogoutBtn.style.borderRadius = '8px';
+                    newLogoutBtn.innerHTML = `
+                        <svg viewBox="0 0 24 24" fill="none" style="width: 20px; height: 20px; margin-right: 8px; display: inline-block; vertical-align: text-bottom;">
+                            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            <polyline points="16 17 21 12 16 7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            <line x1="21" y1="12" x2="9" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                        退出登录
+                    `;
+                    newLogoutBtn.addEventListener('click', () => this.logout());
+                    this.startBtn.parentNode.appendChild(newLogoutBtn);
+                } else {
+                    logoutBtn.style.display = 'inline-flex';
+                }
+
                 if (this.statusTimer) {
                     clearInterval(this.statusTimer);
                     this.statusTimer = null;
@@ -150,14 +197,13 @@ const DyLoginComponent = {
                 if (window.App && typeof App.checkAuthStatus === 'function') {
                     App.checkAuthStatus();
                 }
-
-                Toast.show('登录成功！', 'success');
             } else if (data.status === 'error' || data.status === 'expired') {
                 this.loginHint.style.display = 'none';
                 this.statusText.textContent = `❌ ${data.message}`;
                 this.statusText.style.color = "var(--error)";
                 this.startBtn.disabled = false;
                 this.cancelBtn.style.display = 'none';
+                if (logoutBtn) logoutBtn.style.display = 'none';
 
                 if (this.statusTimer) {
                     clearInterval(this.statusTimer);
@@ -169,6 +215,7 @@ const DyLoginComponent = {
                 this.statusText.style.color = "var(--text-secondary)";
                 this.startBtn.disabled = false;
                 this.cancelBtn.style.display = 'none';
+                if (logoutBtn) logoutBtn.style.display = 'none';
 
                 if (this.statusTimer) {
                     clearInterval(this.statusTimer);
@@ -179,10 +226,51 @@ const DyLoginComponent = {
                 this.loginHint.style.display = 'none';
                 this.startBtn.disabled = false;
                 this.cancelBtn.style.display = 'none';
+                if (logoutBtn) logoutBtn.style.display = 'none';
             }
         } catch (err) {
             console.error('Check dy auth status error:', err);
         }
+    },
+
+    async logout() {
+        Modal.confirm('退出抖音登录', '确定要退出抖音登录吗？退出后需要重新扫码获取 Cookie。', async () => {
+            try {
+                const logoutBtn = document.getElementById('btn-dy-logout');
+                if (logoutBtn) logoutBtn.disabled = true;
+                
+                const res = await fetch('/api/douyin-auth/logout', { method: 'POST' });
+                const data = await res.json();
+                
+                Toast.show(data.message, 'success');
+                
+                // 重置 UI 到 idle
+                this.statusText.innerHTML = "点击下方按钮开始登录流程";
+                this.statusText.style.color = "var(--text-secondary)";
+                this.startBtn.disabled = false;
+                this.startBtn.innerHTML = `
+                    <svg viewBox="0 0 24 24" fill="none" style="width: 20px; height: 20px; margin-right: 8px; display: inline-block; vertical-align: text-bottom;">
+                        <path d="M15 3H19C20.1 3 21 3.9 21 5V19C21 20.1 20.1 21 19 21H15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <polyline points="10,17 15,12 10,7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <line x1="15" y1="12" x2="3" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    开始扫码登录
+                `;
+                if (logoutBtn) {
+                    logoutBtn.style.display = 'none';
+                    logoutBtn.disabled = false;
+                }
+                
+                // 刷新全局状态
+                if (window.App && typeof App.checkAuthStatus === 'function') {
+                    await App.checkAuthStatus();
+                }
+            } catch (err) {
+                Toast.show(err.message, 'error');
+                const logoutBtn = document.getElementById('btn-dy-logout');
+                if (logoutBtn) logoutBtn.disabled = false;
+            }
+        });
     },
 
     destroy() {

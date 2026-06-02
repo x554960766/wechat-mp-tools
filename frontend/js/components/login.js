@@ -97,6 +97,21 @@ const LoginPage = {
             const remaining = this.formatRemaining(data.remaining_seconds);
 
             container.innerHTML = `
+                ${data.account_info && data.account_info.nickname ? `
+                <div class="wechat-profile-card animate-fade-in" style="display: flex; align-items: center; gap: 16px; margin-bottom: 24px; padding: 16px; background: rgba(7, 193, 96, 0.05); border-radius: 12px; border: 1px solid rgba(7, 193, 96, 0.15); text-align: left;">
+                    ${data.account_info.avatar ? `
+                        <img src="${data.account_info.avatar}" alt="Avatar" style="width: 56px; height: 56px; border-radius: 50%; border: 2px solid white; box-shadow: var(--shadow-sm); object-fit: cover;" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" />
+                        <div style="display: none; width: 56px; height: 56px; border-radius: 50%; background: #07c160; color: white; align-items: center; justify-content: center; font-size: 1.5rem; font-weight: 700; border: 2px solid white; box-shadow: var(--shadow-sm);">${data.account_info.nickname.charAt(0)}</div>
+                    ` : `
+                        <div style="width: 56px; height: 56px; border-radius: 50%; background: #07c160; color: white; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; font-weight: 700; border: 2px solid white; box-shadow: var(--shadow-sm);">${data.account_info.nickname.charAt(0)}</div>
+                    `}
+                    <div style="flex: 1;">
+                        <h4 style="margin: 0; font-size: 1.15rem; font-weight: 700; color: var(--text-primary);">${data.account_info.nickname}</h4>
+                        <span style="font-size: 0.82rem; color: #07c160; font-weight: 600; background: rgba(7, 193, 96, 0.1); padding: 2px 8px; border-radius: 10px; display: inline-block; margin-top: 4px;">微信公众号平台</span>
+                    </div>
+                </div>
+                ` : ''}
+
                 <div class="login-info-row">
                     <span class="login-info-label">状态</span>
                     <span class="badge badge-success">已登录</span>

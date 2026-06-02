@@ -110,6 +110,20 @@ def cancel_login():
 def check_status():
     """检查抖音登录状态"""
     with _login_lock:
+        status = _login_state["status"]
+        if status in ["idle", "cancelled", "expired", "error"]:
+            from backend.douyin_login import validate_douyin_cached
+            settings = get_settings()
+            cookie = settings.get("douyin_cookie", "")
+            if cookie:
+                info = validate_douyin_cached(cookie)
+                if info:
+                    return jsonify({
+                        "status": "success",
+                        "message": "登录有效",
+                        "cookie": cookie,
+                        "account_info": info
+                    })
         return jsonify(_login_state)
 
 

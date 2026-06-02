@@ -210,6 +210,10 @@ const SettingsPage = {
                 badge.style.color = 'var(--text-muted)';
                 badge.style.background = 'var(--bg-input)';
             }
+
+            if (window.App && typeof App.checkAuthStatus === 'function') {
+                App.checkAuthStatus();
+            }
         } catch(e) {
             badge.textContent = '状态检测失败';
         }

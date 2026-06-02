@@ -88,6 +88,64 @@ def _credential_expiry(save_time: float) -> dict:
     }
 
 
+import re
+
+def _fetch_wechat_account_info(token: str, cookie_str: str) -> dict | None:
+    """利用 requests 抓取微信公众号首页并解析账号信息"""
+    try:
+        import requests as req
+        from backend.config import DEFAULT_HEADERS, BASE_URL, get_proxies_dict
+        headers = {**DEFAULT_HEADERS, "Cookie": cookie_str}
+        proxies = get_proxies_dict()
+        resp = req.get(
+            f"{BASE_URL}/cgi-bin/home",
+            params={
+                "t": "home/index",
+                "lang": "zh_CN",
+                "token": token,
+            },
+            headers=headers,
+            proxies=proxies,
+            timeout=8
+        )
+        if resp.status_code == 200:
+            html = resp.text
+            nickname = ""
+            avatar = ""
+            
+            # 正则匹配昵称
+            nick_match = re.search(r'class="weui-desktop-account__nickname"[^>]*>([^<]+)<', html)
+            if nick_match:
+                nickname = nick_match.group(1).strip()
+            else:
+                nick_match2 = re.search(r'nickname\s*:\s*"([^"]+)"', html)
+                if nick_match2:
+                    nickname = nick_match2.group(1)
+                    
+            # 正则匹配头像
+            avatar_match = re.search(r'class="weui-desktop-account__avatar"[^>]*src="([^"]+)"', html)
+            if avatar_match:
+                avatar = avatar_match.group(1)
+            else:
+                avatar_match2 = re.search(r'avatar\s*:\s*"([^"]+)"', html)
+                if avatar_match2:
+                    avatar = avatar_match2.group(1)
+                    
+            if not nickname:
+                nick_match3 = re.search(r'<div class="weui-desktop-account__name">([^<]+)</div>', html)
+                if nick_match3:
+                    nickname = nick_match3.group(1).strip()
+                    
+            if nickname:
+                return {
+                    "nickname": nickname,
+                    "avatar": avatar
+                }
+    except Exception as e:
+        print(f"Failed to fetch WeChat account info: {e}")
+    return None
+
+
 @auth_bp.route("/status", methods=["GET"])
 def get_status():
     """获取登录状态"""
@@ -122,6 +180,14 @@ def get_status():
             "message": "登录已过期，请重新扫码登录"
         })
 
+    account_info = config.get("account_info", {})
+    if not account_info.get("nickname"):
+        fetched_info = _fetch_wechat_account_info(token, cookie_str)
+        if fetched_info:
+            account_info = fetched_info
+            config["account_info"] = account_info
+            save_json(CONFIG_FILE, config)
+
     return jsonify({
         "logged_in": True,
         "login_state": _login_state,
@@ -129,7 +195,8 @@ def get_status():
         "save_time": save_time,
         "may_expired": False,
         **expiry,
-        "message": "登录有效"
+        "message": "登录有效",
+        "account_info": account_info
     })
 
 
@@ -240,6 +307,21 @@ def _do_login():
                     _active_browser = None
                 return
 
+            # 提取公众号账号信息
+            nickname = ""
+            avatar = ""
+            try:
+                page.wait_for_selector(".weui-desktop-account__nickname", timeout=5000)
+                nickname = page.locator(".weui-desktop-account__nickname").inner_text()
+                avatar_elem = page.locator(".weui-desktop-account__avatar")
+                if avatar_elem.count() > 0:
+                    avatar = avatar_elem.first.get_attribute("src")
+            except Exception:
+                try:
+                    nickname = page.locator(".weui-desktop-account__name").first.inner_text()
+                except Exception:
+                    pass
+
             # 保存 cookies
             cookies = ctx.cookies()
             cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
@@ -249,6 +331,10 @@ def _do_login():
                 "cookie_str": cookie_str,
                 "cookies": cookies,
                 "save_time": time.time(),
+                "account_info": {
+                    "nickname": nickname,
+                    "avatar": avatar
+                }
             }
 
             DATA_DIR.mkdir(parents=True, exist_ok=True)
