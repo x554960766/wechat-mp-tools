@@ -41,6 +41,7 @@ hiddenimports = [
     'backend.downloader',
     'backend.sign',
     'backend.runtime',
+    'backend.channels',
     
     # pywebview 核心支持
     'webview',
