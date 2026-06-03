@@ -19,3 +19,17 @@ data/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Virtual environments
+venv*/
+
+# Claude agent config
+.claude/
+
+# Subtitle remover models and binaries
+backend/subtitle_remover/backend/models/
+backend/subtitle_remover/backend/ffmpeg/
+**/__pycache__/
+*.py[cod]
+
+

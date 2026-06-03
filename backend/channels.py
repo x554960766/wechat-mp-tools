@@ -400,6 +400,22 @@ def download_video():
                 if chunk:
                     f.write(chunk)
                     
+        # 写入全局下载历史记录数据库，使视频号下载立即出现在“下载历史”中，并能够快速导入转码
+        try:
+            from backend.config import load_json, save_json, DOWNLOAD_HISTORY_FILE
+            history = load_json(DOWNLOAD_HISTORY_FILE, [])
+            history.append({
+                "title": description or filename,
+                "url": video_url,
+                "account": "微信视频号",
+                "time": int(time.time()),
+                "success": True,
+                "path": str(filepath.resolve())
+            })
+            save_json(DOWNLOAD_HISTORY_FILE, history)
+        except Exception as eh:
+            print(f"写入视频号下载历史记录失败: {eh}")
+                    
         return jsonify({
             "success": True,
             "message": "视频下载成功",

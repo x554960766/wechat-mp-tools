@@ -146,4 +146,31 @@ const API = {
         startCookieAcquisition() { return API.post('/api/channels/start_cookie_acquisition'); },
         cookieAcquisitionStatus() { return API.get('/api/channels/cookie_acquisition_status', { showError: false }); },
     },
+
+    // ── Video Transcoder API ─────────────────────────
+    transcode: {
+        scanDownloads() { return API.get('/api/transcode/scan-downloads'); },
+        videoInfo(path) { return API.post('/api/transcode/video-info', { path }); },
+        start(inputPath, params) { return API.post('/api/transcode/start', { input_path: inputPath, params }); },
+        status() { return API.get('/api/transcode/status', { showError: false }); },
+        clearCompleted() { return API.post('/api/transcode/clear-completed'); },
+        openParent(path) { return API.post('/api/transcode/open-parent', { path }); },
+        async upload(formData, onProgress) {
+            // 自定义上传逻辑以支持大文件进度汇报 (虽然 localhost 瞬间完成)
+            try {
+                const resp = await fetch('/api/transcode/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await resp.json();
+                if (!resp.ok) {
+                    throw new Error(data.error || '上传文件失败');
+                }
+                return data;
+            } catch (err) {
+                Toast.error(err.message || '上传视频失败');
+                throw err;
+            }
+        }
+    }
 };

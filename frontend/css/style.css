@@ -244,6 +244,7 @@ body {
 .nav-group-title {
     display: flex;
     align-items: center;
+    justify-content: space-between;
     gap: var(--spacing-sm);
     padding: 16px var(--spacing-md) 8px;
     font-size: 0.75rem;
@@ -252,6 +253,29 @@ body {
     text-transform: uppercase;
     letter-spacing: 0.05em;
     user-select: none;
+    cursor: pointer;
+    transition: color var(--transition-normal);
+}
+
+.nav-group-title:hover {
+    color: var(--text-primary);
+}
+
+.group-arrow {
+    font-size: 0.65rem;
+    opacity: 0.6;
+    transition: transform var(--transition-normal);
+}
+
+.nav-group-items {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs);
+    transition: all 0.3s ease;
+}
+
+.nav-group-items.collapsed {
+    display: none;
 }
 
 .nav-group-icon {

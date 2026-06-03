@@ -96,6 +96,11 @@ const DyDownloadsPage = {
         await this.loadHistory();
     },
 
+    onShow() {
+        // 命中页面缓存时自动刷新下载历史
+        this.loadHistory();
+    },
+
     async loadHistory() {
         this.loading = true;
         this.showLoading();

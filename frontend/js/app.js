@@ -12,66 +12,14 @@ const App = {
         // 首次加载认证状态
         await this.checkAuthStatus();
 
-        // 初始化双系统切换
-        this.initSystemSwitcher();
-
         // 初始化路由
         Router.init();
 
+        // 初始化侧边栏手风琴折叠菜单
+        this.initSidebarAccordion();
+
         // 启动定时状态检查 (每 30 秒检查一次登录态)
         setInterval(() => this.checkAuthStatus(), 30000);
-    },
-
-    initSystemSwitcher() {
-        const btns = document.querySelectorAll('.sys-btn');
-        btns.forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const sys = e.target.dataset.sys;
-                this.switchSystem(sys);
-            });
-        });
-        // 默认初始化微信系统
-        this.switchSystem('wechat');
-    },
-
-    switchSystem(sys) {
-        // 更新按钮状态
-        document.querySelectorAll('.sys-btn').forEach(b => {
-            b.classList.toggle('active', b.dataset.sys === sys);
-        });
-
-        // 切换导航组与Logo可见性
-        const isWechat = sys === 'wechat';
-        document.getElementById('nav-group-wechat').style.display = isWechat ? 'flex' : 'none';
-        document.getElementById('nav-group-douyin').style.display = !isWechat ? 'flex' : 'none';
-        
-        document.getElementById('logo-wechat').style.display = isWechat ? 'flex' : 'none';
-        document.getElementById('logo-douyin').style.display = !isWechat ? 'flex' : 'none';
-        
-        const commonGroup = document.getElementById('nav-group-common');
-        if (commonGroup) commonGroup.style.display = isWechat ? 'block' : 'none';
-
-        // 切换底部状态栏
-        const userStatus = document.getElementById('user-status');
-        const dyStatus = document.getElementById('dy-status');
-        if (userStatus) userStatus.style.display = isWechat ? 'flex' : 'none';
-        if (dyStatus) dyStatus.style.display = !isWechat ? 'flex' : 'none';
-
-        // 切换主题样式
-        if (!isWechat) {
-            document.body.classList.add('dy-theme');
-            document.body.classList.remove('wechat-theme');
-        } else {
-            document.body.classList.remove('dy-theme');
-            document.body.classList.add('wechat-theme');
-        }
-
-        // 自动导航到默认页面
-        if (isWechat) {
-            Router.navigate('login');
-        } else {
-            Router.navigate('dy_dashboard');
-        }
     },
 
     async checkAuthStatus() {
@@ -139,6 +87,43 @@ const App = {
             if (dyIndicator) dyIndicator.className = 'status-dot warning';
             if (dyText) dyText.textContent = '需要登录 Cookie';
         }
+    },
+
+    initSidebarAccordion() {
+        const headers = document.querySelectorAll('.nav-group-title');
+        headers.forEach(header => {
+            header.addEventListener('click', () => {
+                const group = header.getAttribute('data-group');
+                if (group) {
+                    this.toggleNavGroup(group);
+                }
+            });
+        });
+    },
+
+    toggleNavGroup(targetGroup) {
+        const groups = ['wechat', 'douyin', 'common'];
+        groups.forEach(g => {
+            const itemsEl = document.getElementById(`items-${g}`);
+            const titleEl = document.querySelector(`.nav-group-title[data-group="${g}"]`);
+            const arrowEl = titleEl ? titleEl.querySelector('.group-arrow') : null;
+            
+            if (g === targetGroup) {
+                if (itemsEl) {
+                    const isCollapsed = itemsEl.classList.toggle('collapsed');
+                    if (arrowEl) {
+                        arrowEl.textContent = isCollapsed ? '▶' : '▼';
+                    }
+                }
+            } else {
+                if (itemsEl) {
+                    itemsEl.classList.add('collapsed');
+                    if (arrowEl) {
+                        arrowEl.textContent = '▶';
+                    }
+                }
+            }
+        });
     }
 };
 

@@ -18,6 +18,8 @@ const Router = {
             'channels': ChannelsPage,
             'proxy': ProxyPage,
             'settings': SettingsPage,
+            'transcode': typeof TranscodePage !== 'undefined' ? TranscodePage : null,
+            'dy_transcode': typeof TranscodePage !== 'undefined' ? TranscodePage : null,
             
             // 抖音子系统页面
             'dy_login': typeof DyLoginComponent !== 'undefined' ? DyLoginComponent : null,
@@ -57,8 +59,20 @@ const Router = {
             return;
         }
 
-        // 抖音未登录页面访问限制拦截
-        const requiresDyLogin = ['dy_dashboard', 'dy_search', 'dy_user', 'dy_recommend', 'dy_downloads', 'dy_liked', 'dy_collections'].includes(pageKey);
+        // 依据当前激活路由，动态切换主题色系 (微信绿色系 vs 抖音暗黑极致灰)
+        if (pageKey.startsWith('dy_')) {
+            document.body.classList.add('dy-theme');
+            document.body.classList.remove('wechat-theme');
+        } else if (['login', 'accounts', 'articles', 'download', 'history', 'channels'].includes(pageKey)) {
+            document.body.classList.remove('dy-theme');
+            document.body.classList.add('wechat-theme');
+        } else if (!document.body.classList.contains('dy-theme') && !document.body.classList.contains('wechat-theme')) {
+            // Cold boot on a common page: default to wechat-theme
+            document.body.classList.add('wechat-theme');
+        }
+
+        // 抖音未登录页面访问限制拦截（dy_downloads 是本地数据，不需要登录）
+        const requiresDyLogin = ['dy_dashboard', 'dy_search', 'dy_user', 'dy_recommend', 'dy_liked', 'dy_collections'].includes(pageKey);
         const promptEl = document.getElementById('dy-login-prompt-page');
         const hasParams = hash.includes('?');
         
@@ -144,6 +158,15 @@ const Router = {
         if (this.pageCache[pageKey]) {
             this.pageCache[pageKey].el.style.display = 'block';
             container.prepend(this.pageCache[pageKey].el);
+            // 命中缓存页：触发可选的 onShow 钩子（用于数据刷新等轻量更新，无需重渲染 DOM）
+            const cachedPage = this.pageCache[pageKey].page;
+            if (cachedPage && typeof cachedPage.onShow === 'function') {
+                try {
+                    cachedPage.onShow();
+                } catch (err) {
+                    console.error('onShow hook error:', err);
+                }
+            }
             return;
         }
 
@@ -207,6 +230,33 @@ const Router = {
                 item.classList.add('active');
             } else {
                 item.classList.remove('active');
+            }
+        });
+
+        // 依据当前激活页，自动展开对应侧边栏分组，收起其他分组
+        let activeGroup = 'wechat'; // 默认微信
+        if (activeKey.startsWith('dy_')) {
+            activeGroup = 'douyin';
+        } else if (['transcode', 'proxy', 'settings'].includes(activeKey)) {
+            activeGroup = 'common';
+        }
+
+        const groups = ['wechat', 'douyin', 'common'];
+        groups.forEach(g => {
+            const itemsEl = document.getElementById(`items-${g}`);
+            const titleEl = document.querySelector(`.nav-group-title[data-group="${g}"]`);
+            const arrowEl = titleEl ? titleEl.querySelector('.group-arrow') : null;
+            
+            if (g === activeGroup) {
+                if (itemsEl) {
+                    itemsEl.classList.remove('collapsed');
+                    if (arrowEl) arrowEl.textContent = '▼';
+                }
+            } else {
+                if (itemsEl) {
+                    itemsEl.classList.add('collapsed');
+                    if (arrowEl) arrowEl.textContent = '▶';
+                }
             }
         });
     },

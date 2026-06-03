@@ -30,6 +30,11 @@ const HistoryPage = {
         await this.loadHistory();
     },
 
+    onShow() {
+        // 命中页面缓存时自动刷新历史数据
+        this.loadHistory();
+    },
+
     async loadHistory() {
         const container = document.getElementById('download-history');
         if (!container) return;
@@ -65,11 +70,14 @@ const HistoryPage = {
                                     <span class="history-time" style="flex-shrink: 0;">${time}</span>
                                 </div>
                                 <div style="display: flex; align-items: center; gap: 6px; flex-shrink: 0;">
-                                ${item.success && item.path ? `
-                                    <button class="btn btn-secondary btn-sm" data-path="${path}" onclick="HistoryPage.openFile(this.dataset.path)" style="padding: 2px 8px; font-size: 0.75rem;">
-                                        打开目录
-                                    </button>
-                                ` : ''}
+                                 ${item.success && item.path ? `
+                                     <button class="btn btn-secondary btn-sm" data-path="${path}" onclick="HistoryPage.openFile(this.dataset.path)" style="padding: 2px 8px; font-size: 0.75rem;">
+                                         打开目录
+                                     </button>
+                                     <button class="btn btn-primary btn-sm" data-path="${path}" data-title="${title}" onclick="HistoryPage.importToTranscode(this.dataset.path, this.dataset.title)" style="padding: 2px 8px; font-size: 0.75rem; background: var(--gradient-primary); color: white;">
+                                         导入转码
+                                     </button>
+                                 ` : ''}
                                     <button class="btn btn-danger btn-sm" onclick="HistoryPage.deleteItem(${item._index})" style="padding: 2px 8px; font-size: 0.75rem;">
                                         删除
                                     </button>
@@ -142,5 +150,27 @@ const HistoryPage = {
             '"': '&quot;',
             "'": '&#39;',
         }[char]));
+    },
+    
+    async importToTranscode(path, title) {
+        if (!path) {
+            Toast.warning('无效的视频或文章路径');
+            return;
+        }
+        
+        Toast.info('正在解析视频路径...');
+        try {
+            const res = await API.post('/api/transcode/resolve-path', { path });
+            if (res && res.success && res.path) {
+                Toast.success('解析成功，正在跳转到转码页面...');
+                setTimeout(() => {
+                    Router.navigate(`transcode?path=${encodeURIComponent(res.path)}&name=${encodeURIComponent(res.name)}`);
+                }, 500);
+            } else {
+                Toast.error(res.error || '该下载未包含支持的视频文件');
+            }
+        } catch (err) {
+            Toast.error(err.message || '解析视频路径失败，可能不包含视频文件');
+        }
     },
 };

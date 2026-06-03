@@ -31,6 +31,7 @@ from backend.douyin import douyin_bp
 from backend.douyin_login import douyin_login_bp
 from backend.douyin_auth import douyin_auth_bp
 from backend.channels import channels_bp
+from backend.transcode import transcode_bp
 
 # ── Flask 应用 ────────────────────────────────────────────
 static_folder_path = resource_dir() / "frontend"
@@ -51,6 +52,7 @@ app.register_blueprint(douyin_bp)
 app.register_blueprint(douyin_login_bp)
 app.register_blueprint(douyin_auth_bp)
 app.register_blueprint(channels_bp)
+app.register_blueprint(transcode_bp)
 
 
 # ── 前端路由 ──────────────────────────────────────────────
