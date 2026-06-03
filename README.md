@@ -1,92 +1,102 @@
-# 微信公众号批量下载工具箱
+# 📱 微信公众号/视频号/抖音批量下载与视频处理工具箱
 
-利用公众号后台官方搜索 API，无需mitmproxy抓包，实现**文章列表获取 + 完整离线下载**。
+一款集成了**微信公众号文章离线下载**、**视频号高清视频解析**、**抖音全能下载（单视频/图集/主页批量/收藏/合集）**以及**高级视频转码与 AI 智能去字幕**的桌面全能工具箱。
 
-```
-wechat-mp-tools/
-├── README.md                          # 本文件
-├── wechat_mp_login.py                 # ① 扫码登录（只需运行一次）
-├── wechat_mp_article_fetcher.py       # ② 获取文章列表（仅列表，不含正文）
-└── wechat_mp_batch_downloader.py      # ③ 批量下载（列表 + 全文 + 离线资源）
-    data/
-    ├── wechat_mp_config.json          # 登录凭证（自动生成）
-    └── articles_full/                 # 下载输出目录
-        └── {公众号名}/
-            ├── {文章标题}/            # 每篇文章一个文件夹
-            │   ├── article.html       # 完整离线 HTML
-            │   ├── media/            # 图片 + 视频
-            │   └── metadata.json
-            └── {公众号名}_{fakeid}.json  # 文章列表
-```
+项目提供现代化的 **Web 交互界面 (Glassmorphism 玻璃拟态设计)**，既可以通过极简的网页进行操作，也支持以**原生桌面应用**形式独立运行，同时保留了轻量级的 CLI 脚本。
 
 ---
 
-## 快速开始
+## 🌟 核心功能一览
 
-### 第一步：扫码登录（只需一次）
+### 1. 微信公众号下载
+* **扫码登录凭证获取**：采用 Playwright 自动化技术，扫码一次即可自动保存登录态，支持 1-3 天长期有效。
+* **批量文章下载**：支持批量获取公众号文章列表（标题、链接、发布时间），并一键导出。
+* **完整离线化保存**：高保真下载文章正文，将 HTML 页面、图片、音视频文件全部本地化，生成独立的可离线阅读文件夹。
+
+### 2. 微信视频号下载
+* **高清直链解析**：输入视频号分享链接，自动解析出无密、无水印的高清视频直链。
+* **本地极速下载**：通过后端流式下载，避开浏览器跨域限制，直接高速保存至本地电脑。
+* **一键播放与定位**：集成文件管理器联动，下载完成后可一键唤起本地播放器或在 Finder/资源管理器中定位文件。
+
+### 3. 抖音全能下载
+* **丰富下载模式**：支持单视频解析、高清图集打包、用户主页批量下载、喜欢/收藏列表下载、合集下载以及关键词搜索下载。
+* **扫码/密码登录**：内置扫码和密码登录界面，获取个人状态 Cookie，支持下载需要登录或私密的视频。
+* **下载历史管理**：完整的任务队列与历史下载记录，便于追溯。
+
+### 4. 视频转码与 AI 去字幕工具箱
+* **高画质视频转码**：支持 MP4、MKV、MOV、WebM 及 MP3 音频提取，内置 GPU 硬件加速编码（VideoToolbox / NVENC / QSV），速度提升 5-10 倍。
+* **智能三阶段体积压缩**：根据视频特征自动优化码率并实施三阶段兜底，可在不牺牲画质的前提下节省高达 80% 的存储空间。
+* **AI 智能去字幕/擦除**：内置基于 PyTorch 的深度学习算法（如 ProPainter、STTN、Lama 及 OpenCV inpaint），自动检测视频/图片中的字幕或水印区域，并实现无缝背景擦除与填补。
+
+---
+
+## 🚀 快速开始
+
+### 运行环境准备
+项目推荐使用 Python 3.10 / 3.11 / 3.12 运行。
 
 ```bash
+# 1. 克隆/切换到项目根目录
 cd /Users/apple/Downloads/wechat-mp-tools
-pip install playwright requests scrapling "scrapling[fetchers]"
+
+# 2. 安装项目依赖
+pip install -r requirements.txt
+
+# 3. 安装 Playwright 浏览器驱动（用于扫码鉴权与自动获取 Cookie）
 python3 -m playwright install chromium chromium-headless-shell
-
-python3 wechat_mp_login.py
-```
-
-浏览器弹出微信公众平台页面 → 用微信扫码 → 自动保存凭证到 `data/wechat_mp_config.json`
-
----
-
-### 第二步：配置要下载的公众号
-
-编辑 `wechat_mp_batch_downloader.py` 顶部的配置区：
-
-```python
-TARGET_ACCOUNTS  = ["潇湘晨报", "另一公众号名称"]   # ← 改成你的目标
-MAX_ARTICLES    = 20             # 每个号最多下载篇数（0=不限制）
 ```
 
 ---
 
-### 第三步：一键批量下载
+## 💻 启动应用
 
+项目支持**两种**运行模式，您可以根据喜好选择：
+
+### 模式一：现代化 Web 浏览器界面（推荐）
+在终端中启动 Flask 后端，系统将自动在默认浏览器中打开管理面板：
 ```bash
-python3 wechat_mp_batch_downloader.py
+python3 app.py
+```
+* 默认访问地址：[http://localhost:5200](http://localhost:5200)
+* 支持命令行参数：`python3 app.py --port 5100 --no-browser`
+
+### 模式二：独立原生桌面窗口
+运行桌面端应用启动器，程序将使用 `pywebview` 渲染原生独立窗口，摆脱控制台和浏览器的跳转：
+```bash
+python3 main.py
 ```
 
-每篇文章输出到 `data/articles_full/{公众号名}/{文章标题}/`，包含：
-- `article.html` — 完整离线 HTML（图片/视频已本地化）
-- `media/` — 下载的图片和视频文件
-- `metadata.json` — 元数据
+---
+
+## 🛠️ CLI 命令行脚本说明
+
+如果您不需要使用 Web 界面，也可以直接运行根目录下的轻量级脚本完成公众号的下载：
+
+| 脚本文件 | 功能描述 | 使用场景 |
+| :--- | :--- | :--- |
+| `wechat_mp_login.py` | 扫码登录并保存凭证到 `data/wechat_mp_config.json` | 首次使用或登录态过期时运行一次 |
+| `wechat_mp_article_fetcher.py` | 获取指定公众号的文章列表（标题、链接等）并输出 markdown | 仅需要文章清单，不需要下载正文时 |
+| `wechat_mp_batch_downloader.py` | 批量获取列表并下载完整离线正文 (HTML+图片+视频) | 日常批量离线下载公众号文章 |
+
+*使用 CLI 前，请先编辑 `wechat_mp_batch_downloader.py` 顶部的 `TARGET_ACCOUNTS` 配置目标公众号名。*
 
 ---
 
-## 各工具说明
+## 📦 打包构建指南
 
-| 工具 | 功能 | 使用场景 |
-|------|------|---------|
-| `wechat_mp_login.py` | 扫码登录，保存 cookie + token | 首次使用或凭证过期时运行一次 |
-| `wechat_mp_article_fetcher.py` | 只获取文章列表（标题+链接） | 只需要文章标题列表，不下载正文 |
-| `wechat_mp_batch_downloader.py` | **列表 + 全文 + 离线 HTML** | 日常批量下载，完整离线阅读 |
+为了方便分发和免安装运行，项目已集成 **PyInstaller**。
+* **macOS 本地打包**：直接在终端运行 `pyinstaller wechat_mp_tools.spec` 即可在 `dist/` 目录下生成可直接双击运行的 `WeChat MP Tools.app`。
+* **Windows 打包与云端自动构建**：请参考 [BUILD.md](file:///Users/apple/Downloads/wechat-mp-tools/BUILD.md) 获取详细的 Windows 打包及 GitHub Actions 自动构建方案。
 
 ---
 
-## 常见问题
+## ⚠️ 常见问题说明
 
-**Q: 提示 cookie/token 失效？**
-→ 重新运行 `python3 wechat_mp_login.py` 扫码刷新凭证
-
-**Q: 凭证多久过期？**
-→ 通常 1-3 天，建议隔几天重新扫码一次
-
-**Q: 某些图片下载失败（400 错误）？**
-→ 这些是微信播放器装饰图（如 poster、data-cover），不影响正文阅读，可忽略
-
-**Q: 想只获取列表不下载正文？**
-→ 运行 `wechat_mp_article_fetcher.py`，输出为 Markdown + JSON 列表
-
----
-
-## 技术原理
-
-利用微信公众平台后台 **"写文章 → 搜索其他公众号文章"** 的官方功能 API，用自己公众号后台账号的 cookie + token 即可查询任意公众号的文章列表，无需mitmproxy抓包或破解微信客户端。
+1. **视频号解析提示“失效/不可用”？**
+   - 视频号解析默认通过云端通道，如果失效，您可以在设置中开启**“本地解析”**。
+   - 开启后，点击“获取凭证”，程序将自动拉起浏览器，您只需使用微信扫码登录**腾讯元宝**对话页，程序将自动截获 Cookie，此后将 100% 在您本地电脑进行免封锁的稳定解析。
+2. **去字幕功能运行时没有反应？**
+   - 首次使用去字幕功能，系统会自动在后台下载对应的模型权重文件（约 1.2GB），请确保您的网络通畅。
+   - 建议在配备 Apple Silicon (M1/M2/M3) 或 NVIDIA 显卡的电脑上运行去字幕算法以获得最佳的 GPU 推理速度。
+3. **Cookie 凭证多长时间过期？**
+   - 微信公众号/视频号扫码登录的凭证通常有效时间为 1~3 天，过期后重新扫一次码即可恢复。
