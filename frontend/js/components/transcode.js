@@ -13,7 +13,7 @@ const TranscodePage = {
         return `
             <div class="page-header animate-fade-in">
                 <h2 class="page-title">🎬 视频一键转码</h2>
-                <p class="page-description">支持一键转码公众号及抖音已下载视频，也支持从本地其他文件夹拖入视频文件，进行高画质转换与高码率压缩。</p>
+                <p class="page-description">支持一键转码视频号及抖音已下载视频，也支持从本地其他文件夹拖入视频文件，进行高画质转换与高码率压缩。</p>
             </div>
 
             <div class="grid grid-2 animate-fade-in" style="grid-template-columns: 1.1fr 0.9fr; gap: var(--spacing-lg); align-items: start;">
@@ -214,7 +214,7 @@ const TranscodePage = {
                         <div class="card-body" style="padding: 0 var(--spacing-md) var(--spacing-md); display: flex; flex-direction: column; gap: var(--spacing-md);">
                             <!-- 分类标签 -->
                             <div class="system-switcher" style="margin-top: 0; padding: 2px;">
-                                <button class="sys-btn active" id="btn-tab-wechat" onclick="TranscodePage.switchTab('wechat')" style="font-size: 0.75rem; padding: 4px 0;">微信公众号下载</button>
+                                <button class="sys-btn active" id="btn-tab-wechat" onclick="TranscodePage.switchTab('wechat')" style="font-size: 0.75rem; padding: 4px 0;">微信视频号下载</button>
                                 <button class="sys-btn" id="btn-tab-douyin" onclick="TranscodePage.switchTab('douyin')" style="font-size: 0.75rem; padding: 4px 0;">抖音下载</button>
                             </div>
 

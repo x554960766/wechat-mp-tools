@@ -105,6 +105,9 @@ const AccountsPage = {
                     <button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); Router.navigate('articles', { fakeid: '${acc.fakeid}', name: '${acc.nickname}' })">
                         📰 文章
                     </button>
+                    <button class="btn btn-sm" style="background: rgba(255, 152, 0, 0.12); color: #ff9800; border: 1px solid rgba(255, 152, 0, 0.25);" onclick="event.stopPropagation(); AccountsPage.showRssModal('${acc.fakeid}', '${acc.nickname.replace(/'/g, "\\'")}')">
+                        📡 RSS
+                    </button>
                     <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); AccountsPage.removeAccount('${acc.fakeid}', '${acc.nickname}')">
                         🗑
                     </button>
@@ -203,5 +206,214 @@ const AccountsPage = {
                 // error shown by API
             }
         });
+    },
+
+    async showRssModal(fakeid, nickname) {
+        const rssUrl = `${window.location.origin}/api/articles/rss/${encodeURIComponent(nickname)}`;
+
+        // Remove existing modal if any
+        const existing = document.getElementById('rss-modal-overlay');
+        if (existing) existing.remove();
+
+        const overlay = document.createElement('div');
+        overlay.id = 'rss-modal-overlay';
+        overlay.className = 'modal-overlay active';
+        document.body.appendChild(overlay);
+
+        // Fetch current subscription status
+        let sub = null;
+        try {
+            const data = await API.accounts.rssSubscriptions();
+            sub = (data.subscriptions || []).find(s => s.fakeid === fakeid);
+        } catch (err) {
+            console.error("加载订阅状态失败", err);
+        }
+
+        let isSubscribed = sub ? sub.enabled : false;
+        let interval = sub ? sub.interval_minutes : 60;
+
+        const updateModalBody = () => {
+            const statusSection = isSubscribed ? `
+                <div style="margin-top: var(--spacing-md); padding: var(--spacing-sm) var(--spacing-md); background: rgba(255, 152, 0, 0.05); border-radius: var(--radius-md); border: 1px solid var(--border-color); font-size: 0.82rem;">
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                        <span style="color: var(--text-muted);">订阅状态：</span>
+                        <span style="font-weight: 600; color: ${sub?.last_error ? 'var(--error)' : 'var(--success, #4caf50)'};">
+                            ${sub?.last_error ? `⚠️ 异常 (${sub.last_error})` : '🟢 运行中'}
+                        </span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                        <span style="color: var(--text-muted);">抓取间隔：</span>
+                        <span>每 ${interval >= 60 ? (interval / 60) + ' 小时' : interval + ' 分钟'}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                        <span style="color: var(--text-muted);">上次抓取：</span>
+                        <span>${sub?.last_fetch_time ? new Date(sub.last_fetch_time * 1000).toLocaleString() : '暂无'}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                        <span style="color: var(--text-muted);">上次新增：</span>
+                        <span>${sub?.last_fetch_count !== undefined ? sub.last_fetch_count + ' 篇' : '暂无'}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between;">
+                        <span style="color: var(--text-muted);">累计抓取：</span>
+                        <span>${sub?.total_articles || 0} 篇</span>
+                    </div>
+                </div>
+            ` : `
+                <div style="margin-top: var(--spacing-md); padding: var(--spacing-sm) var(--spacing-md); background: var(--bg-glass); border-radius: var(--radius-md); border: 1px solid var(--border-color); font-size: 0.82rem;">
+                    <p style="color: var(--text-muted); margin: 0; text-align: center;">
+                        💡 开启自动订阅后，系统会定时抓取该公众号最新文章并更新到 RSS。
+                    </p>
+                </div>
+            `;
+
+            overlay.innerHTML = `
+                <div class="modal-dialog" style="max-width: 560px;">
+                    <div class="modal-header">
+                        <h3 class="modal-title">📡 RSS 订阅 — ${nickname}</h3>
+                        <button class="modal-close" id="rss-modal-close-btn">&times;</button>
+                    </div>
+                    <div class="modal-body">
+                        <!-- Switch toggle -->
+                        <div class="switch-group" style="margin-bottom: var(--spacing-md);">
+                            <div class="switch-label">
+                                <span class="label-title">自动订阅抓取</span>
+                                <span class="label-desc">开启后系统后台定时抓取该公众号最新文章</span>
+                            </div>
+                            <label class="switch">
+                                <input type="checkbox" id="rss-enable-checkbox" ${isSubscribed ? 'checked' : ''}>
+                                <span class="switch-slider"></span>
+                            </label>
+                        </div>
+
+                        <!-- Interval select (collapsible if subscribed) -->
+                        <div id="rss-interval-container" style="display: ${isSubscribed ? 'block' : 'none'}; margin-bottom: var(--spacing-md);">
+                            <label style="display: block; font-size: 0.85rem; font-weight: 500; margin-bottom: 6px; color: var(--text-primary);">
+                                抓取时间间隔
+                            </label>
+                            <select class="form-input" id="rss-interval-select" style="width: 100%;">
+                                <option value="15" ${interval === 15 ? 'selected' : ''}>每 15 分钟</option>
+                                <option value="30" ${interval === 30 ? 'selected' : ''}>每 30 分钟</option>
+                                <option value="60" ${interval === 60 ? 'selected' : ''}>每 1 小时 (推荐)</option>
+                                <option value="120" ${interval === 120 ? 'selected' : ''}>每 2 小时</option>
+                                <option value="360" ${interval === 360 ? 'selected' : ''}>每 6 小时</option>
+                                <option value="720" ${interval === 720 ? 'selected' : ''}>每 12 小时</option>
+                                <option value="1440" ${interval === 1440 ? 'selected' : ''}>每 24 小时</option>
+                            </select>
+                        </div>
+
+                        <!-- Status Section -->
+                        ${statusSection}
+
+                        <hr style="border: 0; border-top: 1px solid var(--border-color); margin: var(--spacing-lg) 0;">
+
+                        <!-- RSS Feed URL -->
+                        <label style="display: block; font-size: 0.85rem; font-weight: 500; margin-bottom: 6px; color: var(--text-primary);">
+                            RSS Feed 地址
+                        </label>
+                        <div style="display: flex; gap: var(--spacing-sm); align-items: center;">
+                            <input type="text" class="form-input" value="${rssUrl}" readonly id="rss-url-input"
+                                   style="flex: 1; font-size: 0.82rem; font-family: monospace; cursor: text;"
+                                   onclick="this.select()">
+                            <button class="btn btn-primary" id="rss-copy-btn" style="white-space: nowrap;">
+                                📋 复制
+                            </button>
+                        </div>
+                    </div>
+                    <div class="modal-footer" style="margin-top: var(--spacing-lg);">
+                        <a href="${rssUrl}" target="_blank" class="btn" style="font-size: 0.85rem;">🔗 在浏览器中预览</a>
+                        <button class="btn" id="rss-modal-close-btn2">关闭</button>
+                    </div>
+                </div>
+            `;
+
+            // Bind close buttons
+            overlay.querySelector('#rss-modal-close-btn').addEventListener('click', () => overlay.remove());
+            overlay.querySelector('#rss-modal-close-btn2').addEventListener('click', () => overlay.remove());
+
+            // Bind copy button
+            overlay.querySelector('#rss-copy-btn').addEventListener('click', () => AccountsPage.copyRssUrl());
+
+            // Bind switch change
+            const checkbox = overlay.querySelector('#rss-enable-checkbox');
+            const intervalContainer = overlay.querySelector('#rss-interval-container');
+            const intervalSelect = overlay.querySelector('#rss-interval-select');
+
+            checkbox.addEventListener('change', async (e) => {
+                const checked = e.target.checked;
+                if (checked) {
+                    intervalContainer.style.display = 'block';
+                    try {
+                        const selectedInterval = parseInt(intervalSelect.value);
+                        Toast.info('正在开启自动订阅...');
+                        const res = await API.accounts.rssSubscribe(fakeid, selectedInterval);
+                        sub = res.subscription;
+                        Toast.success(`已开启 RSS 自动抓取：${nickname}`);
+                        // Re-fetch subscriptions to refresh detailed info
+                        const subsData = await API.accounts.rssSubscriptions();
+                        sub = (subsData.subscriptions || []).find(s => s.fakeid === fakeid);
+                        isSubscribed = true;
+                        interval = selectedInterval;
+                        updateModalBody();
+                    } catch (err) {
+                        e.target.checked = false;
+                        intervalContainer.style.display = 'none';
+                    }
+                } else {
+                    intervalContainer.style.display = 'none';
+                    try {
+                        Toast.info('正在关闭自动订阅...');
+                        await API.accounts.rssUnsubscribe(fakeid);
+                        sub = null;
+                        isSubscribed = false;
+                        Toast.success(`已取消 RSS 自动抓取：${nickname}`);
+                        updateModalBody();
+                    } catch (err) {
+                        e.target.checked = true;
+                        intervalContainer.style.display = 'block';
+                    }
+                }
+            });
+
+            // Bind interval change
+            intervalSelect.addEventListener('change', async (e) => {
+                const selectedInterval = parseInt(e.target.value);
+                try {
+                    Toast.info('正在保存时间间隔...');
+                    const res = await API.accounts.rssSubscribe(fakeid, selectedInterval);
+                    sub = res.subscription;
+                    interval = selectedInterval;
+                    Toast.success(`订阅抓取间隔已更新为每 ${selectedInterval >= 60 ? (selectedInterval / 60) + ' 小时' : selectedInterval + ' 分钟'}`);
+                    updateModalBody();
+                } catch (err) {
+                    intervalSelect.value = interval;
+                }
+            });
+        };
+
+        updateModalBody();
+
+        // Close on backdrop click
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) overlay.remove();
+        });
+    },
+
+    async copyRssUrl() {
+        const input = document.getElementById('rss-url-input');
+        if (!input) return;
+        try {
+            await navigator.clipboard.writeText(input.value);
+            const btn = document.getElementById('rss-copy-btn');
+            if (btn) {
+                btn.textContent = '✅ 已复制';
+                setTimeout(() => { btn.textContent = '📋 复制'; }, 2000);
+            }
+            Toast.success('RSS 地址已复制到剪贴板');
+        } catch {
+            // Fallback for older browsers
+            input.select();
+            document.execCommand('copy');
+            Toast.success('RSS 地址已复制');
+        }
     },
 };

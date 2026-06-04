@@ -172,3 +172,56 @@ def update_account(fakeid):
             return jsonify({"message": "更新成功", "account": acc})
 
     return jsonify({"error": "未找到该公众号"}), 404
+
+
+@accounts_bp.route("/<fakeid>/rss-subscribe", methods=["POST"])
+def rss_subscribe(fakeid):
+    """开启 RSS 自动抓取订阅"""
+    from backend.rss_scheduler import rss_scheduler
+
+    data = request.get_json() or {}
+    interval = data.get("interval_minutes", 60)
+
+    # 从已收藏列表中查找公众号信息
+    accounts = _load_accounts()
+    account = None
+    for acc in accounts:
+        if acc.get("fakeid") == fakeid:
+            account = acc
+            break
+
+    if not account:
+        return jsonify({"error": "请先收藏该公众号"}), 404
+
+    nickname = account.get("nickname", fakeid)
+    sub = rss_scheduler.subscribe(fakeid, nickname, interval)
+
+    # 立即执行一次抓取，让 RSS 马上有内容
+    import threading
+    threading.Thread(
+        target=rss_scheduler._fetch_for_account, args=(sub,), daemon=True
+    ).start()
+
+    return jsonify({"message": f"已开启 RSS 订阅: {nickname}", "subscription": sub})
+
+
+@accounts_bp.route("/<fakeid>/rss-subscribe", methods=["DELETE"])
+def rss_unsubscribe(fakeid):
+    """关闭 RSS 自动抓取订阅"""
+    from backend.rss_scheduler import rss_scheduler
+
+    removed = rss_scheduler.unsubscribe(fakeid)
+    if not removed:
+        return jsonify({"error": "该公众号未订阅 RSS"}), 404
+
+    return jsonify({"message": "已取消 RSS 订阅"})
+
+
+@accounts_bp.route("/rss-subscriptions", methods=["GET"])
+def rss_subscriptions():
+    """获取所有 RSS 订阅状态"""
+    from backend.rss_scheduler import rss_scheduler
+
+    subs = rss_scheduler.get_subscriptions()
+    return jsonify({"subscriptions": subs})
+

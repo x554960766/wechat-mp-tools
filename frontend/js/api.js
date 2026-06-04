@@ -67,6 +67,13 @@ const API = {
         add(account) { return API.post('/api/accounts', account); },
         remove(fakeid) { return API.delete(`/api/accounts/${fakeid}`); },
         update(fakeid, data) { return API.put(`/api/accounts/${fakeid}`, data); },
+        rssSubscribe(fakeid, interval_minutes = 60) {
+            return API.post(`/api/accounts/${fakeid}/rss-subscribe`, { interval_minutes });
+        },
+        rssUnsubscribe(fakeid) {
+            return API.delete(`/api/accounts/${fakeid}/rss-subscribe`);
+        },
+        rssSubscriptions() { return API.get('/api/accounts/rss-subscriptions'); },
     },
 
     // ── Articles API ─────────────────────────────────
