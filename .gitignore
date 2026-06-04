@@ -32,4 +32,5 @@ backend/subtitle_remover/backend/ffmpeg/
 **/__pycache__/
 *.py[cod]
 
-
+# External reference project
+we-mp-rss/

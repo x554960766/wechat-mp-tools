@@ -55,6 +55,12 @@ app.register_blueprint(channels_bp)
 app.register_blueprint(transcode_bp)
 
 
+# 启动 RSS 自动抓取调度器
+from backend.rss_scheduler import rss_scheduler
+rss_scheduler.start()
+
+
+
 # ── 前端路由 ──────────────────────────────────────────────
 
 @app.route("/")

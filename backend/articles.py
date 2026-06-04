@@ -517,6 +517,9 @@ def _do_batch_download(task_id: str, articles: list, account_name: str):
             "time": time.time(),
             "error": error_msg if not success else None,
             "path": downloaded_path,
+            "cover_url": result.get("cover_url", ""),
+            "digest": result.get("digest", ""),
+            "publish_time": result.get("publish_time", int(time.time())),
         })
 
         if i < len(articles) - 1:
@@ -597,6 +600,9 @@ def _download_article_into_task(task_id: str, article: dict, account_name: str, 
         "time": time.time(),
         "error": error_msg if not success else None,
         "path": downloaded_path,
+        "cover_url": result.get("cover_url", ""),
+        "digest": result.get("digest", ""),
+        "publish_time": result.get("publish_time", int(time.time())),
     })
 
 
@@ -774,3 +780,160 @@ def open_parent():
         return jsonify({"message": "已打开"})
     except Exception as e:
         return jsonify({"error": f"打开失败: {str(e)}"}), 500
+
+
+@articles_bp.route("/serve-file/<path:filepath>", methods=["GET"])
+def serve_file(filepath):
+    """
+    Serve a file from the configured download directory.
+    """
+    from flask import send_from_directory
+    from urllib.parse import unquote
+    settings = get_settings()
+    download_dir = Path(settings.get("download_dir", str(OUTPUT_DIR)))
+    
+    try:
+        # Resolve target path safely
+        target_path = (download_dir / unquote(filepath)).resolve()
+        
+        # Check exists
+        if not target_path.exists():
+            return "File not found", 404
+            
+        # Security check: ensure path is within download_dir
+        if not str(target_path).startswith(str(download_dir.resolve())):
+            return "Access denied", 403
+            
+        return send_from_directory(target_path.parent, target_path.name)
+    except Exception as e:
+        return f"Error serving file: {str(e)}", 500
+
+
+@articles_bp.route("/rss", methods=["GET"])
+@articles_bp.route("/rss/<account>", methods=["GET"])
+def get_rss(account=None):
+    """
+    Generate an RSS 2.0 feed of successfully downloaded articles.
+    Merges manually downloaded articles with auto-fetched RSS subscription articles.
+    """
+    import email.utils
+    from urllib.parse import quote
+    import html
+
+    history = load_json(DOWNLOAD_HISTORY_FILE, [])
+    # Filter successful downloads
+    items = [item for item in history if isinstance(item, dict) and item.get("success")]
+
+    # Filter by account if specified
+    if account:
+        items = [item for item in items if item.get("account") == account]
+        feed_title = f"微信公众号 - {account} RSS"
+        feed_desc = f"{account} 微信公众号文章订阅"
+    else:
+        feed_title = "微信公众号 RSS"
+        feed_desc = "微信公众号文章订阅"
+
+    # Merge auto-fetched RSS articles
+    try:
+        from backend.rss_scheduler import rss_scheduler
+        if account:
+            rss_arts = rss_scheduler.get_articles(account)
+        else:
+            # Get articles from all subscriptions
+            rss_arts = []
+            for sub in rss_scheduler.get_subscriptions():
+                rss_arts.extend(rss_scheduler.get_articles(sub.get("nickname", "")))
+
+        # Convert auto-fetched articles to the same format, dedup by link
+        existing_links = {item.get("link") for item in items if item.get("link")}
+        for art in rss_arts:
+            link = art.get("link", "")
+            if link and link not in existing_links:
+                items.append({
+                    "title": art.get("title", ""),
+                    "link": link,
+                    "account": account or art.get("author", ""),
+                    "success": True,
+                    "time": art.get("update_time", 0),
+                    "publish_time": art.get("update_time", 0),
+                    "cover_url": art.get("cover", ""),
+                    "digest": art.get("digest", ""),
+                    "path": "",
+                })
+                existing_links.add(link)
+    except Exception:
+        pass  # If scheduler not available, just use download history
+        
+    # Get server host/port dynamically to construct local URLs
+    host_url = request.host_url
+    
+    xml_items = []
+    for item in items:
+        # Defensively convert all values to strings to prevent AttributeError on html.escape(None)
+        title_val = item.get("title") or ""
+        title = html.escape(str(title_val))
+        
+        acc_name_val = item.get("account") or "unknown"
+        acc_name = str(acc_name_val)
+        
+        safe_title = item.get("title") or ""
+        
+        # Local HTML URL
+        local_url = f"{host_url}api/articles/serve-file/{quote(acc_name)}/{quote(safe_title)}/{quote(safe_title)}.html"
+        
+        orig_url_val = item.get("link") or ""
+        orig_url = html.escape(str(orig_url_val))
+        
+        pub_time_val = item.get("publish_time") or item.get("time") or time.time()
+        try:
+            pub_time = float(pub_time_val)
+        except Exception:
+            pub_time = time.time()
+        pub_date = email.utils.formatdate(pub_time, usegmt=True)
+        
+        digest_val = item.get("digest") or ""
+        digest = html.escape(str(digest_val))
+        
+        cover_url_val = item.get("cover_url") or ""
+        cover_url = html.escape(str(cover_url_val))
+        
+        # Read content.txt if available for full text
+        content_encoded = ""
+        path_str = item.get("path", "")
+        if path_str:
+            try:
+                txt_path = Path(path_str) / "content.txt"
+                if txt_path.exists():
+                    clean_text = txt_path.read_text(encoding="utf-8")
+                    clean_text = clean_text.replace("]]>", "]]&gt;")
+                    content_encoded = f"<content:encoded><![CDATA[{clean_text}]]></content:encoded>"
+            except Exception:
+                pass
+                
+        enclosure = f'<enclosure url="{cover_url}" type="image/jpeg" length="0"/>' if cover_url else ""
+        
+        xml_items.append(f"""    <item>
+      <title>{title}</title>
+      <link>{local_url}</link>
+      <guid isPermaLink="false">{orig_url or local_url}</guid>
+      <pubDate>{pub_date}</pubDate>
+      <description>{digest}</description>
+      {enclosure}
+      {content_encoded}
+    </item>""")
+    
+    items_str = "\n".join(xml_items)
+    
+    rss_xml = f"""<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>{html.escape(feed_title)}</title>
+    <link>{host_url}</link>
+    <description>{html.escape(feed_desc)}</description>
+    <language>zh-CN</language>
+    <lastBuildDate>{email.utils.formatdate(time.time(), usegmt=True)}</lastBuildDate>
+{items_str}
+  </channel>
+</rss>"""
+
+    return Response(rss_xml, mimetype="application/xml")

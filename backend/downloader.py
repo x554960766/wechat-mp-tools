@@ -281,6 +281,27 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         report_proxy_status(proxy_url, success=False)
         return {"success": False, "title": safe_title, "error": f"获取页面失败: {str(e)}"}
 
+    # 提取封面 URL、描述和发布时间
+    cover_url = ""
+    cover_match = re.search(r'<meta\s+property="og:image"\s+content="([^"]*)"', raw_html)
+    if cover_match:
+        cover_url = normalize_url(cover_match.group(1))
+
+    digest = ""
+    digest_match = re.search(r'<meta\s+property="og:description"\s+content="([^"]*)"', raw_html)
+    if digest_match:
+        digest = unescape(digest_match.group(1)).strip()
+
+    publish_time = int(datetime.now(timezone.utc).timestamp())
+    # 提取微信文章中的发布时间戳 ct
+    ct_match = re.search(r'\bct\s*=\s*["\']?(\d+)["\']?', raw_html)
+    if ct_match:
+        publish_time = int(ct_match.group(1))
+    else:
+        pt_match = re.search(r'\bpublish_time\s*=\s*["\']?(\d+)["\']?', raw_html)
+        if pt_match:
+            publish_time = int(pt_match.group(1))
+
     # 从 HTML 提取标题
     title_match = re.search(r'<meta\s+property="og:title"\s+content="([^"]*)"', raw_html)
     if title_match:
@@ -304,6 +325,14 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
     url_map = {}
     if save_images:
         img_urls = set()
+        
+        # 优先下载封面图
+        if cover_url:
+            cover_ext = get_ext(cover_url) or "jpg"
+            cover_filename = f"cover.{cover_ext}"
+            if download_resource(cover_url, media_dir / cover_filename):
+                url_map[cover_url] = f"media/{cover_filename}"
+
         # 仅在文章正文 content_html 内提取图片，避免下载外部页眉、页脚、微信小图标等多余资源
         for m in re.finditer(r'data-src="([^"]*mmbiz[^"]*)"', content_html):
             img_urls.add(normalize_url(m.group(1)))
@@ -314,6 +343,8 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         img_urls = {u for u in img_urls if u not in video_covers}
 
         for i, img_url in enumerate(img_urls, 1):
+            if img_url in url_map:
+                continue
             ext = get_ext(img_url)
             fname = f"img_{i:03d}.{ext}"
             if download_resource(img_url, media_dir / fname):
@@ -399,6 +430,9 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         "title": safe_title,
         "url": url,
         "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "publish_time": publish_time,
+        "cover_url": cover_url,
+        "digest": digest,
         "resources_count": len(url_map),
         "videos_count": len(video_iframes),
         "leftover_urls": len(find_mmbiz_urls(localized)),
@@ -415,4 +449,7 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         "title": safe_title,
         "path": str(art_dir),
         "resources": len(url_map),
+        "cover_url": cover_url,
+        "digest": digest,
+        "publish_time": publish_time,
     }

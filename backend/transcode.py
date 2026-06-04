@@ -742,18 +742,14 @@ def scan_downloads():
                     if "temp_uploads" in f_path.parts or "transcoded" in f_path.parts:
                         continue
                         
-                    # 计算相对路径关系获取 parent_name
+                    # 仅限视频号已下载的视频，排除公众号文章目录中的视频（公众号下载不能转码）
                     try:
                         rel_parts = f_path.relative_to(OUTPUT_DIR).parts
-                        if "channels" in rel_parts:
-                            parent_name = "视频号已下载"
-                        elif "media" in rel_parts:
-                            # 比如: ('潇湘晨报融媒体集团', '文章标题', 'media', 'video_1.mp4') -> rel_parts 有 4 项
-                            parent_name = " - ".join(rel_parts[:-2])
-                        else:
-                            parent_name = " - ".join(rel_parts[:-1]) or "微信视频"
+                        if "channels" not in rel_parts:
+                            continue
+                        parent_name = "视频号已下载"
                     except Exception:
-                        parent_name = "微信已下载"
+                        continue
                         
                     video_list.append({
                         "name": file,
@@ -925,6 +921,16 @@ def resolve_path():
         path = Path(path_str)
         if not path.exists():
             return jsonify({"error": "文件或文件夹不存在"}), 404
+            
+        # 安全检查：公众号下载的 HTML 或其目录下文件均不允许导入转码
+        try:
+            resolved_path = str(path.resolve())
+            resolved_output_dir = str(OUTPUT_DIR.resolve())
+            resolved_channels_dir = str((OUTPUT_DIR / "channels").resolve())
+            if resolved_path.startswith(resolved_output_dir) and not resolved_path.startswith(resolved_channels_dir):
+                return jsonify({"error": "公众号下载的文章不能导入转码"}), 400
+        except Exception as e:
+            print(f"检查路径归属失败: {e}")
             
         if path.is_file():
             if path.suffix.lower() in (".mp4", ".mov", ".mkv", ".avi", ".webm"):
