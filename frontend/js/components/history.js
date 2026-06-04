@@ -726,6 +726,24 @@ const HistoryPage = {
                 }
             });
 
+            // 拦截所有 <a> 标签的点击事件，使其在外部浏览器打开，避免 iframe 内部跳转
+            doc.body.addEventListener('click', (e) => {
+                const a = e.target.closest('a');
+                if (a) {
+                    const href = a.getAttribute('href');
+                    if (href && (href.startsWith('http') || href.startsWith('//'))) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        // 优先使用父窗口 (主页面) 的 window.open 以确保在 pywebview 中能正确调起系统默认浏览器
+                        if (window.parent && window.parent !== window) {
+                            window.parent.open(a.href, '_blank');
+                        } else {
+                            window.open(a.href, '_blank');
+                        }
+                    }
+                }
+            }, true);
+
         } catch (err) {
             console.error('Iframe 样式注入或交互绑定失败(跨域或未加载完成):', err);
         }
