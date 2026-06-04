@@ -88,8 +88,10 @@ class RssScheduler:
     # ── 抓取逻辑 ──────────────────────────────────────────
 
     def _fetch_for_account(self, sub: dict):
-        """为单个订阅抓取最新文章"""
+        """为单个订阅抓取最新文章并执行离线下载"""
         from backend.articles import _fetch_articles_page
+        from backend.downloader import download_single_article
+        from backend.config import load_json, save_json, DOWNLOAD_HISTORY_FILE, OUTPUT_DIR, get_settings
 
         fakeid = sub["fakeid"]
         nickname = sub["nickname"]
@@ -103,11 +105,85 @@ class RssScheduler:
             existing = self.get_articles(nickname)
             existing_links = {a.get("link") for a in existing}
 
+            # 过滤出真正需要下载的新文章（最新拉取的 10 篇里，不在我们 RSS 缓存列表中的文章）
+            new_articles = []
             for art in articles:
                 if art.get("link") and art["link"] not in existing_links:
-                    existing.insert(0, art)
-                    existing_links.add(art["link"])
+                    new_articles.append(art)
+
+            if new_articles:
+                # 准备下载目录
+                out_dir = OUTPUT_DIR / nickname
+                out_dir.mkdir(parents=True, exist_ok=True)
+
+                # 加载历史记录，用于去重和录入
+                history = load_json(DOWNLOAD_HISTORY_FILE, [])
+                history_links = {item.get("link") for item in history if isinstance(item, dict) and item.get("link")}
+
+                settings = get_settings()
+                delay = settings.get("request_delay", 0.8)
+                max_retries = settings.get("max_retries", 3)
+
+                # 按时间升序排序（最旧的新文章先下载，保证顺序正确）
+                for i, art in enumerate(reversed(new_articles)):
+                    link = art.get("link", "")
+                    title = art.get("title", "")
+                    if not link:
+                        continue
+
+                    # 尝试下载
+                    success = False
+                    downloaded_path = None
+                    error_msg = ""
+                    result = {}
+
+                    for attempt in range(1, max_retries + 1):
+                        try:
+                            result = download_single_article(link, out_dir, title)
+                            if result.get("success"):
+                                success = True
+                                downloaded_path = result.get("path")
+                                break
+                            error_msg = result.get("error", "未知错误")
+                        except Exception as e:
+                            error_msg = str(e)
+                        time.sleep(1)
+
+                    # 录入到下载历史记录（如果下载历史没有记录过）
+                    if link not in history_links:
+                        history.append({
+                            "title": result.get("title") or title,
+                            "link": link,
+                            "account": nickname,
+                            "success": success,
+                            "time": time.time(),
+                            "error": error_msg if not success else None,
+                            "path": downloaded_path,
+                            "cover_url": result.get("cover_url") or art.get("cover", ""),
+                            "digest": result.get("digest") or art.get("digest", ""),
+                            "publish_time": result.get("publish_time") or art.get("update_time", int(time.time())),
+                        })
+                        history_links.add(link)
+
+                    # 记录到订阅文章列表中
+                    rss_item = {
+                        "title": result.get("title") or title,
+                        "link": link,
+                        "cover": result.get("cover_url") or art.get("cover", ""),
+                        "digest": result.get("digest") or art.get("digest", ""),
+                        "author": nickname,
+                        "update_time": result.get("publish_time") or art.get("update_time", int(time.time())),
+                        "path": downloaded_path or "",
+                    }
+                    existing.insert(0, rss_item)
                     new_count += 1
+
+                    # 避免抓取频率过快，加入延迟
+                    if i < len(new_articles) - 1:
+                        time.sleep(delay)
+
+                # 保存历史记录
+                save_json(DOWNLOAD_HISTORY_FILE, history)
 
             # 截断保留上限
             existing = existing[:MAX_ARTICLES_PER_ACCOUNT]
@@ -133,7 +209,7 @@ class RssScheduler:
             self._save_subscriptions(subs)
 
         if new_count > 0:
-            logger.info("RSS 抓取 [%s]: 新增 %d 篇文章", nickname, new_count)
+            logger.info("RSS 抓取并下载 [%s]: 新增 %d 篇文章", nickname, new_count)
 
     # ── 调度循环 ──────────────────────────────────────────
 

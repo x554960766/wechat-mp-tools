@@ -878,11 +878,25 @@ def get_rss(account=None):
         
         safe_title = item.get("title") or ""
         
-        # Local HTML URL
-        local_url = f"{host_url}api/articles/serve-file/{quote(acc_name)}/{quote(safe_title)}/{quote(safe_title)}.html"
-        
+        # Check if local HTML file exists
+        local_exists = False
+        path_str = item.get("path")
+        if path_str:
+            try:
+                local_path = Path(path_str)
+                if local_path.exists():
+                    local_exists = True
+            except Exception:
+                pass
+
         orig_url_val = item.get("link") or ""
         orig_url = html.escape(str(orig_url_val))
+
+        if local_exists:
+            local_url = f"{host_url}api/articles/serve-file/{quote(acc_name)}/{quote(safe_title)}/{quote(safe_title)}.html"
+            xml_link = html.escape(local_url)
+        else:
+            xml_link = orig_url
         
         pub_time_val = item.get("publish_time") or item.get("time") or time.time()
         try:
@@ -899,7 +913,6 @@ def get_rss(account=None):
         
         # Read content.txt if available for full text
         content_encoded = ""
-        path_str = item.get("path", "")
         if path_str:
             try:
                 txt_path = Path(path_str) / "content.txt"
@@ -914,8 +927,8 @@ def get_rss(account=None):
         
         xml_items.append(f"""    <item>
       <title>{title}</title>
-      <link>{local_url}</link>
-      <guid isPermaLink="false">{orig_url or local_url}</guid>
+      <link>{xml_link}</link>
+      <guid isPermaLink="false">{orig_url or xml_link}</guid>
       <pubDate>{pub_date}</pubDate>
       <description>{digest}</description>
       {enclosure}
