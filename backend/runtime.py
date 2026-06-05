@@ -19,15 +19,24 @@ def resource_dir() -> Path:
 
 
 def app_dir() -> Path:
+    """Return the writable directory for user data (config, logs, downloads).
+
+    On macOS (frozen), we use ~/Library/Application Support/WeChat MP Tools
+    to avoid App Translocation read-only filesystem errors that occur when
+    the .app is launched from a DMG or unsigned download location.
+
+    On Windows (frozen), data is stored next to the executable.
+    In dev mode, data is stored in the project root.
+    """
     if is_frozen():
-        executable = Path(sys.executable).resolve()
-        if sys.platform == "darwin" and len(executable.parents) >= 4:
-            macos_dir = executable.parent
-            contents_dir = macos_dir.parent
-            bundle_dir = contents_dir.parent
-            if macos_dir.name == "MacOS" and contents_dir.name == "Contents" and bundle_dir.suffix == ".app":
-                return bundle_dir.parent
-        return executable.parent
+        if sys.platform == "darwin":
+            # macOS: always use the standard Application Support directory.
+            # This is writable regardless of App Translocation or Gatekeeper.
+            support = Path.home() / "Library" / "Application Support" / "WeChat MP Tools"
+            support.mkdir(parents=True, exist_ok=True)
+            return support
+        # Windows / Linux: keep data next to the executable
+        return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent
 
 
@@ -43,7 +52,9 @@ def configure_runtime():
 
 def write_startup_error(exc: BaseException):
     try:
-        log_file().write_text(
+        target = log_file()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
             "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
             encoding="utf-8",
         )

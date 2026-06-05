@@ -1,7 +1,9 @@
 # 📱 微信公众号/抖音批量下载工具箱 — 打包构建指南
 
 为了方便您使用和分发，本项目已经集成了 **PyInstaller** 跨平台打包规约。我们对项目代码进行了**智能路径适配**：
-1. **数据外置**：打包后，所有的 Cookie、历史记录、下载的文章数据均会自动保存在**可执行文件旁边**的 `data/` 目录中，完全不影响迁移和备份。
+1. **数据外置**：打包后，所有的 Cookie、历史记录、下载的文章数据均会自动保存到用户可写目录中，完全不影响迁移和备份。
+   - **macOS**: `~/Library/Application Support/WeChat MP Tools/data/`
+   - **Windows**: 可执行文件旁边的 `data/` 目录
 2. **资源内置**：网页前端的 `frontend` 静态文件、Playwright 运行所需的 Chromium 浏览器都会打包进程序中，无需用户手动安装 Python、Playwright 或 Chromium。
 
 ---
@@ -35,7 +37,8 @@
 您可以直接在 Finder（访达）中双击运行 `WeChat MP Tools.app`：
 - **首次运行提示安全未知**：由于没有苹果官方的付费签名，首次双击可能会提示“无法打开”或“未知开发者”。请在 `dist/WeChat MP Tools.app` 上**右键 -> 打开**，然后在弹出的确认框中选择 **“打开”** 即可永久信任运行！
 - 启动后，它会自动在后台拉起 Flask 服务，并打开桌面窗口显示管理界面。
-- 如果应用启动后立刻关闭，请查看 `dist/wechat_mp_tools.log`，里面会记录真实异常。
+- 数据文件保存在 `~/Library/Application Support/WeChat MP Tools/` 目录下。
+- 如果应用启动后立刻关闭，请查看 `~/Library/Application Support/WeChat MP Tools/wechat_mp_tools.log`，里面会记录真实异常。
 
 ---
 
@@ -92,7 +95,7 @@ python3 -m playwright install chromium chromium-headless-shell
 ```
 
 ### 2. macOS 下载后打不开？
-没有 Apple Developer ID 签名时，macOS 可能拦截首次运行。请右键 `WeChat MP Tools.app`，选择“打开”。如果是启动后秒退，请查看 `.app` 同级目录下的 `wechat_mp_tools.log`。
+没有 Apple Developer ID 签名时，macOS 可能拦截首次运行。请右键 `WeChat MP Tools.app`，选择“打开”。如果是启动后秒退，请查看 `~/Library/Application Support/WeChat MP Tools/wechat_mp_tools.log`。
 
 ### 3. Windows 打开没反应？
 请查看 `WeChat MP Tools\wechat_mp_tools.log`。如果缺少 WebView2，Windows 10/11 通常会自动带有；极少数精简系统需要安装 Microsoft Edge WebView2 Runtime。
