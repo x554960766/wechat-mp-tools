@@ -42,6 +42,7 @@ hiddenimports = [
     'backend.sign',
     'backend.runtime',
     'backend.channels',
+    'backend.rss_scheduler',
     
     # pywebview 核心支持
     'webview',
