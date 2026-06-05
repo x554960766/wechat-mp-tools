@@ -484,8 +484,7 @@ def _execute_transcode(job):
                 cmd.extend(win_gpu_args)
         else:
             # ── 软件编码模式：CRF + slow preset，质量优先 ──
-            # 关键原则：CRF 是动态码率分配，自动给复杂场景更多码率；强加 maxrate 会破坏这个机制造成画面模糊。
-            # 因此 medium/high 不设 maxrate（信任 CRF），只有 low 档（用户明确要压缩）才启用 maxrate 兜底。
+            # 限制 maxrate 兜底防止转码后文件体积比原视频还大，同时设置合理下限防止过度压缩导致画面模糊
             if video_codec == "hevc":
                 # libx265 CRF 档位：越低画质越好体积越大
                 # high=20 视觉无损, medium=23 肉眼几乎难辨, low=27 明显压缩
@@ -502,18 +501,33 @@ def _execute_transcode(job):
                 cmd.extend(["-x265-params",
                             "no-sao=1:psy-rd=2.0:psy-rdoq=2.0:aq-mode=2:aq-strength=0.8:bframes=8:ref=4"])
 
-                # 只在 low 模式启用 maxrate 兜底，medium/high 让 CRF 自由发挥保画质
-                if quality == "low":
+                if quality == "high":
+                    target_max = int(input_bitrate * 0.85)
+                    target_max = max(target_max, min(600000, int(input_bitrate * 0.95)))
+                elif quality == "low":
                     target_max = int(input_bitrate * 0.50)
-                    cmd.extend(["-maxrate", f"{target_max}", "-bufsize", f"{int(target_max * 2)}"])
+                    target_max = max(target_max, min(300000, int(input_bitrate * 0.95)))
+                else:  # medium
+                    target_max = int(input_bitrate * 0.70)
+                    target_max = max(target_max, min(450000, int(input_bitrate * 0.95)))
+                
+                cmd.extend(["-maxrate", f"{target_max}", "-bufsize", f"{int(target_max * 2)}"])
             else:  # h264
                 # libx264 CRF 档位（H.264 CRF 比 HEVC 高 3 档对应相近画质）
                 crf_map = {"high": "18", "medium": "21", "low": "26"}
                 cmd.extend(["-crf", crf_map.get(quality, "21"), "-preset", "slow"])
 
-                if quality == "low":
+                if quality == "high":
+                    target_max = int(input_bitrate * 0.90)
+                    target_max = max(target_max, min(800000, int(input_bitrate * 0.95)))
+                elif quality == "low":
                     target_max = int(input_bitrate * 0.55)
-                    cmd.extend(["-maxrate", f"{target_max}", "-bufsize", f"{int(target_max * 2)}"])
+                    target_max = max(target_max, min(400000, int(input_bitrate * 0.95)))
+                else:  # medium
+                    target_max = int(input_bitrate * 0.80)
+                    target_max = max(target_max, min(600000, int(input_bitrate * 0.95)))
+                
+                cmd.extend(["-maxrate", f"{target_max}", "-bufsize", f"{int(target_max * 2)}"])
                 
     # 5. 音频处理
     if is_audio_only:

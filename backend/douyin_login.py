@@ -64,7 +64,24 @@ def validate_douyin_cached(cookie_str: str) -> dict | None:
         if proxies:
             session.proxies.update(proxies)
             
-        resp = session.get("https://www.douyin.com/aweme/v1/web/user/profile/self/", timeout=8)
+        # 加上必备的客户端参数，防止被抖音判定为异常请求返回 403 或重定向
+        params = {
+            "device_platform": "webapp",
+            "aid": "6383",
+            "channel": "channel_pc_web",
+            "pc_client_type": "1",
+            "version_code": "190600",
+            "version_name": "19.6.0",
+            "cookie_enabled": "true",
+            "platform": "PC"
+        }
+            
+        resp = session.get("https://www.douyin.com/aweme/v1/web/user/profile/self/", params=params, timeout=8)
+        
+        # 如果是明显的未登录状态码（401/403）或被重定向到登录页面，代表凭证失效
+        if resp.status_code in (401, 403) or "login" in resp.url:
+            raise ValueError("Session expired")
+            
         if resp.status_code == 200 and len(resp.content) > 0:
             data = resp.json()
             if data.get("status_code") == 0 and "user" in data:
@@ -93,16 +110,34 @@ def validate_douyin_cached(cookie_str: str) -> dict | None:
                     _douyin_cache["account_info"] = account_info
                     _douyin_cache["last_check"] = now
                 return account_info
-    except Exception as e:
-        print(f"Failed to validate Douyin Cookie: {e}")
+            elif data.get("status_code") in (2093, 20000) or "error" in data:
+                # 抖音明确返回未登录等报错状态码
+                raise ValueError("Session unauthorized by API response")
+                
+    except ValueError as ve:
+        # 确实失效了，清除缓存并标记失效
+        print(f"Douyin Cookie verified as invalid: {ve}")
+        with _douyin_cache_lock:
+            _douyin_cache["cookie"] = cookie_str
+            _douyin_cache["valid"] = False
+            _douyin_cache["account_info"] = None
+            _douyin_cache["last_check"] = now
+        return None
         
-    # 验证失败，写入缓存为失效
-    with _douyin_cache_lock:
-        _douyin_cache["cookie"] = cookie_str
-        _douyin_cache["valid"] = False
-        _douyin_cache["account_info"] = None
-        _douyin_cache["last_check"] = now
-    return None
+    except Exception as e:
+        # 网络抖动、DNS 异常或代理超时：不主动判定失效，保留之前的缓存以防止误登出
+        print(f"Network error verifying Douyin Cookie (ignored to avoid false logout): {e}")
+        with _douyin_cache_lock:
+            if _douyin_cache["cookie"] == cookie_str and _douyin_cache["valid"]:
+                _douyin_cache["last_check"] = now  # 延长校验时间，避免频繁重试堵塞
+                return _douyin_cache["account_info"]
+                
+        # 冷启动时如果断网/超时，返回默认的在线状态数据结构，保留 Cookie
+        return {
+            "nickname": "已登录 (网络检测超时)",
+            "avatar": "",
+            "unique_id": "network_checking"
+        }
 
 
 def _set_login_state(status: str, message: str = "", progress: int = 0, qrcode: str = ""):

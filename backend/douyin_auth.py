@@ -109,21 +109,33 @@ def cancel_login():
 @douyin_auth_bp.route("/status", methods=["GET"])
 def check_status():
     """检查抖音登录状态"""
+    # 如果正在扫码中，返回扫码的临时状态
     with _login_lock:
-        status = _login_state["status"]
-        if status in ["idle", "cancelled", "expired", "error"]:
-            from backend.douyin_login import validate_douyin_cached
-            settings = get_settings()
-            cookie = settings.get("douyin_cookie", "")
-            if cookie:
-                info = validate_douyin_cached(cookie)
-                if info:
-                    return jsonify({
-                        "status": "success",
-                        "message": "登录有效",
-                        "cookie": cookie,
-                        "account_info": info
-                    })
+        if _login_state["status"] == "scanning":
+            return jsonify(_login_state)
+            
+    # 否则，以配置中的 Cookie 为准进行真实或缓存验证
+    settings = get_settings()
+    cookie = settings.get("douyin_cookie", "")
+    if cookie:
+        from backend.douyin_login import validate_douyin_cached
+        info = validate_douyin_cached(cookie)
+        if info:
+            return jsonify({
+                "status": "success",
+                "message": "登录有效",
+                "cookie": cookie,
+                "account_info": info
+            })
+        else:
+            return jsonify({
+                "status": "expired",
+                "message": "凭证已失效，请重新登录",
+                "cookie": ""
+            })
+            
+    # 否则返回本地内存中的登录标记状态
+    with _login_lock:
         return jsonify(_login_state)
 
 

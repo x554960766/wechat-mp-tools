@@ -232,24 +232,28 @@ const LoginPage = {
             // 开始轮询状态
             if (this._pollTimer) clearInterval(this._pollTimer);
             this._pollTimer = setInterval(async () => {
-                await this.refreshStatus();
-                const data = await API.auth.status();
-                if (data.logged_in || data.login_state?.status === 'failed') {
-                    clearInterval(this._pollTimer);
-                    this._pollTimer = null;
-                    if (btn) {
-                        btn.disabled = false;
-                        btn.innerHTML = `
-                            <svg viewBox="0 0 24 24" fill="none" width="20" height="20">
-                                <path d="M15 3H19C20.1 3 21 3.9 21 5V19C21 20.1 20.1 21 19 21H15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                                <polyline points="10,17 15,12 10,7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                                <line x1="15" y1="12" x2="3" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                            </svg>
-                            显示登录二维码
-                        `;
+                try {
+                    const data = await API.auth.status();
+                    this.updateStatusUI(data);
+                    if (data.logged_in || data.login_state?.status === 'failed') {
+                        clearInterval(this._pollTimer);
+                        this._pollTimer = null;
+                        if (btn) {
+                            btn.disabled = false;
+                            btn.innerHTML = `
+                                <svg viewBox="0 0 24 24" fill="none" width="20" height="20">
+                                    <path d="M15 3H19C20.1 3 21 3.9 21 5V19C21 20.1 20.1 21 19 21H15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                    <polyline points="10,17 15,12 10,7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                    <line x1="15" y1="12" x2="3" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                </svg>
+                                显示登录二维码
+                            `;
+                        }
                     }
+                } catch (err) {
+                    // 静默处理
                 }
-            }, 2000);
+            }, 3000);
 
         } catch (err) {
             Toast.error('启动登录失败: ' + err.message);

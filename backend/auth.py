@@ -185,8 +185,14 @@ def get_status():
         fetched_info = _fetch_wechat_account_info(token, cookie_str)
         if fetched_info:
             account_info = fetched_info
-            config["account_info"] = account_info
-            save_json(CONFIG_FILE, config)
+        else:
+            # 获取失败时保存默认占位名称，防止每次轮询接口都同步请求微信主页导致挂起/超时
+            account_info = {
+                "nickname": "公众号未命名",
+                "avatar": ""
+            }
+        config["account_info"] = account_info
+        save_json(CONFIG_FILE, config)
 
     return jsonify({
         "logged_in": True,
@@ -332,7 +338,7 @@ def _do_login():
                 "cookies": cookies,
                 "save_time": time.time(),
                 "account_info": {
-                    "nickname": nickname,
+                    "nickname": nickname or "公众号未命名",
                     "avatar": avatar
                 }
             }
@@ -340,10 +346,15 @@ def _do_login():
             DATA_DIR.mkdir(parents=True, exist_ok=True)
             save_json(CONFIG_FILE, config)
 
-            browser.close()
+            # 先更新状态为成功，让前端及早响应，避免因 browser.close() 挂起导致一直卡在“正在保存凭证”
+            _set_login_state("success", f"登录成功！token = {token[:12]}...", 100)
+
+            try:
+                browser.close()
+            except Exception as e:
+                print(f"Error closing browser: {e}")
             with _login_lock:
                 _active_browser = None
-            _set_login_state("success", f"登录成功！token = {token[:12]}...", 100)
 
     except Exception as e:
         _set_login_state("failed", f"登录失败: {str(e)}")
