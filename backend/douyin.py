@@ -1003,7 +1003,7 @@ def api_collected():
 
 @douyin_bp.route("/open-parent", methods=["POST"])
 def open_parent():
-    """打开文件或文件夹所在的父目录"""
+    """打开文件或文件夹所在的父目录并选中当前文件"""
     import subprocess
     import sys
 
@@ -1017,14 +1017,20 @@ def open_parent():
         if not path.exists():
             return jsonify({"error": "文件或文件夹不存在"}), 404
             
-        parent_path = path.parent if path.is_file() else path
-
-        if sys.platform == "darwin":
-            subprocess.run(["open", str(parent_path)])
-        elif sys.platform == "win32":
-            subprocess.run(["explorer", str(parent_path)])
+        if path.is_file():
+            if sys.platform == "darwin":
+                subprocess.run(["open", "-R", str(path)])
+            elif sys.platform == "win32":
+                subprocess.run(["explorer", f"/select,{path}"])
+            else:
+                subprocess.run(["xdg-open", str(path.parent)])
         else:
-            subprocess.run(["xdg-open", str(parent_path)])
+            if sys.platform == "darwin":
+                subprocess.run(["open", str(path)])
+            elif sys.platform == "win32":
+                subprocess.run(["explorer", str(path)])
+            else:
+                subprocess.run(["xdg-open", str(path)])
         return jsonify({"message": "已打开"})
     except Exception as e:
         return jsonify({"error": f"打开失败: {str(e)}"}), 500

@@ -130,6 +130,116 @@ const App = {
                 }
             }
         });
+    },
+
+    async downloadChannelsVideo(videoUrl, description, createtime, decryptKey, onSuccessCallback) {
+        if (!videoUrl) {
+            Toast.error('下载链接无效');
+            return;
+        }
+
+        let taskId = null;
+        let isDownloading = true;
+
+        Modal.open({
+            title: '📥 正在下载视频到本地',
+            content: `
+                <div style="padding: 10px 0;">
+                    <p style="font-size: 0.95rem; color: var(--text-secondary); margin-bottom: 20px; line-height: 1.5; word-break: break-all;">
+                        视频: <strong style="color: var(--text-primary); font-size: 1rem;">${this.esc(description || '视频号视频')}</strong>
+                    </p>
+                    <div style="background: #eee; border-radius: 8px; height: 16px; overflow: hidden; margin-bottom: 12px; position: relative;">
+                        <div id="single-download-progress-bar" style="background: var(--primary); height: 100%; width: 0%; transition: width 0.3s; border-radius: 8px;"></div>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; font-size: 0.9rem; margin-bottom: var(--spacing-md);">
+                        <span id="single-download-progress-text" style="font-weight: 500; color: var(--text-primary);">正在连接视频服务器...</span>
+                        <span id="single-download-progress-percent" style="font-weight: 600; color: var(--primary);">0%</span>
+                    </div>
+                </div>
+            `,
+            footer: `
+                <button class="btn btn-secondary" id="btn-single-download-cancel" style="background: #ff3b30; color: white; border-color: rgba(255,59,48,0.2); font-weight: 500;">终止下载</button>
+            `,
+            onClose: () => {
+                isDownloading = false;
+                if (taskId) {
+                    API.channels.cancelDownload(taskId).catch(e => console.error("Cancel failed:", e));
+                }
+            }
+        });
+
+        try {
+            const startRes = await API.channels.downloadAsync(videoUrl, description, createtime, decryptKey);
+            if (!startRes.success || !startRes.task_id) {
+                throw new Error(startRes.error || '无法启动下载任务');
+            }
+            taskId = startRes.task_id;
+        } catch (err) {
+            isDownloading = false;
+            Modal.close();
+            Toast.error('启动下载失败: ' + err.message);
+            return;
+        }
+
+        const cancelBtn = document.getElementById('btn-single-download-cancel');
+        if (cancelBtn) {
+            cancelBtn.onclick = async () => {
+                cancelBtn.disabled = true;
+                cancelBtn.textContent = '正在取消...';
+                try {
+                    await API.channels.cancelDownload(taskId);
+                } catch (e) {
+                    console.error(e);
+                }
+            };
+        }
+
+        const pollInterval = setInterval(async () => {
+            if (!isDownloading) {
+                clearInterval(pollInterval);
+                return;
+            }
+
+            try {
+                const res = await API.channels.getDownloadStatus(taskId);
+                if (res.status === 'downloading') {
+                    const pct = res.progress || 0;
+                    const pb = document.getElementById('single-download-progress-bar');
+                    const pt = document.getElementById('single-download-progress-text');
+                    const pp = document.getElementById('single-download-progress-percent');
+                    if (pb) pb.style.width = `${pct}%`;
+                    if (pp) pp.textContent = `${pct}%`;
+                    if (pt) pt.textContent = `已下载 ${pct}%`;
+                } else if (res.status === 'success') {
+                    clearInterval(pollInterval);
+                    isDownloading = false;
+                    Modal.close();
+                    Toast.success('视频下载成功！');
+                    if (onSuccessCallback) {
+                        onSuccessCallback(res.result);
+                    }
+                } else if (res.status === 'failed') {
+                    clearInterval(pollInterval);
+                    isDownloading = false;
+                    Modal.close();
+                    Toast.error('下载失败: ' + (res.error || '未知错误'));
+                } else if (res.status === 'cancelled') {
+                    clearInterval(pollInterval);
+                    isDownloading = false;
+                    Modal.close();
+                    Toast.info('下载已取消');
+                }
+            } catch (err) {
+                console.error("Polling error:", err);
+            }
+        }, 1000);
+    },
+
+    esc(s) {
+        if (!s) return "";
+        const div = document.createElement("div");
+        div.textContent = s;
+        return div.innerHTML;
     }
 };
 

@@ -157,9 +157,14 @@ const ChannelsHistoryPage = {
                         <button class="btn btn-secondary btn-sm" onclick="ChannelsHistoryPage.openFile('${index}')" style="padding: 4px 10px; font-size: 0.85rem; margin-right: 4px;">
                             播放/打开
                         </button>
-                        <button class="btn btn-secondary btn-sm" onclick="ChannelsHistoryPage.openParent('${index}')" style="padding: 4px 10px; font-size: 0.85rem;">
+                        <button class="btn btn-secondary btn-sm" onclick="ChannelsHistoryPage.openParent('${index}')" style="padding: 4px 10px; font-size: 0.85rem; margin-right: 4px;">
                             📂 打开目录
                         </button>
+                        ${item.type === '视频' ? `
+                        <button class="btn btn-secondary btn-sm" onclick="ChannelsHistoryPage.importToTranscode('${index}')" style="padding: 4px 10px; font-size: 0.85rem; background: var(--gradient-primary); color: white;">
+                            导入转码
+                        </button>
+                        ` : ''}
                     </td>
                 </tr>
             `;
@@ -206,14 +211,16 @@ const ChannelsHistoryPage = {
     },
 
     async clearHistory() {
-        Modal.confirm('清空下载历史', '您确定要清空微信视频号下载历史记录吗？（注意：这不会删除您本地已下载的视频文件）', async () => {
-            try {
-                await API.channels.clearHistory();
-                Toast.success('历史记录已清空');
-                await this.refresh();
-            } catch (err) {
-                Toast.error('清空失败: ' + err.message);
-            }
+        Modal.confirm('清空下载历史', '您确定要清空微信视频号下载历史记录吗？（注意：这不会删除您本地已下载的视频文件）', () => {
+            Modal.confirm('确认清空', '此操作将永久删除视频号下载历史记录，且不可恢复！确定要继续吗？', async () => {
+                try {
+                    await API.channels.clearHistory();
+                    Toast.success('历史记录已清空');
+                    await ChannelsHistoryPage.refresh();
+                } catch (err) {
+                    Toast.error('清空失败: ' + err.message);
+                }
+            });
         });
     },
 
@@ -240,6 +247,29 @@ const ChannelsHistoryPage = {
         if (empty) empty.style.display = 'block';
         const content = document.getElementById('channels-downloads-content');
         if (content) content.style.display = 'none';
+    },
+
+    async importToTranscode(index) {
+        const item = this.history[index];
+        if (!item || !item.path) {
+            Toast.error('无效的视频路径');
+            return;
+        }
+        
+        Toast.info('正在解析视频路径...');
+        try {
+            const res = await API.post('/api/transcode/resolve-path', { path: item.path });
+            if (res && res.success && res.path) {
+                Toast.success('解析成功，正在跳转到转码页面...');
+                setTimeout(() => {
+                    Router.navigate(`transcode?path=${encodeURIComponent(res.path)}&name=${encodeURIComponent(res.name)}`);
+                }, 500);
+            } else {
+                Toast.error(res.error || '该下载未包含支持的视频文件');
+            }
+        } catch (err) {
+            Toast.error(err.message || '解析视频路径失败，可能不包含视频文件');
+        }
     },
 
     destroy() {

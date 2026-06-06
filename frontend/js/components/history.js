@@ -361,8 +361,11 @@ const HistoryPage = {
             const data = await API.articles.history(100);
             const history = data.history || [];
 
-            // 过滤成功且包含可用文件路径的条目
-            this.items = history.filter(item => item.success && item.path);
+            // 过滤成功且包含可用文件路径的条目，或者永久性失败的条目（比如作者已删除/内容被屏蔽/链接已过期）
+            this.items = history.filter(item => 
+                (item.success && item.path) || 
+                (!item.success && item.error && (item.error.includes("删除") || item.error.includes("屏蔽") || item.error.includes("过期")))
+            );
             
             // 按文章的发布时间（或下载时间）进行降序排序（最新发布的在前）
             this.items.sort((a, b) => {
@@ -478,10 +481,12 @@ const HistoryPage = {
                             </div>
                         ` : '';
 
+                        const statusBadge = !item.success ? `<span class="badge badge-error" style="font-size: 0.7rem; margin-left: 6px;">${this.escapeHtml(item.error || '失败')}</span>` : '';
+
                         return `
                             <div class="history-article-card ${isActive}" onclick="HistoryPage.selectArticle(${index})">
                                 <div class="history-article-info">
-                                    <div class="history-article-card-title" title="${title}">${title}</div>
+                                    <div class="history-article-card-title" title="${title}">${title}${statusBadge}</div>
                                     <div class="history-article-card-digest">${digest}</div>
                                     <div class="history-article-meta">
                                         <div class="history-article-meta-left">
@@ -544,6 +549,37 @@ const HistoryPage = {
         const title = this.escapeHtml(item.title || '文章正文');
         const path = this.escapeHtml(item.path || '');
         const origUrl = item.link || '';
+
+        if (!item.success) {
+            viewer.innerHTML = `
+                <div class="history-right-header">
+                    <div style="display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; padding-right: 15px;">
+                        <div style="font-size: 0.95rem; font-weight: 600; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${title}">${title}</div>
+                        <div style="font-size: 0.75rem; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${origUrl}</div>
+                    </div>
+                    <div style="display: flex; gap: 6px; flex-shrink: 0;">
+                        ${origUrl ? `
+                            <button class="btn btn-secondary btn-sm" onclick="window.open('${origUrl}', '_blank')" style="padding: 4px 10px; font-size: 0.78rem;">
+                                原文链接
+                            </button>
+                        ` : ''}
+                        <button class="btn btn-danger btn-sm" onclick="HistoryPage.deleteItem(${item._index})" style="padding: 4px 10px; font-size: 0.78rem;">
+                            删除
+                        </button>
+                    </div>
+                </div>
+                <div class="history-content-placeholder" style="color: var(--error); padding: 40px; text-align: center;">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width: 64px; height: 64px; margin-bottom: var(--spacing-md); opacity: 0.8;">
+                        <circle cx="12" cy="12" r="10"/>
+                        <line x1="12" y1="8" x2="12" y2="12"/>
+                        <line x1="12" y1="16" x2="12.01" y2="16"/>
+                    </svg>
+                    <p style="font-size: 1.1rem; font-weight: 600;">${this.escapeHtml(item.error || '下载失败')}</p>
+                    <p style="font-size: 0.85rem; color: var(--text-muted); margin-top: var(--spacing-sm);">该微信文章目前已不可用，详情如上提示。</p>
+                </div>
+            `;
+            return;
+        }
         
         // 只有视频才能导入转码（判断后缀）
         const isVideo = path.toLowerCase().endsWith('.mp4') || 
@@ -860,14 +896,16 @@ const HistoryPage = {
     },
 
     async clearHistory() {
-        Modal.confirm('清空历史', '确定要清空所有下载历史记录吗？', async () => {
-            try {
-                await API.articles.clearHistory();
-                Toast.success('历史已清空');
-                await HistoryPage.loadHistory();
-            } catch (err) {
-                // shown by API
-            }
+        Modal.confirm('清空历史', '确定要清空所有公众号下载历史记录吗？', () => {
+            Modal.confirm('确认清空', '此操作将永久删除所有公众号下载历史记录，且不可恢复！确定要继续吗？', async () => {
+                try {
+                    await API.articles.clearHistory();
+                    Toast.success('历史已清空');
+                    await HistoryPage.loadHistory();
+                } catch (err) {
+                    // shown by API
+                }
+            });
         });
     },
 

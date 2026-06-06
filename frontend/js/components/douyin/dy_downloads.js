@@ -165,9 +165,14 @@ const DyDownloadsPage = {
                         <button class="btn btn-secondary btn-sm" onclick="DyDownloadsPage.openFile('${index}')" style="padding: 4px 10px; font-size: 0.85rem; margin-right: 4px;">
                             播放/打开
                         </button>
-                        <button class="btn btn-secondary btn-sm" onclick="DyDownloadsPage.openParent('${index}')" style="padding: 4px 10px; font-size: 0.85rem;">
+                        <button class="btn btn-secondary btn-sm" onclick="DyDownloadsPage.openParent('${index}')" style="padding: 4px 10px; font-size: 0.85rem; margin-right: 4px;">
                             📂 打开目录
                         </button>
+                        ${item.type === '视频' ? `
+                        <button class="btn btn-secondary btn-sm" onclick="DyDownloadsPage.importToTranscode('${index}')" style="padding: 4px 10px; font-size: 0.85rem; background: var(--gradient-primary); color: white;">
+                            导入转码
+                        </button>
+                        ` : ''}
                     </td>
                 </tr>
             `;
@@ -214,14 +219,16 @@ const DyDownloadsPage = {
     },
 
     async clearHistory() {
-        Modal.confirm('清空下载历史', '您确定要清空抖音下载历史记录吗？（注意：这不会删除您本地已下载的视频和图片文件）', async () => {
-            try {
-                await API.douyin.clearHistory();
-                Toast.show('历史记录已清空', 'success');
-                await this.refresh();
-            } catch (err) {
-                Toast.show('清空失败: ' + err.message, 'error');
-            }
+        Modal.confirm('清空下载历史', '您确定要清空抖音下载历史记录吗？（注意：这不会删除您本地已下载的视频和图片文件）', () => {
+            Modal.confirm('确认清空', '此操作将永久删除抖音下载历史记录，且不可恢复！确定要继续吗？', async () => {
+                try {
+                    await API.douyin.clearHistory();
+                    Toast.show('历史记录已清空', 'success');
+                    await DyDownloadsPage.refresh();
+                } catch (err) {
+                    Toast.show('清空失败: ' + err.message, 'error');
+                }
+            });
         });
     },
 
@@ -248,6 +255,29 @@ const DyDownloadsPage = {
         if (empty) empty.style.display = 'block';
         const content = document.getElementById('dy-downloads-content');
         if (content) content.style.display = 'none';
+    },
+
+    async importToTranscode(index) {
+        const item = this.history[index];
+        if (!item || !item.path) {
+            Toast.show('无效的视频路径', 'error');
+            return;
+        }
+        
+        Toast.show('正在解析视频路径...', 'info');
+        try {
+            const res = await API.post('/api/transcode/resolve-path', { path: item.path });
+            if (res && res.success && res.path) {
+                Toast.show('解析成功，正在跳转到转码页面...', 'success');
+                setTimeout(() => {
+                    Router.navigate(`transcode?path=${encodeURIComponent(res.path)}&name=${encodeURIComponent(res.name)}`);
+                }, 500);
+            } else {
+                Toast.show(res.error || '该下载未包含支持的视频文件', 'error');
+            }
+        } catch (err) {
+            Toast.show(err.message || '解析视频路径失败，可能不包含视频文件', 'error');
+        }
     },
 
     destroy() {

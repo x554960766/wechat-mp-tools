@@ -158,6 +158,9 @@ const API = {
     channels: {
         fetchVideoProfile(url) { return API.post('/api/channels/fetch_video_profile', { url }); },
         download(url, description, createtime, decryptKey = null) { return API.post('/api/channels/download', { url, description, createtime, decrypt_key: decryptKey }); },
+        downloadAsync(url, description, createtime, decryptKey = null) { return API.post('/api/channels/download/start', { url, description, createtime, decrypt_key: decryptKey }); },
+        getDownloadStatus(taskId) { return API.get(`/api/channels/download/status/${taskId}`, { showError: false }); },
+        cancelDownload(taskId) { return API.post(`/api/channels/download/cancel/${taskId}`); },
         openFolder() { return API.post('/api/channels/open-folder'); },
         startCookieAcquisition() { return API.post('/api/channels/start_cookie_acquisition'); },
         cookieAcquisitionStatus() { return API.get('/api/channels/cookie_acquisition_status', { showError: false }); },

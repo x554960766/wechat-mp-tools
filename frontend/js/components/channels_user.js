@@ -7,7 +7,6 @@ const ChannelsUserPage = {
     videos: [],
     history: [],
     selectedIds: new Set(),
-    isParsingBatch: false,
     isDownloadingBatch: false,
     isBatchDownloadingCanceled: false,
 
@@ -50,41 +49,6 @@ const ChannelsUserPage = {
                         </div>
                     </div>
 
-                    <!-- 批量导入与解析面板 -->
-                    <div class="card animate-fade-in" style="margin-bottom: var(--spacing-lg);">
-                        <details id="batch-import-details" style="cursor: pointer;">
-                            <summary style="font-weight: 600; font-size: 1.05rem; padding: 4px 0; outline: none; color: var(--text-primary); display: flex; align-items: center; justify-content: space-between; user-select: none;">
-                                <span>🔗 批量导入并解析视频链接 (点击展开/折叠)</span>
-                                <span style="color: var(--primary); font-size: 0.85rem; font-weight: 500;">展开工具栏 ▾</span>
-                            </summary>
-                            <div style="margin-top: var(--spacing-md); border-top: 1px solid rgba(0,0,0,0.05); padding-top: var(--spacing-md); cursor: default;" onclick="event.stopPropagation()">
-                                <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 8px;">
-                                    请在下方框中粘贴多条视频号分享链接，每行一条（系统会自动提取含有视频号链接的内容）。
-                                </p>
-                                <textarea id="channels-batch-urls-textarea" class="form-textarea" rows="6" 
-                                          placeholder="粘贴分享文本或链接，例如：&#10;https://weixin.qq.com/sph/xxxxx&#10;https://weixin.qq.com/sph/yyyyy" 
-                                          style="width: 100%; font-family: monospace; font-size: 0.9rem; padding: 12px; border-radius: 10px; margin-bottom: var(--spacing-sm); resize: vertical;"></textarea>
-                                
-                                <!-- 批量解析状态展示 -->
-                                <div id="batch-parse-status-panel" style="display: none; padding: var(--spacing-sm) var(--spacing-md); background: rgba(0,0,0,0.02); border-radius: 8px; margin-bottom: var(--spacing-sm); font-size: 0.9rem;">
-                                    <div style="display: flex; align-items: center; gap: 8px;">
-                                        <span class="spinner" style="width: 14px; height: 14px; border-width: 2px;"></span>
-                                        <span id="batch-parse-status-msg" style="font-weight: 500;">正在提取链接...</span>
-                                    </div>
-                                </div>
-
-                                <div style="display: flex; gap: var(--spacing-sm);">
-                                    <button class="btn btn-primary" id="btn-batch-parse" onclick="ChannelsUserPage.startBatchParsing()" style="min-width: 120px; font-weight: 500;">
-                                        🚀 开始批量解析
-                                    </button>
-                                    <button class="btn btn-secondary" onclick="ChannelsUserPage.clearBatchTextarea()">
-                                        清空
-                                    </button>
-                                </div>
-                            </div>
-                        </details>
-                    </div>
-
                     <!-- 作品管理卡片 -->
                     <div class="card animate-fade-in">
                         <!-- 头部操作栏 -->
@@ -109,6 +73,7 @@ const ChannelsUserPage = {
                                 </button>
                             </div>
                         </div>
+
 
                         <!-- 视频作品网格 -->
                         <div id="channels-user-videos-grid" class="video-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: var(--spacing-md); margin-top: var(--spacing-md);">
@@ -179,7 +144,6 @@ const ChannelsUserPage = {
         this.videos = [];
         this.history = [];
         this.selectedIds.clear();
-        this.isParsingBatch = false;
         this.isDownloadingBatch = false;
         this.isBatchDownloadingCanceled = false;
     },
@@ -209,7 +173,8 @@ const ChannelsUserPage = {
 
         this.username = username;
         this.selectedIds.clear();
-
+        this.isDownloadingBatch = false;
+        this.isBatchDownloadingCanceled = false;
         await this.loadAuthorDetails();
         await this.loadHistory();
         await this.loadAuthorVideos();
@@ -352,6 +317,7 @@ const ChannelsUserPage = {
     renderVideos() {
         const grid = document.getElementById('channels-user-videos-grid');
         const empty = document.getElementById('channels-user-videos-empty');
+        const defaultCover = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23ddd'><path d='M21 3H3c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zM5 17l3.5-4.5 2.5 3.01L14.5 11l4.5 6H5z'/></svg>";
 
         if (!grid || !empty) return;
 
@@ -364,19 +330,15 @@ const ChannelsUserPage = {
             return;
         }
 
-        empty.style.display = 'none';
         grid.style.display = 'grid';
-
-        const defaultCover = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23555'><rect width='100%' height='100%' fill='%23f0f0f0'/><path d='M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z' fill='%23aaa'/></svg>";
+        empty.style.display = 'none';
 
         grid.innerHTML = this.videos.map(video => {
             const isChecked = this.selectedIds.has(video.id);
             const pubDate = this.formatDate(video.createtime);
-            
-            // 检查历史记录中是否有该视频
             const downloadedItem = this.history.find(h => {
-                // 如果能用 title / url 匹配
-                return h.title === (video.description || video.id) || (h.path && h.path.includes(video.description));
+                return h.title === (video.description || video.id) || 
+                       (h.path && video.description && h.path.includes(video.description));
             });
             const isDownloaded = !!downloadedItem;
 
@@ -385,7 +347,8 @@ const ChannelsUserPage = {
                      style="display: flex; flex-direction: column; justify-content: space-between; border-radius: 12px; overflow: hidden; background: var(--bg-card); transition: transform 0.2s, box-shadow 0.2s; border: 1.5px solid ${isChecked ? 'var(--primary)' : 'var(--border-color)'}; cursor: pointer; position: relative;"
                      onmouseenter="this.style.transform='translateY(-4px)'; this.style.boxShadow='var(--shadow-md)';"
                      onmouseleave="this.style.transform=''; this.style.boxShadow='';"
-                     onclick="ChannelsUserPage.handleCardClick(event, '${this.esc(video.id)}')">
+                     onclick="ChannelsUserPage.handleCardClick(event, '${this.esc(video.id)}')"
+                     >
                     
                     <!-- 卡片顶部 cover 图案及选择框 -->
                     <div style="position: relative; padding-top: 56.25%; background: rgba(0,0,0,0.05); overflow: hidden;">
@@ -407,7 +370,7 @@ const ChannelsUserPage = {
                                 已下载
                             </span>
                         ` : ''}
-
+ 
                         <!-- 播放角标 (如果已下载且有本地路径) -->
                         ${isDownloaded && downloadedItem.path ? `
                             <div class="action-btn" onclick="event.stopPropagation(); ChannelsUserPage.playLocalVideo('${this.esc(downloadedItem.path)}')" 
@@ -455,7 +418,6 @@ const ChannelsUserPage = {
     },
 
     handleCardClick(event, videoId) {
-        // 如果点击的是 checkbox、button 或者 action-btn 标签，不触发选中状态切换
         if (event.target.closest('input[type="checkbox"]') || event.target.closest('button') || event.target.closest('.action-btn')) {
             return;
         }
@@ -489,10 +451,8 @@ const ChannelsUserPage = {
             }
         });
 
-        // 重新渲染卡片外框高亮颜色
         this.videos.forEach(video => {
             const isSel = this.selectedIds.has(video.id);
-            // 找到包含 data-id 的 checkbox，然后获取其外层 card
             const el = document.querySelector(`.video-item-checkbox[data-id="${video.id}"]`);
             if (el) {
                 const card = el.closest('.video-card');
@@ -524,173 +484,6 @@ const ChannelsUserPage = {
         }
     },
 
-    clearBatchTextarea() {
-        const text = document.getElementById('channels-batch-urls-textarea');
-        if (text) text.value = '';
-    },
-
-    async startBatchParsing() {
-        if (this.isParsingBatch) return;
-
-        const textarea = document.getElementById('channels-batch-urls-textarea');
-        const text = textarea ? textarea.value.trim() : '';
-
-        if (!text) {
-            Toast.warning('请粘贴包含视频号链接的文本');
-            return;
-        }
-
-        // 正则提取 sph 链接和 channels 的 sf 链接
-        const sphLinks = text.match(/https?:\/\/weixin\.qq\.com\/sph\/[a-zA-Z0-9]+/g) || [];
-        const sfLinks = text.match(/https?:\/\/channels\.weixin\.qq\.com\/mobile\/sf\/[a-zA-Z0-9_]+/g) || [];
-        const urls = [...new Set([...sphLinks, ...sfLinks])];
-
-        if (urls.length === 0) {
-            Toast.error('未在粘贴文本中检测到有效的微信视频号链接');
-            return;
-        }
-
-        const parseBtn = document.getElementById('btn-batch-parse');
-        const statusPanel = document.getElementById('batch-parse-status-panel');
-        const statusMsg = document.getElementById('batch-parse-status-msg');
-
-        if (parseBtn) parseBtn.disabled = true;
-        if (statusPanel) statusPanel.style.display = 'block';
-
-        this.isParsingBatch = true;
-        
-        let successCount = 0;
-        let failCount = 0;
-
-        // 生成并发任务队列 (限制 3 并发)
-        const tasks = urls.map((url, idx) => {
-            return async () => {
-                if (statusMsg) {
-                    statusMsg.textContent = `正在解析第 ${idx + 1}/${urls.length} 个视频链接...`;
-                }
-                try {
-                    const res = await API.channels.fetchVideoProfile(url);
-                    const fi = res.data && res.data.feedInfo;
-                    const ai = res.data && res.data.authorInfo;
-
-                    // 如果当前作者是未解析过的手动收藏 ID，在成功获取真实昵称后自动更新收藏的元数据
-                    if (ai && (this.authorInfo.nickname === '未解析创作者' || this.authorInfo.nickname === '未收藏作者' || !this.authorInfo.head_img_url)) {
-                        try {
-                            const newAuthor = {
-                                username: this.username,
-                                nickname: ai.nickname || this.authorInfo.nickname,
-                                head_img_url: ai.headImgUrl || this.authorInfo.head_img_url
-                            };
-                            await API.channels.addFavorite(newAuthor);
-                            this.authorInfo = newAuthor;
-                            
-                            // 更新 UI 展示
-                            const avatarEl = document.getElementById('channels-user-avatar');
-                            const nicknameEl = document.getElementById('channels-user-nickname');
-                            if (avatarEl && newAuthor.head_img_url) avatarEl.src = newAuthor.head_img_url;
-                            if (nicknameEl) nicknameEl.textContent = newAuthor.nickname;
-                        } catch (e) {
-                            console.error('自动补全作者信息失败:', e);
-                        }
-                    }
-
-                    // 保存到后端创作者作品库（使用当前的作者 ID 保存，保证数据准确）
-                    const targetUsername = this.username || ai?.username || ai?.nickname;
-
-                    await API.channels.addAuthorVideo(targetUsername, {
-                        id: fi.id || String(Date.now() + Math.random()),
-                        description: fi.description || '',
-                        cover_url: fi.coverUrl || '',
-                        video_url: fi.videoUrl || '',
-                        video_url_h264: fi.h264VideoInfo?.videoUrl || '',
-                        video_url_h265: fi.h265VideoInfo?.videoUrl || '',
-                        createtime: fi.createtime ? String(fi.createtime) : String(Math.floor(Date.now() / 1000)),
-                        decode_key: fi.media?.decodeKey || fi.decodeKey || ''
-                    });
-
-                    successCount++;
-                } catch (err) {
-                    console.error(`解析视频失败 [${url}]:`, err);
-                    failCount++;
-                }
-            };
-        });
-
-        // 限制并发执行函数
-        await this.limitConcurrency(tasks, 3);
-
-        Toast.success(`批量解析完成！成功: ${successCount}，失败: ${failCount}`);
-
-        if (parseBtn) parseBtn.disabled = false;
-        if (statusPanel) statusPanel.style.display = 'none';
-        if (textarea) textarea.value = '';
-
-        this.isParsingBatch = false;
-
-        // 重新载入作品库渲染
-        await this.loadAuthorVideos();
-    },
-
-    async limitConcurrency(tasks, limit) {
-        let active = 0;
-        let index = 0;
-        const results = [];
-        return new Promise((resolve) => {
-            function runNext() {
-                if (index >= tasks.length && active === 0) {
-                    resolve(results);
-                    return;
-                }
-                while (active < limit && index < tasks.length) {
-                    const currentIndex = index++;
-                    active++;
-                    tasks[currentIndex]()
-                        .then((res) => {
-                            results[currentIndex] = { success: true, value: res };
-                        })
-                        .catch((err) => {
-                            results[currentIndex] = { success: false, error: err };
-                        })
-                        .finally(() => {
-                            active--;
-                            runNext();
-                        });
-                }
-            }
-            runNext();
-        });
-    },
-
-    async downloadSingleVideo(videoId) {
-        const video = this.videos.find(v => v.id === videoId);
-        if (!video) return;
-
-        const qualitySelect = document.getElementById('user-quality-select');
-        const chosenQuality = qualitySelect ? qualitySelect.value : 'default';
-        let downloadUrl = video.video_url;
-
-        if (chosenQuality === 'raw') {
-            downloadUrl = this.getRawVideoUrl(video.video_url || video.video_url_h265 || video.video_url_h264);
-        } else if (chosenQuality === 'h265') {
-            downloadUrl = video.video_url_h265 || video.video_url_h264 || video.video_url;
-        } else if (chosenQuality === 'h264') {
-            downloadUrl = video.video_url_h264 || video.video_url_h265 || video.video_url;
-        } else {
-            downloadUrl = video.video_url || video.video_url_h264 || video.video_url_h265;
-        }
-
-        Toast.info('已提交单条下载任务');
-
-        try {
-            await API.channels.download(downloadUrl, video.description, video.createtime, video.decode_key);
-            Toast.success('视频下载成功！');
-            await this.loadHistory();
-            this.renderVideos();
-        } catch (err) {
-            Toast.error('下载失败: ' + err.message);
-        }
-    },
-
     async downloadSelected() {
         if (this.selectedIds.size === 0 || this.isDownloadingBatch) return;
 
@@ -700,12 +493,11 @@ const ChannelsUserPage = {
 
         const userQuality = document.getElementById('user-quality-select')?.value || 'default';
 
-        // 打开批量下载大屏进度 Overlay Modal
         Modal.open({
             title: '📥 批量下载视频作品',
             content: `
                 <div style="background: rgba(0,0,0,0.02); padding: 12px; border-radius: 8px; margin-bottom: var(--spacing-md); text-align: left; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
-                    <div><strong>创作者: </strong> <span style="color: var(--primary); font-weight: 600;">${this.esc(this.authorInfo.nickname)}</span></div>
+                    <div><strong>创作者: </strong> <span style="color: var(--primary); font-weight: 600;">${this.esc(this.authorInfo ? this.authorInfo.nickname : '')}</span></div>
                     <div style="display: flex; align-items: center; gap: 6px;">
                         <span style="font-size: 0.85rem; color: var(--text-secondary);">下载画质:</span>
                         <select id="batch-quality-select" class="form-select" style="font-size: 0.85rem; padding: 4px 8px; border-radius: 6px; background: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-primary); width: 180px;">
@@ -733,7 +525,6 @@ const ChannelsUserPage = {
             `,
             onClose: () => {
                 this.isDownloadingBatch = false;
-                // 完成或关闭后重新加载状态
                 this.loadHistory().then(() => this.renderVideos());
             }
         });
@@ -771,7 +562,6 @@ const ChannelsUserPage = {
             if (progressPercent) progressPercent.textContent = `${progressVal}%`;
             if (progressText) progressText.textContent = `正在下载第 ${currentIndex}/${selectedList.length} 个视频...`;
 
-            // 根据选中的画质优先级来获取对应的 URL
             const qualitySelect = document.getElementById('batch-quality-select');
             const chosenQuality = qualitySelect ? qualitySelect.value : 'default';
             let downloadUrl = video.video_url;
@@ -789,7 +579,6 @@ const ChannelsUserPage = {
             appendLog(`⬇️ (${currentIndex}/${selectedList.length}) 正在下载: ${video.description || '无描述'}`);
 
             try {
-                // 流式下载 + 自动 ISAAC-64 解密
                 await API.channels.download(downloadUrl, video.description, video.createtime, video.decode_key);
                 completed++;
                 appendLog(`✅ (${currentIndex}/${selectedList.length}) 成功！视频已保存并自动解密。`);
@@ -799,7 +588,6 @@ const ChannelsUserPage = {
             }
         }
 
-        // 最终更新
         const finalPercent = 100;
         if (progressBar) progressBar.style.width = '100%';
         if (progressPercent) progressPercent.textContent = '100%';
@@ -826,6 +614,58 @@ const ChannelsUserPage = {
             cancelBtn.disabled = true;
             cancelBtn.textContent = '正在中止...';
         }
+    },
+    async downloadSingleVideo(videoId) {
+        const video = this.videos.find(v => v.id === videoId);
+        if (!video) return;
+
+        const rawUrl = this.getRawVideoUrl(video.video_url || video.video_url_h265 || video.video_url_h264);
+        const h265Url = video.video_url_h265 || "";
+        const h264Url = video.video_url_h264 || "";
+        const defaultUrl = video.video_url || "";
+
+        Modal.open({
+            title: '📥 选择下载画质',
+            content: `
+                <div style="padding: 10px 0; text-align: center;">
+                    <p style="font-size: 0.95rem; color: var(--text-secondary); margin-bottom: 20px; line-height: 1.5; text-align: left;">
+                        正在准备下载视频：<br><strong style="color: var(--text-primary); font-size: 1rem;">${this.esc(video.description || '无描述')}</strong>
+                    </p>
+                    <div style="display: flex; flex-direction: column; gap: 10px; max-width: 320px; margin: 0 auto;">
+                        ${rawUrl ? `<button class="btn btn-primary" id="qs-raw" style="padding: 10px; font-weight: 500; font-size: 0.9rem;">原始无压缩原画 (最高画质)</button>` : ''}
+                        ${h265Url ? `<button class="btn btn-secondary" id="qs-h265" style="padding: 10px; font-weight: 500; font-size: 0.9rem;">H265 (HEVC) 极高画质</button>` : ''}
+                        ${h264Url ? `<button class="btn btn-secondary" id="qs-h264" style="padding: 10px; font-weight: 500; font-size: 0.9rem;">H264 (AVC) 标准兼容画质</button>` : ''}
+                        ${defaultUrl ? `<button class="btn btn-secondary" id="qs-default" style="padding: 10px; font-weight: 500; font-size: 0.9rem;">默认最佳画质 (推荐)</button>` : ''}
+                    </div>
+                </div>
+            `,
+            footer: `
+                <button class="btn btn-secondary" onclick="Modal.close()" style="font-weight: 500;">取消</button>
+            `
+        });
+
+        document.getElementById('qs-raw')?.addEventListener('click', () => {
+            Modal.close();
+            this.submitSingleDownload(video, rawUrl);
+        });
+        document.getElementById('qs-h265')?.addEventListener('click', () => {
+            Modal.close();
+            this.submitSingleDownload(video, h265Url);
+        });
+        document.getElementById('qs-h264')?.addEventListener('click', () => {
+            Modal.close();
+            this.submitSingleDownload(video, h264Url);
+        });
+        document.getElementById('qs-default')?.addEventListener('click', () => {
+            Modal.close();
+            this.submitSingleDownload(video, defaultUrl);
+        });
+    },
+    submitSingleDownload(video, downloadUrl) {
+        App.downloadChannelsVideo(downloadUrl, video.description, video.createtime, video.decode_key, async () => {
+            await this.loadHistory();
+            this.renderVideos();
+        });
     },
 
     async playLocalVideo(path) {
@@ -859,19 +699,7 @@ const ChannelsUserPage = {
         const video = this.videos.find(v => v.id === videoId);
         if (!video) return;
 
-        const qualitySelect = document.getElementById('user-quality-select');
-        const chosenQuality = qualitySelect ? qualitySelect.value : 'default';
-        let downloadUrl = video.video_url;
-
-        if (chosenQuality === 'raw') {
-            downloadUrl = this.getRawVideoUrl(video.video_url || video.video_url_h265 || video.video_url_h264);
-        } else if (chosenQuality === 'h265') {
-            downloadUrl = video.video_url_h265 || video.video_url_h264 || video.video_url;
-        } else if (chosenQuality === 'h264') {
-            downloadUrl = video.video_url_h264 || video.video_url_h265 || video.video_url;
-        } else {
-            downloadUrl = video.video_url || video.video_url_h264 || video.video_url_h265;
-        }
+        let downloadUrl = video.video_url || video.video_url_h264 || video.video_url_h265;
 
         try {
             await navigator.clipboard.writeText(downloadUrl);

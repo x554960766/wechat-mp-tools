@@ -876,6 +876,15 @@ def save_synced_feeds(username, feeds):
     nickname = contact.get("nickname", "已同步作者")
     head_img_url = contact.get("headUrl", "")
     
+    # Extract first video's decrypted CDN URL
+    first_video_url = ""
+    for feed in feeds:
+        media_list = feed.get("objectDesc", {}).get("media", [])
+        if media_list and media_list[0].get("url"):
+            media = media_list[0]
+            first_video_url = media.get("url", "") + media.get("urlToken", "")
+            break
+    
     # 1. Update/Merge Favorites list
     favs = load_json(CHANNELS_FAVORITES_FILE, [])
     found_fav = False
@@ -887,6 +896,8 @@ def save_synced_feeds(username, feeds):
                 fav["head_img_url"] = head_img_url
             if nickname and nickname != "已同步作者":
                 fav["nickname"] = nickname
+            if first_video_url:
+                fav["video_url"] = first_video_url
             found_fav = True
             break
             
@@ -898,6 +909,8 @@ def save_synced_feeds(username, feeds):
                 fav["username"] = username
                 if head_img_url:
                     fav["head_img_url"] = head_img_url
+                if first_video_url:
+                    fav["video_url"] = first_video_url
                 found_fav = True
                 break
                 
@@ -907,6 +920,7 @@ def save_synced_feeds(username, feeds):
             "username": username,
             "nickname": nickname,
             "head_img_url": head_img_url,
+            "video_url": first_video_url,
             "added_time": int(time.time())
         })
     save_json(CHANNELS_FAVORITES_FILE, favs)

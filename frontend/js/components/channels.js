@@ -42,9 +42,6 @@ const ChannelsPage = {
                     <button class="btn btn-secondary" onclick="ChannelsPage.openDownloadDir()">
                         📂 打开下载文件夹
                     </button>
-                    <button class="btn btn-secondary" onclick="ChannelsPage.clearWechatCache()" id="btn-clear-cache" style="color: var(--error, #e53e3e); border-color: rgba(229, 62, 62, 0.3);">
-                        🧹 清除微信缓存 (解决打不开/未初始化)
-                    </button>
                 </div>
             </div>
 
@@ -248,22 +245,8 @@ const ChannelsPage = {
                             ${bestVideoUrl ? `
                                 <div style="display: flex; flex-direction: column; gap: var(--spacing-sm); margin-top: var(--spacing-xs);">
                                     
-                                    <!-- 选画质 -->
-                                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
-                                        <span style="font-size: 0.85rem; color: var(--text-secondary); white-space: nowrap;">下载画质:</span>
-                                        <select id="single-quality-select" class="form-select" style="flex: 1; font-size: 0.85rem; padding: 6px 12px; border-radius: 8px; background: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-primary);" onchange="ChannelsPage.updateSelectedQuality(this)">
-                                            ${rawUrl ? `<option value="${this.esc(rawUrl)}" ${!defaultUrl ? 'selected' : ''}>原始视频 (无压缩原画，最高画质)</option>` : ''}
-                                            ${h265Url ? `<option value="${this.esc(h265Url)}" ${!defaultUrl && !rawUrl ? 'selected' : ''}>H265 (HEVC) 极高画质 (压缩率高)</option>` : ''}
-                                            ${h264Url ? `<option value="${this.esc(h264Url)}" ${!defaultUrl && !rawUrl && !h265Url ? 'selected' : ''}>H264 (AVC) 标准高清画质 (兼容性高)</option>` : ''}
-                                            ${defaultUrl ? `<option value="${this.esc(defaultUrl)}" selected>默认画质</option>` : ''}
-                                        </select>
-                                    </div>
-
                                     <!-- 本地高速下载主按钮 (调用 Flask 后端下载，防止 CORS 跨域问题并快速保存) -->
                                     <button class="btn btn-primary" id="btn-server-download" 
-                                            data-video-url="${this.esc(bestVideoUrl)}" 
-                                            data-desc="${this.esc(description)}" 
-                                            data-createtime="${this.esc(createtime)}" 
                                             onclick="ChannelsPage.downloadOnServer(this)" 
                                             style="padding: 12px; font-size: 1rem; border-radius: 12px; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: var(--shadow-sm);">
                                         📥 本地极速下载 (推荐)
@@ -332,47 +315,71 @@ const ChannelsPage = {
         container.style.display = 'block';
     },
 
-    async downloadOnServer(btn) {
-        if (this.isDownloading) return;
-
-        const url = btn.getAttribute('data-video-url');
-        const desc = btn.getAttribute('data-desc');
-        const createtime = btn.getAttribute('data-createtime');
-
-        if (!url) {
-            Toast.error('下载链接无效');
+    downloadOnServer(btn) {
+        const fi = this.currentVideoData?.data?.feedInfo;
+        if (!fi) {
+            Toast.error('未获取到视频解析结果');
             return;
         }
 
-        this.isDownloading = true;
-        btn.disabled = true;
-        btn.innerHTML = '<span class="spinner" style="width: 14px; height: 14px; border-width: 2px; display: inline-block; vertical-align: middle; margin-right: 6px;"></span> 正在下载到本地电脑...';
+        const h264Url = fi.h264VideoInfo?.videoUrl || "";
+        const h265Url = fi.h265VideoInfo?.videoUrl || "";
+        const defaultUrl = fi.videoUrl || "";
+        const rawUrl = this.getRawVideoUrl(defaultUrl || h265Url || h264Url);
+        const description = fi.description || "";
+        const createtime = fi.createtime || "";
 
+        Modal.open({
+            title: '📥 选择下载画质',
+            content: `
+                <div style="padding: 10px 0; text-align: center;">
+                    <p style="font-size: 0.95rem; color: var(--text-secondary); margin-bottom: 20px; line-height: 1.5; text-align: left;">
+                        正在准备下载视频：<br><strong style="color: var(--text-primary); font-size: 1rem;">${this.esc(description || '无描述')}</strong>
+                    </p>
+                    <div style="display: flex; flex-direction: column; gap: 10px; max-width: 320px; margin: 0 auto;">
+                        ${rawUrl ? `<button class="btn btn-primary" id="q-raw" style="padding: 10px; font-weight: 500; font-size: 0.9rem;">原始视频 (无压缩原画，最高画质)</button>` : ''}
+                        ${h265Url ? `<button class="btn btn-secondary" id="q-h265" style="padding: 10px; font-weight: 500; font-size: 0.9rem;">H265 (HEVC) 极高画质 (压缩率高)</button>` : ''}
+                        ${h264Url ? `<button class="btn btn-secondary" id="q-h264" style="padding: 10px; font-weight: 500; font-size: 0.9rem;">H264 (AVC) 标准高清画质 (兼容性高)</button>` : ''}
+                        ${defaultUrl ? `<button class="btn btn-secondary" id="q-default" style="padding: 10px; font-weight: 500; font-size: 0.9rem;">默认画质</button>` : ''}
+                    </div>
+                </div>
+            `,
+            footer: `
+                <button class="btn btn-secondary" onclick="Modal.close()" style="font-weight: 500;">取消</button>
+            `
+        });
+
+        document.getElementById('q-raw')?.addEventListener('click', () => {
+            Modal.close();
+            this.startDownloadFlow(rawUrl, description, createtime);
+        });
+        document.getElementById('q-h265')?.addEventListener('click', () => {
+            Modal.close();
+            this.startDownloadFlow(h265Url, description, createtime);
+        });
+        document.getElementById('q-h264')?.addEventListener('click', () => {
+            Modal.close();
+            this.startDownloadFlow(h264Url, description, createtime);
+        });
+        document.getElementById('q-default')?.addEventListener('click', () => {
+            Modal.close();
+            this.startDownloadFlow(defaultUrl, description, createtime);
+        });
+    },
+
+    startDownloadFlow(url, description, createtime) {
         const successPanel = document.getElementById('download-success-panel');
         if (successPanel) successPanel.style.display = 'none';
 
-        try {
-            const res = await API.channels.download(url, desc, createtime);
-            Toast.success('视频保存成功！');
-            
-            // 展现保存结果面板并挂载本地文件路径
+        App.downloadChannelsVideo(url, description, createtime, null, (res) => {
             if (successPanel) {
                 document.getElementById('saved-filename').textContent = res.filename;
                 document.getElementById('saved-path').textContent = res.path;
-                
-                // 将本地路径绑定在方法中
                 this.savedFilePath = res.path;
-                
                 successPanel.style.display = 'block';
                 successPanel.scrollIntoView({ behavior: 'smooth' });
             }
-        } catch (err) {
-            Toast.error(err.message || '后端下载失败');
-        } finally {
-            this.isDownloading = false;
-            btn.disabled = false;
-            btn.innerHTML = '📥 本地极速下载 (推荐)';
-        }
+        });
     },
 
     async downloadRawBrowser(btn) {
@@ -388,16 +395,12 @@ const ChannelsPage = {
         Toast.info('开始唤起浏览器直接下载视频...');
         
         try {
-            // 解析出原始未转义的视频地址以提高兼容性
             const rawUrl = this.getRawVideoUrl(url);
-            
-            // 构造下载名称
             const filename = this.sanitizeFilename(desc, createtime) || "wechat_video.mp4";
             
-            // 启动浏览器直接下载 (如果跨域失败则提醒使用极速本地下载)
             const a = document.createElement('a');
             a.href = rawUrl;
-            a.target = '_blank'; // 防阻挡
+            a.target = '_blank';
             a.download = filename;
             document.body.appendChild(a);
             a.click();
@@ -439,7 +442,6 @@ const ChannelsPage = {
     async openSavedFile() {
         if (!this.savedFilePath) return;
         try {
-            // 调用 API.articles.openFile 播放视频
             await API.articles.openFile(this.savedFilePath);
             Toast.success('已启动本地播放器播放视频');
         } catch (err) {
@@ -450,7 +452,6 @@ const ChannelsPage = {
     async openSavedParent() {
         if (!this.savedFilePath) return;
         try {
-            // 调用 API.articles.openParent 定位文件所在的文件夹
             await API.articles.openParent(this.savedFilePath);
             Toast.success('已在系统管理器中定位该视频文件');
         } catch (err) {
@@ -476,54 +477,6 @@ const ChannelsPage = {
             Toast.success('视频无密直链已复制到剪贴板！');
         } catch (err) {
             Toast.warning('复制直链失败，请手动选择复制');
-        }
-    },
-
-    updateSelectedQuality(select) {
-        const url = select.value;
-        const btnServer = document.getElementById('btn-server-download');
-        const btnBrowser = document.getElementById('btn-browser-download');
-        const btnCopy = document.getElementById('btn-copy-url');
-        if (btnServer) btnServer.setAttribute('data-video-url', url);
-        if (btnBrowser) btnBrowser.setAttribute('data-video-url', url);
-        if (btnCopy) btnCopy.setAttribute('data-video-url', url);
-
-        // 更新视频播放器源，以便用户预览所选清晰度
-        const videoPlayer = document.querySelector('#channels-result-container video');
-        if (videoPlayer) {
-            const currentTime = videoPlayer.currentTime;
-            const isPaused = videoPlayer.paused;
-            videoPlayer.src = url;
-            videoPlayer.load();
-            videoPlayer.currentTime = currentTime;
-            if (!isPaused) {
-                videoPlayer.play().catch(() => {});
-            }
-        }
-    },
-
-    async clearWechatCache() {
-        if (!confirm('此操作将尝试清除微信内置浏览器的网页缓存，以解决视频号 API 无法初始化或页面打不开的问题。\n\n请在点击【确定】之前，确保您已在电脑上【彻底退出并关闭微信】！是否继续？')) {
-            return;
-        }
-
-        const btn = document.getElementById('btn-clear-cache');
-        if (btn) {
-            btn.disabled = true;
-            btn.innerHTML = '<span class="spinner" style="width: 14px; height: 14px; border-width: 2px; display: inline-block; vertical-align: middle; margin-right: 6px;"></span> 正在清除...';
-        }
-
-        try {
-            const res = await API.channels.clearCache();
-            alert(res.message || '已成功清除微信网页缓存！');
-            Toast.success('清除缓存成功！');
-        } catch (err) {
-            // Error already toasted by API wrapper
-        } finally {
-            if (btn) {
-                btn.disabled = false;
-                btn.innerHTML = '🧹 清除微信缓存 (解决打不开/未初始化)';
-            }
         }
     },
 

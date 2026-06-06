@@ -548,21 +548,7 @@ def download_video():
             except Exception as ed:
                 print(f"解密视频文件失败: {ed}")
                     
-        # 写入全局下载历史记录数据库，使视频号下载立即出现在“下载历史”中，并能够快速导入转码
-        try:
-            from backend.config import load_json, save_json, DOWNLOAD_HISTORY_FILE
-            history = load_json(DOWNLOAD_HISTORY_FILE, [])
-            history.append({
-                "title": description or filename,
-                "url": video_url,
-                "account": "微信视频号",
-                "time": int(time.time()),
-                "success": True,
-                "path": str(filepath.resolve())
-            })
-            save_json(DOWNLOAD_HISTORY_FILE, history)
-        except Exception as eh:
-            print(f"写入视频号下载历史记录失败: {eh}")
+                    
 
         # 写入视频号专属下载历史
         try:
@@ -645,7 +631,7 @@ def open_file():
 
 @channels_bp.route("/open-parent", methods=["POST"])
 def open_parent():
-    """打开文件所在的父目录"""
+    """打开文件所在的父目录并选中当前文件"""
     import subprocess
     import sys
     data = request.get_json() or {}
@@ -656,13 +642,20 @@ def open_parent():
         path = Path(path_str)
         if not path.exists():
             return jsonify({"error": "文件或文件夹不存在"}), 404
-        parent_path = path.parent if path.is_file() else path
-        if sys.platform == "darwin":
-            subprocess.run(["open", str(parent_path)])
-        elif sys.platform == "win32":
-            subprocess.run(["explorer", str(parent_path)])
+        if path.is_file():
+            if sys.platform == "darwin":
+                subprocess.run(["open", "-R", str(path)])
+            elif sys.platform == "win32":
+                subprocess.run(["explorer", f"/select,{path}"])
+            else:
+                subprocess.run(["xdg-open", str(path.parent)])
         else:
-            subprocess.run(["xdg-open", str(parent_path)])
+            if sys.platform == "darwin":
+                subprocess.run(["open", str(path)])
+            elif sys.platform == "win32":
+                subprocess.run(["explorer", str(path)])
+            else:
+                subprocess.run(["xdg-open", str(path)])
         return jsonify({"message": "已打开"})
     except Exception as e:
         return jsonify({"error": f"打开失败: {str(e)}"}), 500
@@ -682,6 +675,7 @@ def add_favorite():
     username = data.get("username", "").strip()
     nickname = data.get("nickname", "").strip()
     head_img_url = data.get("head_img_url", "").strip()
+    video_url = data.get("video_url", "").strip()
 
     if not username:
         return jsonify({"error": "作者 ID 不能为空"}), 400
@@ -690,12 +684,20 @@ def add_favorite():
     # 检查是否已存在
     for fav in favorites:
         if fav.get("username") == username:
+            if nickname and nickname != "已同步作者":
+                fav["nickname"] = nickname
+            if head_img_url:
+                fav["head_img_url"] = head_img_url
+            if video_url:
+                fav["video_url"] = video_url
+            save_json(CHANNELS_FAVORITES_FILE, favorites)
             return jsonify({"message": "作者已在收藏列表中", "favorites": favorites})
 
     favorites.append({
         "username": username,
         "nickname": nickname or "未命名",
         "head_img_url": head_img_url,
+        "video_url": video_url,
         "added_time": int(time.time())
     })
     save_json(CHANNELS_FAVORITES_FILE, favorites)
@@ -868,5 +870,185 @@ def clear_wechat_cache():
         "success": True,
         "message": "已成功清除微信视频号浏览器缓存！请重启微信后再打开视频号页面。"
     })
+
+
+import uuid
+import threading
+
+_download_tasks = {}
+_download_tasks_lock = threading.Lock()
+
+def _do_async_download_video(task_id, video_url, description, createtime, decrypt_key):
+    global _download_tasks
+    
+    settings = get_settings()
+    base_download_dir = Path(settings.get("download_dir", str(OUTPUT_DIR)))
+    channels_dir = base_download_dir / "channels"
+    
+    filepath = None
+    try:
+        channels_dir.mkdir(parents=True, exist_ok=True)
+        
+        filename = sanitize_filename(description, createtime)
+        filepath = channels_dir / filename
+        
+        if filepath.exists():
+            base_name = filepath.stem
+            ext = filepath.suffix
+            counter = 1
+            while filepath.exists():
+                filepath = channels_dir / f"{base_name}_{counter}{ext}"
+                counter += 1
+            filename = filepath.name
+
+        with _download_tasks_lock:
+            task = _download_tasks.get(task_id)
+            if not task:
+                return
+            if task["cancel_event"].is_set():
+                task["status"] = "cancelled"
+                return
+
+        resp = requests.get(
+            video_url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            },
+            stream=True,
+            timeout=60
+        )
+        resp.raise_for_status()
+        
+        total_size = int(resp.headers.get("content-length", 0))
+        downloaded_bytes = 0
+        
+        with open(filepath, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                with _download_tasks_lock:
+                    task = _download_tasks.get(task_id)
+                    if not task or task["cancel_event"].is_set():
+                        f.close()
+                        if filepath and filepath.exists():
+                            try: filepath.unlink()
+                            except: pass
+                        if task:
+                            task["status"] = "cancelled"
+                        return
+                
+                if chunk:
+                    f.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    if total_size > 0:
+                        progress_val = int(downloaded_bytes / total_size * 100)
+                        progress_val = min(99, max(0, progress_val))
+                        with _download_tasks_lock:
+                            if task_id in _download_tasks:
+                                _download_tasks[task_id]["progress"] = progress_val
+
+        if decrypt_key:
+            try:
+                key_val = int(decrypt_key)
+                if key_val > 0:
+                    with open(filepath, "r+b") as f:
+                        file_data = bytearray(f.read(131072))
+                        decrypt_channels_data(file_data, key_val)
+                        f.seek(0)
+                        f.write(file_data)
+            except Exception as ed:
+                print(f"解密视频文件失败: {ed}")
+                    
+        try:
+            size_bytes = filepath.stat().st_size
+            add_channels_history_item(description or filename, "视频", filepath, size_bytes)
+        except Exception as eh:
+            print(f"写入视频号专属下载历史记录失败: {eh}")
+            
+        with _download_tasks_lock:
+            if task_id in _download_tasks:
+                _download_tasks[task_id]["status"] = "success"
+                _download_tasks[task_id]["progress"] = 100
+                _download_tasks[task_id]["result"] = {
+                    "path": str(filepath),
+                    "filename": filename,
+                    "directory": str(channels_dir)
+                }
+        
+    except Exception as e:
+        if filepath and filepath.exists():
+            try: filepath.unlink()
+            except: pass
+        with _download_tasks_lock:
+            if task_id in _download_tasks:
+                _download_tasks[task_id]["status"] = "failed"
+                _download_tasks[task_id]["error"] = str(e)
+
+
+@channels_bp.route("/download/start", methods=["POST"])
+def start_download_video_async():
+    """开始异步下载视频"""
+    global _download_tasks
+    data = request.get_json() or {}
+    video_url = data.get("url", "").strip()
+    description = data.get("description", "").strip()
+    createtime = data.get("createtime", "").strip()
+    decrypt_key = data.get("decrypt_key") or data.get("key")
+
+    if not video_url:
+        return jsonify({"error": "下载链接不能为空"}), 400
+
+    task_id = str(uuid.uuid4())
+    
+    with _download_tasks_lock:
+        if len(_download_tasks) > 200:
+            keys_to_remove = [k for k, t in _download_tasks.items() if t["status"] in ("success", "failed", "cancelled")]
+            for k in keys_to_remove[:50]:
+                _download_tasks.pop(k, None)
+
+        _download_tasks[task_id] = {
+            "status": "downloading",
+            "progress": 0,
+            "cancel_event": threading.Event(),
+            "error": None,
+            "result": None
+        }
+        
+    thread = threading.Thread(
+        target=_do_async_download_video,
+        args=(task_id, video_url, description, createtime, decrypt_key),
+        daemon=True
+    )
+    thread.start()
+    
+    return jsonify({"success": True, "task_id": task_id})
+
+
+@channels_bp.route("/download/status/<task_id>", methods=["GET"])
+def get_async_download_status(task_id):
+    """获取异步下载状态"""
+    with _download_tasks_lock:
+        task = _download_tasks.get(task_id)
+        if not task:
+            return jsonify({"error": "未找到指定的下载任务"}), 404
+        
+        return jsonify({
+            "status": task["status"],
+            "progress": task["progress"],
+            "error": task["error"],
+            "result": task["result"]
+        })
+
+
+@channels_bp.route("/download/cancel/<task_id>", methods=["POST"])
+def cancel_async_download(task_id):
+    """取消异步下载"""
+    with _download_tasks_lock:
+        task = _download_tasks.get(task_id)
+        if not task:
+            return jsonify({"error": "未找到指定的下载任务"}), 404
+        
+        task["cancel_event"].set()
+        task["status"] = "cancelled"
+        return jsonify({"success": True, "message": "下载已请求取消"})
+
 
 

@@ -65,11 +65,52 @@ const ChannelsLoginPage = {
                     </div>
                 </div>
             </div>
+
+            <!-- 同步助手 & 拦截代理设置 (证书注入 JS 方式) -->
+            <div class="card animate-fade-in" style="margin-top: var(--spacing-lg); border: 1px solid rgba(7, 193, 96, 0.15); background: linear-gradient(135deg, var(--bg-card) 0%, rgba(7, 193, 96, 0.03) 100%);">
+                <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: var(--spacing-sm); border-bottom: 1px solid rgba(7, 193, 96, 0.1);">
+                    <h3 class="card-title" style="margin: 0; color: var(--primary); display: flex; align-items: center; gap: 8px;">
+                        🔒 微信极速同步助手 <span class="badge" id="proxy-status-badge" style="font-size: 0.75rem; border-radius: 20px; padding: 2px 8px; font-weight: 600;">检测中...</span>
+                    </h3>
+                    <div style="font-size: 0.85rem; color: var(--text-muted); display: flex; gap: 12px; align-items: center;">
+                        <span id="cert-status-badge" style="display: flex; align-items: center; gap: 4px;">CA 证书: <strong style="color: #ff9900;">检测中</strong></span>
+                    </div>
+                </div>
+                
+                <div style="padding: var(--spacing-md); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: var(--spacing-md);">
+                    <div style="flex: 1; min-width: 300px;">
+                        <p style="font-size: 0.9rem; margin: 0 0 8px 0; color: var(--text-primary); font-weight: 500;">
+                            通过系统代理拦截并注入辅助脚本，在微信 PC 客户端内自动完成作者全部作品的一键同步。
+                        </p>
+                        <div style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.5;">
+                            1. 点击“启动助手”并允许添加/信任本地 CA 根证书。<br>
+                            2. 启动后，在 PC/Mac 微信中打开任意视频号作者的个人主页。<br>
+                            3. 微信页面内会自动浮现【同步当前作者作品到系统】按钮，点击即可极速同步！
+                        </div>
+                    </div>
+                    
+                    <div style="display: flex; gap: var(--spacing-sm); flex-wrap: wrap; align-items: center;">
+                        <button class="btn btn-secondary" id="btn-install-cert" onclick="ChannelsLoginPage.installCert()" style="font-size: 0.85rem; padding: 10px 16px; display: flex; align-items: center; gap: 6px;">
+                            🛡️ 安装/信任证书
+                        </button>
+                        <a href="/api/channels/proxy/download-cert" class="btn btn-secondary" style="font-size: 0.85rem; padding: 10px 16px; text-decoration: none; display: flex; align-items: center; gap: 6px;" title="下载证书供手动安装">
+                            📥 下载证书
+                        </a>
+                        <button class="btn btn-primary" id="btn-toggle-proxy" onclick="ChannelsLoginPage.toggleProxy()" style="min-width: 140px; font-weight: 600; padding: 10px 20px;">
+                            🚀 启动同步助手
+                        </button>
+                        <button class="btn btn-secondary" onclick="ChannelsLoginPage.clearWechatCache()" id="btn-clear-cache" style="font-size: 0.85rem; padding: 10px 16px; color: var(--error, #e53e3e); border-color: rgba(229, 62, 62, 0.3); display: flex; align-items: center; gap: 6px;">
+                            🧹 清除微信缓存 (解决打不开/未初始化)
+                        </button>
+                    </div>
+                </div>
+            </div>
         `;
     },
 
     async init() {
         await this.loadSettings();
+        await this.checkProxyStatus();
     },
 
     destroy() {
@@ -200,6 +241,115 @@ const ChannelsLoginPage = {
             btn.disabled = false;
             btn.innerHTML = '🚀 自动扫码登录获取';
             Toast.error('唤起浏览器失败: ' + err.message);
+        }
+    },
+
+    async checkProxyStatus() {
+        try {
+            const status = await API.channels.getProxyStatus();
+            this.renderProxyUI(status);
+        } catch (err) {
+            console.error('Failed to get proxy status:', err);
+        }
+    },
+
+    renderProxyUI(status) {
+        const proxyBadge = document.getElementById('proxy-status-badge');
+        const certBadge = document.getElementById('cert-status-badge');
+        const toggleBtn = document.getElementById('btn-toggle-proxy');
+        const installBtn = document.getElementById('btn-install-cert');
+        
+        if (!proxyBadge || !toggleBtn) return;
+        
+        if (status.proxy_running) {
+            proxyBadge.textContent = '运行中';
+            proxyBadge.style.background = '#07c160';
+            proxyBadge.style.color = 'white';
+            toggleBtn.textContent = '🛑 关闭同步助手';
+            toggleBtn.className = 'btn btn-secondary';
+            toggleBtn.style.borderColor = 'rgba(255,59,48,0.2)';
+            toggleBtn.style.color = '#ff3b30';
+        } else {
+            proxyBadge.textContent = '已关闭';
+            proxyBadge.style.background = 'rgba(0,0,0,0.08)';
+            proxyBadge.style.color = 'var(--text-secondary)';
+            toggleBtn.textContent = '🚀 启动同步助手';
+            toggleBtn.className = 'btn btn-primary';
+            toggleBtn.style.color = '';
+            toggleBtn.style.borderColor = '';
+        }
+        
+        if (certBadge && installBtn) {
+            if (status.cert_installed) {
+                certBadge.innerHTML = 'CA 证书: <strong style="color: #07c160;">已信任</strong>';
+                installBtn.style.display = 'none';
+            } else {
+                certBadge.innerHTML = 'CA 证书: <strong style="color: #ff9500;">未信任</strong>';
+                installBtn.style.display = 'inline-flex';
+            }
+        }
+    },
+
+    async toggleProxy() {
+        const toggleBtn = document.getElementById('btn-toggle-proxy');
+        if (toggleBtn) toggleBtn.disabled = true;
+        
+        try {
+            const status = await API.channels.getProxyStatus();
+            if (status.proxy_running) {
+                await API.channels.stopProxy();
+                Toast.success('同步助手及系统代理已成功关闭');
+            } else {
+                Toast.info('正在启动服务，请注意系统弹窗并允许证书安装...');
+                await API.channels.startProxy();
+                Toast.success('同步助手启动成功！已配置系统代理');
+            }
+            await this.checkProxyStatus();
+        } catch (err) {
+            Toast.error('同步助手操作失败: ' + err.message);
+        } finally {
+            if (toggleBtn) toggleBtn.disabled = false;
+        }
+    },
+
+    async installCert() {
+        const installBtn = document.getElementById('btn-install-cert');
+        if (installBtn) installBtn.disabled = true;
+        
+        try {
+            Toast.info('请在系统弹窗中确认信任该本地证书...');
+            await API.channels.installCert();
+            Toast.success('证书安装/信任成功！');
+            await this.checkProxyStatus();
+        } catch (err) {
+            Toast.error('安装证书失败: ' + err.message);
+        } finally {
+            if (installBtn) installBtn.disabled = false;
+        }
+    },
+
+    async clearWechatCache() {
+        if (!confirm('此操作将尝试清除微信内置浏览器的网页缓存，以解决视频号 API 无法初始化或页面打不开的问题。\n\n请在点击【确定】之前，确保您已在电脑上【彻底退出并关闭微信】！是否继续？')) {
+            return;
+        }
+
+        const btn = document.getElementById('btn-clear-cache');
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner" style="width: 14px; height: 14px; border-width: 2px; display: inline-block; vertical-align: middle; margin-right: 6px;"></span> 正在清除...';
+        }
+
+        try {
+            const res = await API.channels.clearCache();
+            alert(res.message || '已成功清除微信网页缓存！');
+            Toast.success('清除缓存成功！');
+        } catch (err) {
+            // Error already toasted by API wrapper
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '🧹 清除微信缓存 (解决打不开/未初始化)';
+            }
         }
     }
 };

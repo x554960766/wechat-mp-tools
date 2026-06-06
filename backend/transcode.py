@@ -900,8 +900,9 @@ def clear_completed():
 
 @transcode_bp.route("/open-parent", methods=["POST"])
 def open_parent():
-    """在资源管理器中打开目标文件"""
+    """在资源管理器中打开目标文件并选中当前文件"""
     import subprocess
+    import sys
     data = request.get_json() or {}
     path_str = data.get("path", "")
     if not path_str:
@@ -912,13 +913,20 @@ def open_parent():
         if not path.exists():
             return jsonify({"error": "文件不存在"}), 404
             
-        parent_path = path.parent
-        if sys.platform == "darwin":
-            subprocess.run(["open", str(parent_path)])
-        elif sys.platform == "win32":
-            subprocess.run(["explorer", str(parent_path)])
+        if path.is_file():
+            if sys.platform == "darwin":
+                subprocess.run(["open", "-R", str(path)])
+            elif sys.platform == "win32":
+                subprocess.run(["explorer", f"/select,{path}"])
+            else:
+                subprocess.run(["xdg-open", str(path.parent)])
         else:
-            subprocess.run(["xdg-open", str(parent_path)])
+            if sys.platform == "darwin":
+                subprocess.run(["open", str(path)])
+            elif sys.platform == "win32":
+                subprocess.run(["explorer", str(path)])
+            else:
+                subprocess.run(["xdg-open", str(path)])
         return jsonify({"message": "已打开"})
     except Exception as e:
         return jsonify({"error": f"打开失败: {str(e)}"}), 500

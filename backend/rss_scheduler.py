@@ -149,9 +149,30 @@ class RssScheduler:
                             error_msg = str(e)
                         time.sleep(1)
 
-                    # 录入到下载历史记录（如果下载历史没有记录过）
-                    if link not in history_links:
-                        history.append({
+                    # 寻找历史记录中是否已存在该链接
+                    existing_history_item = None
+                    for item in history:
+                        if isinstance(item, dict) and item.get("link") == link:
+                            existing_history_item = item
+                            break
+
+                    is_permanent = result.get("is_permanent", False) if isinstance(result, dict) else False
+
+                    if existing_history_item:
+                        # 只有当新结果成功，或者之前也是失败时，才更新（避免用失败覆盖成功）
+                        if success or not existing_history_item.get("success"):
+                            existing_history_item["success"] = success
+                            existing_history_item["time"] = time.time()
+                            existing_history_item["error"] = error_msg if not success else None
+                            existing_history_item["path"] = downloaded_path
+                            if result.get("cover_url"):
+                                existing_history_item["cover_url"] = result.get("cover_url")
+                            if result.get("digest"):
+                                existing_history_item["digest"] = result.get("digest")
+                            if result.get("publish_time"):
+                                existing_history_item["publish_time"] = result["publish_time"]
+                    else:
+                        existing_history_item = {
                             "title": result.get("title") or title,
                             "link": link,
                             "account": nickname,
@@ -162,21 +183,23 @@ class RssScheduler:
                             "cover_url": result.get("cover_url") or art.get("cover", ""),
                             "digest": result.get("digest") or art.get("digest", ""),
                             "publish_time": result.get("publish_time") or art.get("update_time", int(time.time())),
-                        })
+                        }
+                        history.append(existing_history_item)
                         history_links.add(link)
 
-                    # 记录到订阅文章列表中
-                    rss_item = {
-                        "title": result.get("title") or title,
-                        "link": link,
-                        "cover": result.get("cover_url") or art.get("cover", ""),
-                        "digest": result.get("digest") or art.get("digest", ""),
-                        "author": nickname,
-                        "update_time": result.get("publish_time") or art.get("update_time", int(time.time())),
-                        "path": downloaded_path or "",
-                    }
-                    existing.insert(0, rss_item)
-                    new_count += 1
+                    # 仅在下载成功，或该失败是永久性失败（如作者已删除/内容被屏蔽）时，才加入到订阅缓存列表中（防止重复重试）
+                    if success or is_permanent:
+                        rss_item = {
+                            "title": result.get("title") or title,
+                            "link": link,
+                            "cover": result.get("cover_url") or art.get("cover", ""),
+                            "digest": result.get("digest") or art.get("digest", ""),
+                            "author": nickname,
+                            "update_time": result.get("publish_time") or art.get("update_time", int(time.time())),
+                            "path": downloaded_path or "",
+                        }
+                        existing.insert(0, rss_item)
+                        new_count += 1
 
                     # 避免抓取频率过快，加入延迟
                     if i < len(new_articles) - 1:

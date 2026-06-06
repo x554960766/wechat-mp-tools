@@ -277,9 +277,51 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         resp.encoding = "utf-8"
         raw_html = resp.text
 
+        # 检测是否为微信屏蔽、删除或出错页面
+        has_js_content = 'id="js_content"' in raw_html
+        
+        # 提取标题辅助判断
+        title_tag_match = re.search(r'<title>([^<]*)</title>', raw_html, re.I)
+        page_title_tag = title_tag_match.group(1).strip() if title_tag_match else ""
+        
+        is_error = False
+        error_msg = ""
+        is_permanent = False
+        
+        if not has_js_content:
+            if any(kw in raw_html for kw in ["内容已被作者删除", "已被作者删除"]):
+                is_error = True
+                error_msg = "作者已删除"
+                is_permanent = True
+            elif any(kw in raw_html for kw in ["该内容暂时无法查看", "此内容因违规无法查看", "此内容无法查看"]):
+                is_error = True
+                error_msg = "内容已被微信屏蔽"
+                is_permanent = True
+            elif "链接已过期" in raw_html:
+                is_error = True
+                error_msg = "链接已过期"
+                is_permanent = True
+            elif "系统出错" in raw_html:
+                is_error = True
+                error_msg = "系统出错"
+                is_permanent = False
+        
+        if not is_error and any(kw in page_title_tag for kw in ["该内容暂时无法查看", "系统出错"]):
+            is_error = True
+            if "该内容暂时无法查看" in page_title_tag:
+                error_msg = "内容已被微信屏蔽"
+                is_permanent = True
+            else:
+                error_msg = "系统出错"
+                is_permanent = False
+                
+        if is_error:
+            report_proxy_status(proxy_url, success=False)
+            return {"success": False, "title": safe_title, "error": error_msg, "is_permanent": is_permanent}
+
     except Exception as e:
         report_proxy_status(proxy_url, success=False)
-        return {"success": False, "title": safe_title, "error": f"获取页面失败: {str(e)}"}
+        return {"success": False, "title": safe_title, "error": f"获取页面失败: {str(e)}", "is_permanent": False}
 
     # 提取封面 URL、描述和发布时间
     cover_url = ""

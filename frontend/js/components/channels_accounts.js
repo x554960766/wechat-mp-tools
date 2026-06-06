@@ -10,45 +10,10 @@ const ChannelsAccountsPage = {
         return `
             <div class="page-header animate-fade-in">
                 <h2 class="page-title">视频号管理</h2>
-                <p class="page-description">根据视频链接解析并收藏视频号作者，查看并同步创作者作品，支持批量下载视频。</p>
+                <p class="page-description">根据视频链接解析并收藏视频号作者，查看创作者作品。</p>
             </div>
 
-            <!-- 同步助手 & 拦截代理设置 (证书注入 JS 方式) -->
-            <div class="card animate-fade-in" style="margin-top: var(--spacing-lg); margin-bottom: var(--spacing-lg); border: 1px solid rgba(7, 193, 96, 0.15); background: linear-gradient(135deg, var(--bg-card) 0%, rgba(7, 193, 96, 0.03) 100%);">
-                <div class="card-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: var(--spacing-sm); border-bottom: 1px solid rgba(7, 193, 96, 0.1);">
-                    <h3 class="card-title" style="margin: 0; color: var(--primary); display: flex; align-items: center; gap: 8px;">
-                        🔒 微信极速同步助手 <span class="badge" id="proxy-status-badge" style="font-size: 0.75rem; border-radius: 20px; padding: 2px 8px; font-weight: 600;">检测中...</span>
-                    </h3>
-                    <div style="font-size: 0.85rem; color: var(--text-muted); display: flex; gap: 12px; align-items: center;">
-                        <span id="cert-status-badge" style="display: flex; align-items: center; gap: 4px;">CA 证书: <strong style="color: #ff9900;">检测中</strong></span>
-                    </div>
-                </div>
-                
-                <div style="padding: var(--spacing-md); display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: var(--spacing-md);">
-                    <div style="flex: 1; min-width: 300px;">
-                        <p style="font-size: 0.9rem; margin: 0 0 8px 0; color: var(--text-primary); font-weight: 500;">
-                            通过系统代理拦截并注入辅助脚本，在微信 PC 客户端内自动完成作者全部作品的一键同步。
-                        </p>
-                        <div style="font-size: 0.8rem; color: var(--text-muted); line-height: 1.5;">
-                            1. 点击“启动助手”并允许添加/信任本地 CA 根证书。<br>
-                            2. 启动后，在 PC/Mac 微信中打开任意视频号作者的个人主页。<br>
-                            3. 微信页面内会自动浮现【同步当前作者作品到系统】按钮，点击即可极速同步！
-                        </div>
-                    </div>
-                    
-                    <div style="display: flex; gap: var(--spacing-sm); flex-wrap: wrap; align-items: center;">
-                        <button class="btn btn-secondary" id="btn-install-cert" onclick="ChannelsAccountsPage.installCert()" style="font-size: 0.85rem; padding: 10px 16px; display: flex; align-items: center; gap: 6px;">
-                            🛡️ 安装/信任证书
-                        </button>
-                        <a href="/api/channels/proxy/download-cert" class="btn btn-secondary" style="font-size: 0.85rem; padding: 10px 16px; text-decoration: none; display: flex; align-items: center; gap: 6px;" title="下载证书供手动安装">
-                            📥 下载证书
-                        </a>
-                        <button class="btn btn-primary" id="btn-toggle-proxy" onclick="ChannelsAccountsPage.toggleProxy()" style="min-width: 140px; font-weight: 600; padding: 10px 20px;">
-                            🚀 启动同步助手
-                        </button>
-                    </div>
-                </div>
-            </div>
+
 
             <!-- 解析与添加区域 -->
             <div class="card animate-fade-in" style="margin-top: var(--spacing-lg); margin-bottom: var(--spacing-lg);">
@@ -137,7 +102,6 @@ const ChannelsAccountsPage = {
 
     async init() {
         await this.loadFavorites();
-        await this.checkProxyStatus();
     },
 
     async pasteFromClipboard() {
@@ -194,23 +158,23 @@ const ChannelsAccountsPage = {
             this.resolvedAuthor = {
                 username: ai.username || ai.nickname,
                 nickname: ai.nickname || '未命名作者',
-                head_img_url: ai.headImgUrl || ''
+                head_img_url: ai.headImgUrl || '',
+                video_url: fi?.videoUrl || ''
             };
 
             // 如果有解析的视频本身，顺便把这条视频保存下来作为作者的初始视频
-            const fi = res.data.feedInfo;
-            if (fi && fi.videoUrl) {
+            const fi_data = res.data.feedInfo;
+            if (fi_data && fi_data.videoUrl) {
                 // 异步存入该作者的作品库，不做阻碍
-                const bestVideoUrl = fi.h264VideoInfo?.videoUrl || fi.h265VideoInfo?.videoUrl || fi.videoUrl;
                 API.channels.addAuthorVideo(this.resolvedAuthor.username, {
-                    id: fi.id || String(Date.now()),
-                    description: fi.description || '',
-                    cover_url: fi.coverUrl || '',
-                    video_url: fi.videoUrl || '',
-                    video_url_h264: fi.h264VideoInfo?.videoUrl || '',
-                    video_url_h265: fi.h265VideoInfo?.videoUrl || '',
-                    createtime: fi.createtime ? String(fi.createtime) : String(Math.floor(Date.now() / 1000)),
-                    decode_key: fi.media?.decodeKey || fi.decodeKey || ''
+                    id: fi_data.id || String(Date.now()),
+                    description: fi_data.description || '',
+                    cover_url: fi_data.coverUrl || '',
+                    video_url: fi_data.videoUrl || '',
+                    video_url_h264: fi_data.h264VideoInfo?.videoUrl || '',
+                    video_url_h265: fi_data.h265VideoInfo?.videoUrl || '',
+                    createtime: fi_data.createtime ? String(fi_data.createtime) : String(Math.floor(Date.now() / 1000)),
+                    decode_key: fi_data.media?.decodeKey || fi_data.decodeKey || ''
                 }).catch(e => console.error('保存初始视频失败:', e));
             }
 
@@ -297,7 +261,8 @@ const ChannelsAccountsPage = {
             await API.channels.addFavorite({
                 username: username,
                 nickname: nickname,
-                head_img_url: ''
+                head_img_url: '',
+                video_url: ''
             });
 
             Toast.success('手动收藏成功！');
@@ -405,87 +370,4 @@ const ChannelsAccountsPage = {
         return div.innerHTML;
     },
 
-    async checkProxyStatus() {
-        try {
-            const status = await API.channels.getProxyStatus();
-            this.renderProxyUI(status);
-        } catch (err) {
-            console.error('Failed to get proxy status:', err);
-        }
-    },
-
-    renderProxyUI(status) {
-        const proxyBadge = document.getElementById('proxy-status-badge');
-        const certBadge = document.getElementById('cert-status-badge');
-        const toggleBtn = document.getElementById('btn-toggle-proxy');
-        const installBtn = document.getElementById('btn-install-cert');
-        
-        if (!proxyBadge || !toggleBtn) return;
-        
-        if (status.proxy_running) {
-            proxyBadge.textContent = '运行中';
-            proxyBadge.style.background = '#07c160';
-            proxyBadge.style.color = 'white';
-            toggleBtn.textContent = '🛑 关闭同步助手';
-            toggleBtn.className = 'btn btn-secondary';
-            toggleBtn.style.borderColor = 'rgba(255,59,48,0.2)';
-            toggleBtn.style.color = '#ff3b30';
-        } else {
-            proxyBadge.textContent = '已关闭';
-            proxyBadge.style.background = 'rgba(0,0,0,0.08)';
-            proxyBadge.style.color = 'var(--text-secondary)';
-            toggleBtn.textContent = '🚀 启动同步助手';
-            toggleBtn.className = 'btn btn-primary';
-            toggleBtn.style.color = '';
-            toggleBtn.style.borderColor = '';
-        }
-        
-        if (certBadge && installBtn) {
-            if (status.cert_installed) {
-                certBadge.innerHTML = 'CA 证书: <strong style="color: #07c160;">已信任</strong>';
-                installBtn.style.display = 'none';
-            } else {
-                certBadge.innerHTML = 'CA 证书: <strong style="color: #ff9500;">未信任</strong>';
-                installBtn.style.display = 'inline-flex';
-            }
-        }
-    },
-
-    async toggleProxy() {
-        const toggleBtn = document.getElementById('btn-toggle-proxy');
-        if (toggleBtn) toggleBtn.disabled = true;
-        
-        try {
-            const status = await API.channels.getProxyStatus();
-            if (status.proxy_running) {
-                await API.channels.stopProxy();
-                Toast.success('同步助手及系统代理已成功关闭');
-            } else {
-                Toast.info('正在启动服务，请注意系统弹窗并允许证书安装...');
-                await API.channels.startProxy();
-                Toast.success('同步助手启动成功！已配置系统代理');
-            }
-            await this.checkProxyStatus();
-        } catch (err) {
-            Toast.error('同步助手操作失败: ' + err.message);
-        } finally {
-            if (toggleBtn) toggleBtn.disabled = false;
-        }
-    },
-
-    async installCert() {
-        const installBtn = document.getElementById('btn-install-cert');
-        if (installBtn) installBtn.disabled = true;
-        
-        try {
-            Toast.info('请在系统弹窗中确认信任该本地证书...');
-            await API.channels.installCert();
-            Toast.success('证书安装/信任成功！');
-            await this.checkProxyStatus();
-        } catch (err) {
-            Toast.error('安装证书失败: ' + err.message);
-        } finally {
-            if (installBtn) installBtn.disabled = false;
-        }
-    }
 };
