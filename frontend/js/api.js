@@ -19,9 +19,17 @@ const API = {
 
         try {
             const resp = await fetch(`${this.baseUrl}${url}`, fetchOptions);
-            const data = await resp.json();
+            const text = await resp.text();
+            let data = {};
+            let isJson = true;
+            try {
+                data = JSON.parse(text);
+            } catch (jsonErr) {
+                isJson = false;
+                data = { error: `服务响应解析失败 (HTTP ${resp.status})` };
+            }
 
-            if (!resp.ok) {
+            if (!resp.ok || !isJson) {
                 const errMsg = data.error || data.message || `HTTP ${resp.status}`;
                 if (showError) Toast.error(errMsg);
                 throw new Error(errMsg);
@@ -57,6 +65,7 @@ const API = {
         status() { return API.get('/api/auth/status', { showError: false }); },
         login() { return API.post('/api/auth/login'); },
         logout() { return API.post('/api/auth/logout'); },
+        cancel() { return API.post('/api/auth/cancel'); },
         checkCredentials() { return API.get('/api/auth/check-credentials', { showError: false }); },
     },
 
@@ -148,10 +157,24 @@ const API = {
     // ── WeChat Channels API ──────────────────────────
     channels: {
         fetchVideoProfile(url) { return API.post('/api/channels/fetch_video_profile', { url }); },
-        download(url, description, createtime) { return API.post('/api/channels/download', { url, description, createtime }); },
+        download(url, description, createtime, decryptKey = null) { return API.post('/api/channels/download', { url, description, createtime, decrypt_key: decryptKey }); },
         openFolder() { return API.post('/api/channels/open-folder'); },
         startCookieAcquisition() { return API.post('/api/channels/start_cookie_acquisition'); },
         cookieAcquisitionStatus() { return API.get('/api/channels/cookie_acquisition_status', { showError: false }); },
+        getHistory() { return API.get('/api/channels/history'); },
+        clearHistory() { return API.delete('/api/channels/history'); },
+        openFile(path) { return API.post('/api/channels/open-file', { path }); },
+        openParent(path) { return API.post('/api/channels/open-parent', { path }); },
+        getFavorites() { return API.get('/api/channels/favorites'); },
+        addFavorite(author) { return API.post('/api/channels/favorites', author); },
+        removeFavorite(username) { return API.delete(`/api/channels/favorites/${username}`); },
+        getAuthorVideos(username) { return API.get(`/api/channels/author-videos/${username}`); },
+        addAuthorVideo(username, feed) { return API.post(`/api/channels/author-videos/${username}`, feed); },
+        getProxyStatus() { return API.get('/api/channels/proxy/status'); },
+        startProxy() { return API.post('/api/channels/proxy/start'); },
+        stopProxy() { return API.post('/api/channels/proxy/stop'); },
+        installCert() { return API.post('/api/channels/proxy/install-cert'); },
+        clearCache() { return API.post('/api/channels/clear-cache'); },
     },
 
     // ── Video Transcoder API ─────────────────────────
@@ -169,8 +192,16 @@ const API = {
                     method: 'POST',
                     body: formData
                 });
-                const data = await resp.json();
-                if (!resp.ok) {
+                const text = await resp.text();
+                let data = {};
+                let isJson = true;
+                try {
+                    data = JSON.parse(text);
+                } catch (e) {
+                    isJson = false;
+                    throw new Error(`服务响应解析失败 (HTTP ${resp.status})`);
+                }
+                if (!resp.ok || !isJson) {
                     throw new Error(data.error || '上传文件失败');
                 }
                 return data;

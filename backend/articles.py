@@ -387,6 +387,8 @@ def get_history():
     indexed_history = []
     for index, item in enumerate(history):
         if isinstance(item, dict):
+            if item.get("account") == "微信视频号":
+                continue
             indexed = dict(item)
             indexed["_index"] = index
             indexed_history.append(indexed)
@@ -399,7 +401,9 @@ def get_history():
 @articles_bp.route("/history", methods=["DELETE"])
 def clear_history():
     """清空下载历史"""
-    save_json(DOWNLOAD_HISTORY_FILE, [])
+    history = load_json(DOWNLOAD_HISTORY_FILE, [])
+    filtered_history = [item for item in history if isinstance(item, dict) and item.get("account") == "微信视频号"]
+    save_json(DOWNLOAD_HISTORY_FILE, filtered_history)
     return jsonify({"message": "历史已清空"})
 
 

@@ -175,6 +175,9 @@ const LoginPage = {
                     </div>
                 `;
             } else if (loginState.status === 'scanning') {
+                if (!this._pollTimer) {
+                    this.startStatusPolling();
+                }
                 container.innerHTML = `
                     <div style="text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px 0;">
                         ${loginState.qrcode ? `
@@ -188,6 +191,9 @@ const LoginPage = {
                         <div class="progress-bar" style="width: 80%; margin: 8px auto 0;">
                             <div class="progress-fill" style="width: ${loginState.progress}%"></div>
                         </div>
+                        <button class="btn btn-secondary btn-sm" style="margin-top: 16px;" onclick="LoginPage.cancelLogin()">
+                            取消登录并重置
+                        </button>
                     </div>
                 `;
             } else if (loginState.status === 'failed') {
@@ -218,6 +224,48 @@ const LoginPage = {
         }
     },
 
+    startStatusPolling() {
+        if (this._pollTimer) clearInterval(this._pollTimer);
+        this._pollTimer = setInterval(async () => {
+            try {
+                const data = await API.auth.status();
+                this.updateStatusUI(data);
+                if (data.logged_in || (data.login_state?.status !== 'scanning' && data.login_state?.status !== 'idle')) {
+                    clearInterval(this._pollTimer);
+                    this._pollTimer = null;
+                    const btn = document.getElementById('btn-start-login');
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.innerHTML = `
+                            <svg viewBox="0 0 24 24" fill="none" width="20" height="20">
+                                <path d="M15 3H19C20.1 3 21 3.9 21 5V19C21 20.1 20.1 21 19 21H15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                <polyline points="10,17 15,12 10,7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                                <line x1="15" y1="12" x2="3" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                            显示登录二维码
+                        `;
+                    }
+                }
+            } catch (err) {
+                // 静默处理
+            }
+        }, 3000);
+    },
+
+    async cancelLogin() {
+        try {
+            await API.auth.cancel();
+            Toast.success('已取消登录流程');
+            if (this._pollTimer) {
+                clearInterval(this._pollTimer);
+                this._pollTimer = null;
+            }
+            await this.refreshStatus();
+        } catch (err) {
+            Toast.error('取消失败: ' + err.message);
+        }
+    },
+
     async startLogin() {
         const btn = document.getElementById('btn-start-login');
         if (btn) {
@@ -230,30 +278,7 @@ const LoginPage = {
             Toast.info('已启动登录流程，正在获取登录二维码...');
 
             // 开始轮询状态
-            if (this._pollTimer) clearInterval(this._pollTimer);
-            this._pollTimer = setInterval(async () => {
-                try {
-                    const data = await API.auth.status();
-                    this.updateStatusUI(data);
-                    if (data.logged_in || data.login_state?.status === 'failed') {
-                        clearInterval(this._pollTimer);
-                        this._pollTimer = null;
-                        if (btn) {
-                            btn.disabled = false;
-                            btn.innerHTML = `
-                                <svg viewBox="0 0 24 24" fill="none" width="20" height="20">
-                                    <path d="M15 3H19C20.1 3 21 3.9 21 5V19C21 20.1 20.1 21 19 21H15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                                    <polyline points="10,17 15,12 10,7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                                    <line x1="15" y1="12" x2="3" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                                </svg>
-                                显示登录二维码
-                            `;
-                        }
-                    }
-                } catch (err) {
-                    // 静默处理
-                }
-            }, 3000);
+            this.startStatusPolling();
 
         } catch (err) {
             Toast.error('启动登录失败: ' + err.message);

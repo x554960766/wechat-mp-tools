@@ -357,16 +357,42 @@ def _do_login():
                 _active_browser = None
 
     except Exception as e:
-        _set_login_state("failed", f"登录失败: {str(e)}")
+        with _login_lock:
+            current_status = _login_state["status"]
+        if current_status != "idle":
+            _set_login_state("failed", f"登录失败: {str(e)}")
         with _login_lock:
             _active_browser = None
+
+
+@auth_bp.route("/cancel", methods=["POST"])
+def cancel_login():
+    """取消扫码登录"""
+    global _active_browser
+    with _login_lock:
+        if _active_browser is not None:
+            try:
+                _active_browser.close()
+            except Exception:
+                pass
+            _active_browser = None
+    _set_login_state("idle", "登录已取消")
+    return jsonify({"message": "登录已取消"})
 
 
 @auth_bp.route("/logout", methods=["POST"])
 def logout():
     """清除登录凭证"""
+    global _active_browser
     if CONFIG_FILE.exists():
         CONFIG_FILE.unlink()
+    with _login_lock:
+        if _active_browser is not None:
+            try:
+                _active_browser.close()
+            except Exception:
+                pass
+            _active_browser = None
     _set_login_state("idle", "已退出登录")
     return jsonify({"message": "已退出登录"})
 

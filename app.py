@@ -128,12 +128,20 @@ def main():
     if not args.no_browser:
         threading.Thread(target=open_browser, args=(args.port,), daemon=True).start()
 
-    app.run(
-        host=args.host,
-        port=args.port,
-        debug=args.debug,
-        threaded=True,
-    )
+    try:
+        app.run(
+            host=args.host,
+            port=args.port,
+            debug=args.debug,
+            threaded=True,
+        )
+    finally:
+        try:
+            from backend.mitm_proxy import ProxyManager
+            ProxyManager.get_instance().stop()
+        except Exception as ep:
+            print(f"Error stopping Channels proxy on shutdown: {ep}")
+
 
 
 if __name__ == "__main__":

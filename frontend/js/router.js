@@ -16,6 +16,10 @@ const Router = {
             'download': DownloadPage,
             'history': HistoryPage,
             'channels': ChannelsPage,
+            'channels_login': typeof ChannelsLoginPage !== 'undefined' ? ChannelsLoginPage : null,
+            'channels_accounts': typeof ChannelsAccountsPage !== 'undefined' ? ChannelsAccountsPage : null,
+            'channels_history': typeof ChannelsHistoryPage !== 'undefined' ? ChannelsHistoryPage : null,
+            'channels_user': typeof ChannelsUserPage !== 'undefined' ? ChannelsUserPage : null,
             'proxy': ProxyPage,
             'settings': SettingsPage,
             'transcode': typeof TranscodePage !== 'undefined' ? TranscodePage : null,
@@ -63,7 +67,7 @@ const Router = {
         if (pageKey.startsWith('dy_')) {
             document.body.classList.add('dy-theme');
             document.body.classList.remove('wechat-theme');
-        } else if (['login', 'accounts', 'articles', 'download', 'history', 'channels'].includes(pageKey)) {
+        } else if (['login', 'accounts', 'articles', 'download', 'history', 'channels'].includes(pageKey) || pageKey.startsWith('channels_')) {
             document.body.classList.remove('dy-theme');
             document.body.classList.add('wechat-theme');
         } else if (!document.body.classList.contains('dy-theme') && !document.body.classList.contains('wechat-theme')) {
@@ -247,11 +251,13 @@ const Router = {
         let activeGroup = 'wechat'; // 默认微信
         if (activeKey.startsWith('dy_')) {
             activeGroup = 'douyin';
+        } else if (activeKey.startsWith('channels_') || activeKey === 'channels') {
+            activeGroup = 'wechat_channels';
         } else if (['transcode', 'proxy', 'settings'].includes(activeKey)) {
             activeGroup = 'common';
         }
 
-        const groups = ['wechat', 'douyin', 'common'];
+        const groups = ['wechat', 'wechat_channels', 'douyin', 'common'];
         groups.forEach(g => {
             const itemsEl = document.getElementById(`items-${g}`);
             const titleEl = document.querySelector(`.nav-group-title[data-group="${g}"]`);

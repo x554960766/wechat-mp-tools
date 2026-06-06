@@ -79,51 +79,16 @@ const SettingsPage = {
                     </div>
                 </div>
 
-                <!-- 抖音认证配置 -->
-                <div class="card">
-                    <div class="card-header">
-                        <h3 class="card-title">🎵 抖音服务配置</h3>
-                    </div>
-                    <div class="card-body" style="padding: 0 var(--spacing-md) var(--spacing-md);">
-                        <div class="form-group">
-                            <label class="form-label">账号登录状态</label>
-                            <div style="display: flex; align-items: center; gap: var(--spacing-md); margin-top: 8px;">
-                                <div id="dy-login-status-badge" style="padding: 4px 12px; border-radius: 12px; background: var(--bg-input); font-size: 0.85rem; font-weight: 500;">
-                                    检测中...
-                                </div>
-                                <button class="btn btn-secondary" onclick="SettingsPage.startDouyinLogin()">登录抖音账号</button>
-                            </div>
-                            <div class="form-hint" style="margin-top: 8px;">登录后可获取高清无水印视频、访问推荐 and 收藏列表。登录过程将打开浏览器请手动完成扫码或验证码校验。</div>
-                        </div>
-                        <div class="form-group" style="margin-top: var(--spacing-md);">
-                            <label class="form-label">或者直接填入 Cookie (高级)</label>
-                            <textarea id="setting-douyin-cookie" class="form-input" style="height: 60px; resize: vertical;" placeholder="如果您知道如何提取，可直接粘贴抖音网页版的 Cookie"></textarea>
-                            <div class="form-hint">Cookie 的优先级最高。手动粘贴 Cookie 会立即生效。</div>
-                        </div>
-                    </div>
-                </div>
-
                 <!-- 视频号解析配置 -->
                 <div class="card">
                     <div class="card-header">
                         <h3 class="card-title">🟢 视频号服务配置</h3>
                     </div>
                     <div class="card-body" style="padding: 0 var(--spacing-md) var(--spacing-md);">
-                        <div class="form-group">
+                        <div class="form-group" style="margin-top: var(--spacing-md);">
                             <label class="form-label" for="setting-channels-worker">自定义 Worker 域名 (私有云端)</label>
                             <input type="text" class="form-input" id="setting-channels-worker" placeholder="https://your-worker.your-name.workers.dev" />
                             <div class="form-hint">配置您专属的 Cloudflare Worker 网页中转解析服务，避免共享公共解析站。</div>
-                        </div>
-                        <div class="form-group" style="margin-top: var(--spacing-md);">
-                            <label class="form-label" for="setting-yuanbao-cookie">腾讯元宝 Web 版 Cookie (推荐，100%本地运行)</label>
-                            <div style="display: flex; gap: var(--spacing-sm); margin-bottom: 8px; align-items: center;">
-                                <button class="btn btn-primary" id="btn-capture-cookie" onclick="SettingsPage.startCookieAcquisition()" style="padding: 8px 16px; font-size: 0.9rem; font-weight: 500; display: flex; align-items: center; gap: 6px;">
-                                    <span>🌐 自动登录获取 Cookie</span>
-                                </button>
-                                <span class="badge" id="cookie-status-badge" style="display: none; padding: 4px 10px; border-radius: 12px; font-size: 0.8rem; font-weight: 500;">等待登录...</span>
-                            </div>
-                            <textarea id="setting-yuanbao-cookie" class="form-input" style="height: 80px; resize: vertical;" placeholder="1. 点击上方按钮唤起本地浏览器&#10;2. 在弹出的窗口中微信扫码登录&#10;3. 登录成功后系统将自动提取并保存 Cookie，无需您手动复制！"></textarea>
-                            <div class="form-hint">配置您本人的元宝 Cookie 后，软件将跳过外部云端服务器，直接在本地解密网页直链，稳定可靠。</div>
                         </div>
                     </div>
                 </div>
@@ -174,8 +139,6 @@ const SettingsPage = {
         const pageSizeInput = document.getElementById('setting-page-size');
         const maxArticlesInput = document.getElementById('setting-max-articles');
         const maxRetriesInput = document.getElementById('setting-max-retries');
-        const dyCookieInput = document.getElementById('setting-douyin-cookie');
-        const ybCookieInput = document.getElementById('setting-yuanbao-cookie');
         const chWorkerInput = document.getElementById('setting-channels-worker');
 
         if (dirInput) dirInput.value = data.download_dir || '';
@@ -187,72 +150,10 @@ const SettingsPage = {
         if (pageSizeInput) pageSizeInput.value = data.page_size || 10;
         if (maxArticlesInput) maxArticlesInput.value = data.max_articles || 50;
         if (maxRetriesInput) maxRetriesInput.value = data.max_retries || 3;
-        if (dyCookieInput) dyCookieInput.value = data.douyin_cookie || '';
-        if (ybCookieInput) ybCookieInput.value = data.yuanbao_cookie || '';
         if (chWorkerInput) chWorkerInput.value = data.custom_channels_worker || '';
-        
-        this.checkDouyinAuth();
     },
 
-    async checkDouyinAuth() {
-        const badge = document.getElementById('dy-login-status-badge');
-        if (!badge) return;
-        
-        try {
-            const res = await fetch('/api/douyin-auth/status');
-            const data = await res.json();
-            if (data.logged_in) {
-                badge.textContent = '已登录';
-                badge.style.color = 'var(--success)';
-                badge.style.background = 'rgba(76, 175, 80, 0.1)';
-            } else {
-                badge.textContent = '未登录';
-                badge.style.color = 'var(--text-muted)';
-                badge.style.background = 'var(--bg-input)';
-            }
 
-            if (window.App && typeof App.checkAuthStatus === 'function') {
-                App.checkAuthStatus();
-            }
-        } catch(e) {
-            badge.textContent = '状态检测失败';
-        }
-    },
-
-    async startDouyinLogin() {
-        try {
-            const res = await fetch('/api/douyin-auth/login', { method: 'POST' });
-            const data = await res.json();
-            if (res.ok) {
-                Toast.success(data.message);
-                // Start polling status
-                if (this.dyAuthPoll) clearInterval(this.dyAuthPoll);
-                this.dyAuthPoll = setInterval(async () => {
-                    const statusRes = await fetch('/api/douyin-auth/status');
-                    const statusData = await statusRes.json();
-                    
-                    const badge = document.getElementById('dy-login-status-badge');
-                    if (statusData.login_state && statusData.login_state.status === 'scanning') {
-                        if (badge) badge.textContent = statusData.login_state.message || '登录中...';
-                    } else if (statusData.login_state && statusData.login_state.status === 'success') {
-                        clearInterval(this.dyAuthPoll);
-                        this.dyAuthPoll = null;
-                        Toast.success('抖音登录成功！');
-                        this.loadSettings();
-                    } else if (statusData.login_state && statusData.login_state.status === 'failed') {
-                        clearInterval(this.dyAuthPoll);
-                        this.dyAuthPoll = null;
-                        Toast.error('抖音登录失败: ' + statusData.login_state.message);
-                        this.checkDouyinAuth();
-                    }
-                }, 2000);
-            } else {
-                Toast.error(data.error || '无法启动登录');
-            }
-        } catch (err) {
-            Toast.error('请求失败: ' + err.message);
-        }
-    },
 
     async saveSettings() {
         const dirInput = document.getElementById('setting-download-dir');
@@ -263,8 +164,6 @@ const SettingsPage = {
         const pageSizeInput = document.getElementById('setting-page-size');
         const maxArticlesInput = document.getElementById('setting-max-articles');
         const maxRetriesInput = document.getElementById('setting-max-retries');
-        const dyCookieInput = document.getElementById('setting-douyin-cookie');
-        const ybCookieInput = document.getElementById('setting-yuanbao-cookie');
         const chWorkerInput = document.getElementById('setting-channels-worker');
 
         const request_delay = parseFloat(delayInput.value);
@@ -274,6 +173,7 @@ const SettingsPage = {
         }
 
         const settings = {
+            ...this.settings,
             download_dir: dirInput.value.trim(),
             concurrent_downloads: parseInt(concurrentInput.value) || 1,
             auto_save_images: saveImagesCheck.checked,
@@ -282,8 +182,6 @@ const SettingsPage = {
             page_size: parseInt(pageSizeInput.value) || 10,
             max_articles: parseInt(maxArticlesInput.value) || 50,
             max_retries: parseInt(maxRetriesInput.value) || 3,
-            douyin_cookie: dyCookieInput ? dyCookieInput.value.trim() : '',
-            yuanbao_cookie: ybCookieInput ? ybCookieInput.value.trim() : '',
             custom_channels_worker: chWorkerInput ? chWorkerInput.value.trim() : '',
         };
 
@@ -291,84 +189,12 @@ const SettingsPage = {
             await API.settings.save(settings);
             Toast.success('设置已保存');
             this.settings = settings;
-            this.checkDouyinAuth();
         } catch (err) {
             // Error handled by API wrapper
         }
     },
 
-    async startCookieAcquisition() {
-        const btn = document.getElementById('btn-capture-cookie');
-        const badge = document.getElementById('cookie-status-badge');
-        
-        if (!btn) return;
-        
-        btn.disabled = true;
-        btn.innerHTML = '<span class="spinner" style="width: 14px; height: 14px; border-width: 2px; display: inline-block; vertical-align: middle; margin-right: 6px;"></span> 正在唤起浏览器...';
-        
-        try {
-            const data = await API.channels.startCookieAcquisition();
-            Toast.success(data.message);
-            
-            if (badge) {
-                badge.textContent = '等待登录中...';
-                badge.style.color = '#3182ce';
-                badge.style.background = 'rgba(49, 130, 206, 0.1)';
-                badge.style.display = 'inline-block';
-            }
-            
-            if (this.cookiePollTimer) clearInterval(this.cookiePollTimer);
-            
-            this.cookiePollTimer = setInterval(async () => {
-                try {
-                    const status = await API.channels.cookieAcquisitionStatus();
-                    
-                    if (status.status === 'running') {
-                        btn.innerHTML = '<span class="spinner" style="width: 14px; height: 14px; border-width: 2px; display: inline-block; vertical-align: middle; margin-right: 6px;"></span> 正在等待扫码登录...';
-                    } else if (status.status === 'success') {
-                        clearInterval(this.cookiePollTimer);
-                        this.cookiePollTimer = null;
-                        
-                        btn.disabled = false;
-                        btn.innerHTML = '🌐 自动登录获取 Cookie';
-                        
-                        if (badge) {
-                            badge.textContent = '获取成功';
-                            badge.style.color = 'var(--success)';
-                            badge.style.background = 'rgba(76, 175, 80, 0.1)';
-                        }
-                        
-                        Toast.success('元宝登录 Cookie 已自动获取并保存！');
-                        await this.loadSettings();
-                    } else if (status.status === 'failed') {
-                        clearInterval(this.cookiePollTimer);
-                        this.cookiePollTimer = null;
-                        
-                        btn.disabled = false;
-                        btn.innerHTML = '🌐 自动登录获取 Cookie';
-                        
-                        if (badge) {
-                            badge.textContent = '获取失败';
-                            badge.style.color = 'var(--error)';
-                            badge.style.background = 'rgba(229, 62, 62, 0.1)';
-                        }
-                        
-                        Toast.error('获取 Cookie 失败: ' + status.error);
-                    }
-                } catch (err) {
-                    clearInterval(this.cookiePollTimer);
-                    this.cookiePollTimer = null;
-                    btn.disabled = false;
-                    btn.innerHTML = '🌐 自动登录获取 Cookie';
-                }
-            }, 2000);
-            
-        } catch (err) {
-            btn.disabled = false;
-            btn.innerHTML = '🌐 自动登录获取 Cookie';
-            Toast.error('唤起浏览器失败: ' + err.message);
-        }
-    },
+
 
     async resetDefaults() {
         Modal.confirm('恢复默认设置', '确定要将所有配置项恢复为系统默认吗？', async () => {

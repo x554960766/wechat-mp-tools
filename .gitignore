@@ -34,3 +34,5 @@ backend/subtitle_remover/backend/ffmpeg/
 
 # External reference project
 we-mp-rss/
+wechat_video_sniffer_repo/
+wx_channels_download_temp/

@@ -10,12 +10,146 @@ import random
 import subprocess
 import urllib.parse
 import requests
+import struct
 from pathlib import Path
 from flask import Blueprint, jsonify, request
 
-from backend.config import DATA_DIR, OUTPUT_DIR, get_settings
+from backend.config import DATA_DIR, OUTPUT_DIR, get_settings, load_json, save_json
 
 channels_bp = Blueprint("channels", __name__, url_prefix="/api/channels")
+CHANNELS_HISTORY_FILE = DATA_DIR / "channels_history.json"
+CHANNELS_FAVORITES_FILE = DATA_DIR / "channels_favorites.json"
+CHANNELS_FEEDS_FILE = DATA_DIR / "channels_parsed_feeds.json"
+
+
+class ISAAC64:
+    def __init__(self, key_uint64: int):
+        self.rand_cnt = 255
+        self.aa = 0
+        self.bb = 0
+        self.cc = 0
+        self.seed = [0] * 256
+        self.mm = [0] * 256
+        self.seed[0] = key_uint64
+        self.rand64_init()
+
+    def mix(self, a, b, c, d, e, f, g, h):
+        mask = 0xFFFFFFFFFFFFFFFF
+        a = (a - e) & mask
+        f = (f ^ (h >> 9)) & mask
+        h = (h + a) & mask
+        b = (b - f) & mask
+        g = (g ^ ((a << 9) & mask)) & mask
+        a = (a + b) & mask
+        c = (c - g) & mask
+        h = (h ^ (b >> 23)) & mask
+        b = (b + c) & mask
+        d = (d - h) & mask
+        a = (a ^ ((c << 15) & mask)) & mask
+        c = (c + d) & mask
+        e = (e - a) & mask
+        b = (b ^ (d >> 14)) & mask
+        d = (d + e) & mask
+        f = (f - b) & mask
+        c = (c ^ ((e << 20) & mask)) & mask
+        e = (e + f) & mask
+        g = (g - c) & mask
+        d = (d ^ (f >> 17)) & mask
+        f = (f + g) & mask
+        h = (h - d) & mask
+        e = (e ^ ((g << 14) & mask)) & mask
+        g = (g + h) & mask
+        return a, b, c, d, e, f, g, h
+
+    def rand64_init(self):
+        golden = 0x9e3779b97f4a7c13
+        a = b = c = d = e = f = g = h = golden
+        for _ in range(4):
+            a, b, c, d, e, f, g, h = self.mix(a, b, c, d, e, f, g, h)
+        for i in range(0, 256, 8):
+            a = (a + self.seed[i]) & 0xFFFFFFFFFFFFFFFF
+            b = (b + self.seed[i+1]) & 0xFFFFFFFFFFFFFFFF
+            c = (c + self.seed[i+2]) & 0xFFFFFFFFFFFFFFFF
+            d = (d + self.seed[i+3]) & 0xFFFFFFFFFFFFFFFF
+            e = (e + self.seed[i+4]) & 0xFFFFFFFFFFFFFFFF
+            f = (f + self.seed[i+5]) & 0xFFFFFFFFFFFFFFFF
+            g = (g + self.seed[i+6]) & 0xFFFFFFFFFFFFFFFF
+            h = (h + self.seed[i+7]) & 0xFFFFFFFFFFFFFFFF
+            a, b, c, d, e, f, g, h = self.mix(a, b, c, d, e, f, g, h)
+            self.mm[i] = a; self.mm[i+1] = b; self.mm[i+2] = c; self.mm[i+3] = d
+            self.mm[i+4] = e; self.mm[i+5] = f; self.mm[i+6] = g; self.mm[i+7] = h
+        for i in range(0, 256, 8):
+            a = (a + self.mm[i]) & 0xFFFFFFFFFFFFFFFF
+            b = (b + self.mm[i+1]) & 0xFFFFFFFFFFFFFFFF
+            c = (c + self.mm[i+2]) & 0xFFFFFFFFFFFFFFFF
+            d = (d + self.mm[i+3]) & 0xFFFFFFFFFFFFFFFF
+            e = (e + self.mm[i+4]) & 0xFFFFFFFFFFFFFFFF
+            f = (f + self.mm[i+5]) & 0xFFFFFFFFFFFFFFFF
+            g = (g + self.mm[i+6]) & 0xFFFFFFFFFFFFFFFF
+            h = (h + self.mm[i+7]) & 0xFFFFFFFFFFFFFFFF
+            a, b, c, d, e, f, g, h = self.mix(a, b, c, d, e, f, g, h)
+            self.mm[i] = a; self.mm[i+1] = b; self.mm[i+2] = c; self.mm[i+3] = d
+            self.mm[i+4] = e; self.mm[i+5] = f; self.mm[i+6] = g; self.mm[i+7] = h
+        self.isaac64()
+
+    def isaac64(self):
+        self.cc = (self.cc + 1) & 0xFFFFFFFFFFFFFFFF
+        self.bb = (self.bb + self.cc) & 0xFFFFFFFFFFFFFFFF
+        for i in range(256):
+            rem = i % 4
+            if rem == 0:
+                self.aa = (~(self.aa ^ (self.aa << 21))) & 0xFFFFFFFFFFFFFFFF
+            elif rem == 1:
+                self.aa = (self.aa ^ (self.aa >> 5)) & 0xFFFFFFFFFFFFFFFF
+            elif rem == 2:
+                self.aa = (self.aa ^ (self.aa << 12)) & 0xFFFFFFFFFFFFFFFF
+            elif rem == 3:
+                self.aa = (self.aa ^ (self.aa >> 33)) & 0xFFFFFFFFFFFFFFFF
+            self.aa = (self.aa + self.mm[(i + 128) % 256]) & 0xFFFFFFFFFFFFFFFF
+            x = self.mm[i]
+            y = (self.mm[(x >> 3) % 256] + self.aa + self.bb) & 0xFFFFFFFFFFFFFFFF
+            self.mm[i] = y
+            self.bb = (self.mm[(y >> 11) % 256] + x) & 0xFFFFFFFFFFFFFFFF
+            self.seed[i] = self.bb
+
+    def isaac_random(self) -> int:
+        result = self.seed[self.rand_cnt]
+        if self.rand_cnt == 0:
+            self.isaac64()
+            self.rand_cnt = 255
+        else:
+            self.rand_cnt -= 1
+        return result
+
+
+def decrypt_channels_data(data: bytearray, key: int, enc_len: int = 131072):
+    if len(data) == 0:
+        return
+    actual_enc_len = min(len(data), enc_len)
+    aa_inst = ISAAC64(key)
+    for i in range(0, actual_enc_len, 8):
+        rand_num = aa_inst.isaac_random()
+        temp_bytes = struct.pack(">Q", rand_num)
+        for j in range(8):
+            idx = i + j
+            if idx >= actual_enc_len:
+                return
+            data[idx] ^= temp_bytes[j]
+
+
+
+def add_channels_history_item(title: str, item_type: str, file_path: str, size_bytes: int):
+    """保存下载记录到视频号历史记录文件"""
+    from backend.config import load_json, save_json
+    history = load_json(CHANNELS_HISTORY_FILE, [])
+    history.insert(0, {
+        "title": title,
+        "type": item_type,
+        "path": str(file_path),
+        "size": f"{size_bytes / (1024 * 1024):.2f} MB" if size_bytes else "未知",
+        "time": time.strftime("%Y-%m-%d %H:%M:%S")
+    })
+    save_json(CHANNELS_HISTORY_FILE, history[:150])
 
 
 def sanitize_filename(desc: str, createtime: str) -> str:
@@ -353,11 +487,12 @@ def fetch_video_profile():
 
 @channels_bp.route("/download", methods=["POST"])
 def download_video():
-    """在后端下载未加密的视频文件到本地下载目录，避免前端跨域(CORS)限制"""
+    """在后端下载并自动解密的视频文件到本地下载目录，避免前端跨域(CORS)限制"""
     data = request.get_json() or {}
     video_url = data.get("url", "").strip()
     description = data.get("description", "").strip()
     createtime = data.get("createtime", "").strip()
+    decrypt_key = data.get("decrypt_key") or data.get("key")
 
     if not video_url:
         return jsonify({"error": "下载链接不能为空"}), 400
@@ -399,6 +534,19 @@ def download_video():
             for chunk in resp.iter_content(chunk_size=8192):
                 if chunk:
                     f.write(chunk)
+
+        # 如果有解密 Key 则对文件前 128KB 进行 ISAAC-64 解密
+        if decrypt_key:
+            try:
+                key_val = int(decrypt_key)
+                if key_val > 0:
+                    with open(filepath, "r+b") as f:
+                        file_data = bytearray(f.read(131072))
+                        decrypt_channels_data(file_data, key_val)
+                        f.seek(0)
+                        f.write(file_data)
+            except Exception as ed:
+                print(f"解密视频文件失败: {ed}")
                     
         # 写入全局下载历史记录数据库，使视频号下载立即出现在“下载历史”中，并能够快速导入转码
         try:
@@ -415,6 +563,13 @@ def download_video():
             save_json(DOWNLOAD_HISTORY_FILE, history)
         except Exception as eh:
             print(f"写入视频号下载历史记录失败: {eh}")
+
+        # 写入视频号专属下载历史
+        try:
+            size_bytes = filepath.stat().st_size
+            add_channels_history_item(description or filename, "视频", filepath, size_bytes)
+        except Exception as eh:
+            print(f"写入视频号专属下载历史记录失败: {eh}")
                     
         return jsonify({
             "success": True,
@@ -446,3 +601,272 @@ def open_folder():
         return jsonify({"message": "文件夹已打开"})
     except Exception as e:
         return jsonify({"error": f"打开文件夹失败: {str(e)}"}), 500
+
+
+@channels_bp.route("/history", methods=["GET"])
+def get_history():
+    """获取视频号下载历史记录"""
+    from backend.config import load_json
+    history = load_json(CHANNELS_HISTORY_FILE, [])
+    return jsonify(history)
+
+
+@channels_bp.route("/history", methods=["DELETE"])
+def clear_history():
+    """清除视频号下载历史记录"""
+    from backend.config import save_json
+    save_json(CHANNELS_HISTORY_FILE, [])
+    return jsonify({"message": "历史记录已清空"})
+
+
+@channels_bp.route("/open-file", methods=["POST"])
+def open_file():
+    """在系统默认程序中打开特定的视频文件"""
+    import subprocess
+    import sys
+    data = request.get_json() or {}
+    path_str = data.get("path", "")
+    if not path_str:
+        return jsonify({"error": "路径不能为空"}), 400
+    try:
+        path = Path(path_str)
+        if not path.exists():
+            return jsonify({"error": "文件不存在"}), 404
+        if sys.platform == "darwin":
+            subprocess.run(["open", str(path)])
+        elif sys.platform == "win32":
+            subprocess.run(["explorer", str(path)])
+        else:
+            subprocess.run(["xdg-open", str(path)])
+        return jsonify({"message": "已打开"})
+    except Exception as e:
+        return jsonify({"error": f"打开失败: {str(e)}"}), 500
+
+
+@channels_bp.route("/open-parent", methods=["POST"])
+def open_parent():
+    """打开文件所在的父目录"""
+    import subprocess
+    import sys
+    data = request.get_json() or {}
+    path_str = data.get("path", "")
+    if not path_str:
+        return jsonify({"error": "路径不能为空"}), 400
+    try:
+        path = Path(path_str)
+        if not path.exists():
+            return jsonify({"error": "文件或文件夹不存在"}), 404
+        parent_path = path.parent if path.is_file() else path
+        if sys.platform == "darwin":
+            subprocess.run(["open", str(parent_path)])
+        elif sys.platform == "win32":
+            subprocess.run(["explorer", str(parent_path)])
+        else:
+            subprocess.run(["xdg-open", str(parent_path)])
+        return jsonify({"message": "已打开"})
+    except Exception as e:
+        return jsonify({"error": f"打开失败: {str(e)}"}), 500
+
+
+@channels_bp.route("/favorites", methods=["GET"])
+def get_favorites():
+    """获取收藏的视频号作者列表"""
+    favorites = load_json(CHANNELS_FAVORITES_FILE, [])
+    return jsonify(favorites)
+
+
+@channels_bp.route("/favorites", methods=["POST"])
+def add_favorite():
+    """添加视频号作者到收藏列表"""
+    data = request.get_json() or {}
+    username = data.get("username", "").strip()
+    nickname = data.get("nickname", "").strip()
+    head_img_url = data.get("head_img_url", "").strip()
+
+    if not username:
+        return jsonify({"error": "作者 ID 不能为空"}), 400
+
+    favorites = load_json(CHANNELS_FAVORITES_FILE, [])
+    # 检查是否已存在
+    for fav in favorites:
+        if fav.get("username") == username:
+            return jsonify({"message": "作者已在收藏列表中", "favorites": favorites})
+
+    favorites.append({
+        "username": username,
+        "nickname": nickname or "未命名",
+        "head_img_url": head_img_url,
+        "added_time": int(time.time())
+    })
+    save_json(CHANNELS_FAVORITES_FILE, favorites)
+    return jsonify({"message": "收藏成功", "favorites": favorites})
+
+
+@channels_bp.route("/favorites/<username>", methods=["DELETE"])
+def remove_favorite(username):
+    """从收藏列表删除视频号作者"""
+    if not username:
+        return jsonify({"error": "作者 ID 不能为空"}), 400
+
+    favorites = load_json(CHANNELS_FAVORITES_FILE, [])
+    new_favorites = [fav for fav in favorites if fav.get("username") != username]
+    save_json(CHANNELS_FAVORITES_FILE, new_favorites)
+    return jsonify({"message": "已取消收藏", "favorites": new_favorites})
+
+
+@channels_bp.route("/author-videos/<username>", methods=["GET"])
+def get_author_videos(username):
+    """获取指定作者已解析的视频列表"""
+    if not username:
+        return jsonify([])
+    feeds_db = load_json(CHANNELS_FEEDS_FILE, {})
+    author_videos = feeds_db.get(username, [])
+    return jsonify(author_videos)
+
+
+@channels_bp.route("/author-videos/<username>", methods=["POST"])
+def add_author_video(username):
+    """为指定作者添加/保存一条解析成功的视频信息"""
+    if not username:
+        return jsonify({"error": "作者 ID 不能为空"}), 400
+    feed = request.get_json() or {}
+    feed_id = feed.get("id")
+    if not feed_id:
+        return jsonify({"error": "视频 ID 不能为空"}), 400
+
+    feeds_db = load_json(CHANNELS_FEEDS_FILE, {})
+    if username not in feeds_db:
+        feeds_db[username] = []
+
+    # 检查是否已存在该视频
+    exists = False
+    for item in feeds_db[username]:
+        if item.get("id") == feed_id:
+            # 存在则更新数据（如更新可能失效 of URL）
+            item.update(feed)
+            exists = True
+            break
+
+    if not exists:
+        feeds_db[username].append(feed)
+
+    save_json(CHANNELS_FEEDS_FILE, feeds_db)
+    return jsonify({"message": "视频已保存到作者作品列表", "videos": feeds_db[username]})
+
+
+# ── Interceptor Proxy Admin Endpoints ──────────────────────────
+
+@channels_bp.route("/proxy/status", methods=["GET"])
+def get_proxy_status():
+    """获取代理服务运行状态与证书信任状态"""
+    from backend.mitm_proxy import ProxyManager, check_cert_trusted
+    manager = ProxyManager.get_instance()
+    return jsonify({
+        "proxy_running": manager.running,
+        "cert_installed": check_cert_trusted(),
+        "proxy_port": manager.port
+    })
+
+
+@channels_bp.route("/proxy/start", methods=["POST"])
+def start_proxy_server():
+    """启动本地拦截代理服务"""
+    from backend.mitm_proxy import ProxyManager
+    manager = ProxyManager.get_instance()
+    success = manager.start()
+    if success:
+        return jsonify({"message": "同步代理服务已成功启动，系统代理已设置", "running": True})
+    else:
+        return jsonify({"error": "启动同步代理服务失败，端口可能被占用"}), 500
+
+
+@channels_bp.route("/proxy/stop", methods=["POST"])
+def stop_proxy_server():
+    """停止本地拦截代理服务"""
+    from backend.mitm_proxy import ProxyManager
+    manager = ProxyManager.get_instance()
+    manager.stop()
+    return jsonify({"message": "同步代理服务已关闭，系统代理已还原", "running": False})
+
+
+@channels_bp.route("/proxy/install-cert", methods=["POST"])
+def force_install_cert():
+    """安装/信任 CA 证书"""
+    from backend.mitm_proxy import install_system_cert, CA_CERT_PATH
+    success = install_system_cert(CA_CERT_PATH)
+    if success:
+        return jsonify({"message": "证书安装成功"})
+    else:
+        return jsonify({"error": "证书安装失败，请手动下载证书进行安装"}), 500
+
+
+@channels_bp.route("/proxy/download-cert", methods=["GET"])
+def download_proxy_cert():
+    """下载 CA 根证书文件以供手动安装"""
+    from backend.mitm_proxy import CA_CERT_PATH, ensure_ca_certificates
+    from flask import send_file
+    ensure_ca_certificates()
+    if not CA_CERT_PATH.exists():
+        return jsonify({"error": "CA 证书生成失败"}), 500
+    return send_file(
+        str(CA_CERT_PATH),
+        mimetype="application/x-x509-ca-cert",
+        as_attachment=True,
+        download_name="Channels_CA.crt"
+    )
+
+
+@channels_bp.route("/clear-cache", methods=["POST"])
+def clear_wechat_cache():
+    """清除微信视频号内置浏览器缓存"""
+    import shutil
+    import os
+    
+    paths_to_delete = [
+        # macOS paths
+        os.path.expanduser("~/Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/radium/web/profiles"),
+        os.path.expanduser("~/Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/radium/web/profiles_to_delete"),
+        os.path.expanduser("~/Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/radium/cache"),
+        os.path.expanduser("~/Library/Containers/com.tencent.xinWeChat/Data/Library/Caches/profiles"),
+        # Windows paths (expanded)
+        os.path.expandvars(r"%APPDATA%\Tencent\WeChat\radium\web\profiles")
+    ]
+    
+    deleted_count = 0
+    errors = []
+    
+    for path in paths_to_delete:
+        if os.path.exists(path):
+            try:
+                # Try to remove tree
+                shutil.rmtree(path, ignore_errors=True)
+                # If still exists, try manual walking/removing
+                if os.path.exists(path):
+                    for root, dirs, files in os.walk(path, topdown=False):
+                        for name in files:
+                            try: os.remove(os.path.join(root, name))
+                            except: pass
+                        for name in dirs:
+                            try: os.rmdir(os.path.join(root, name))
+                            except: pass
+                    try: os.rmdir(path)
+                    except: pass
+                
+                if not os.path.exists(path):
+                    deleted_count += 1
+                else:
+                    errors.append(f"部分文件可能被微信占用，无法完全删除: {path}")
+            except Exception as e:
+                errors.append(f"删除 {path} 失败: {str(e)}")
+                
+    if errors:
+        return jsonify({
+            "error": "，".join(errors) + "。请先在电脑上【彻底退出微信】，然后再试一次！"
+        }), 400
+        
+    return jsonify({
+        "success": True,
+        "message": "已成功清除微信视频号浏览器缓存！请重启微信后再打开视频号页面。"
+    })
+
+

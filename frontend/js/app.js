@@ -29,7 +29,13 @@ const App = {
             
             // 抖音登录状态
             const dyRes = await fetch('/api/douyin-auth/status');
-            const dyData = await dyRes.json();
+            const dyText = await dyRes.text();
+            let dyData = {};
+            try {
+                dyData = JSON.parse(dyText);
+            } catch (e) {
+                dyData = { logged_in: false };
+            }
             
             const prevLoggedIn = this.isDouyinLoggedIn;
             this.isDouyinLoggedIn = !!dyData.logged_in;
@@ -102,7 +108,7 @@ const App = {
     },
 
     toggleNavGroup(targetGroup) {
-        const groups = ['wechat', 'douyin', 'common'];
+        const groups = ['wechat', 'wechat_channels', 'douyin', 'common'];
         groups.forEach(g => {
             const itemsEl = document.getElementById(`items-${g}`);
             const titleEl = document.querySelector(`.nav-group-title[data-group="${g}"]`);

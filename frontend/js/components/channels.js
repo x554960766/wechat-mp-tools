@@ -42,6 +42,9 @@ const ChannelsPage = {
                     <button class="btn btn-secondary" onclick="ChannelsPage.openDownloadDir()">
                         📂 打开下载文件夹
                     </button>
+                    <button class="btn btn-secondary" onclick="ChannelsPage.clearWechatCache()" id="btn-clear-cache" style="color: var(--error, #e53e3e); border-color: rgba(229, 62, 62, 0.3);">
+                        🧹 清除微信缓存 (解决打不开/未初始化)
+                    </button>
                 </div>
             </div>
 
@@ -171,7 +174,11 @@ const ChannelsPage = {
             return;
         }
 
-        const bestVideoUrl = fi.h264VideoInfo?.videoUrl || fi.h265VideoInfo?.videoUrl || fi.videoUrl || "";
+        const h264Url = fi.h264VideoInfo?.videoUrl || "";
+        const h265Url = fi.h265VideoInfo?.videoUrl || "";
+        const defaultUrl = fi.videoUrl || "";
+        const rawUrl = this.getRawVideoUrl(defaultUrl || h265Url || h264Url);
+        const bestVideoUrl = defaultUrl || rawUrl || h265Url || h264Url;
         const coverUrl = fi.coverUrl || "";
         const description = fi.description || "";
         const createtime = fi.createtime || "";
@@ -241,6 +248,17 @@ const ChannelsPage = {
                             ${bestVideoUrl ? `
                                 <div style="display: flex; flex-direction: column; gap: var(--spacing-sm); margin-top: var(--spacing-xs);">
                                     
+                                    <!-- 选画质 -->
+                                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+                                        <span style="font-size: 0.85rem; color: var(--text-secondary); white-space: nowrap;">下载画质:</span>
+                                        <select id="single-quality-select" class="form-select" style="flex: 1; font-size: 0.85rem; padding: 6px 12px; border-radius: 8px; background: var(--bg-input); border: 1px solid var(--border-color); color: var(--text-primary);" onchange="ChannelsPage.updateSelectedQuality(this)">
+                                            ${rawUrl ? `<option value="${this.esc(rawUrl)}" ${!defaultUrl ? 'selected' : ''}>原始视频 (无压缩原画，最高画质)</option>` : ''}
+                                            ${h265Url ? `<option value="${this.esc(h265Url)}" ${!defaultUrl && !rawUrl ? 'selected' : ''}>H265 (HEVC) 极高画质 (压缩率高)</option>` : ''}
+                                            ${h264Url ? `<option value="${this.esc(h264Url)}" ${!defaultUrl && !rawUrl && !h265Url ? 'selected' : ''}>H264 (AVC) 标准高清画质 (兼容性高)</option>` : ''}
+                                            ${defaultUrl ? `<option value="${this.esc(defaultUrl)}" selected>默认画质</option>` : ''}
+                                        </select>
+                                    </div>
+
                                     <!-- 本地高速下载主按钮 (调用 Flask 后端下载，防止 CORS 跨域问题并快速保存) -->
                                     <button class="btn btn-primary" id="btn-server-download" 
                                             data-video-url="${this.esc(bestVideoUrl)}" 
@@ -253,7 +271,7 @@ const ChannelsPage = {
 
                                     <div style="display: flex; gap: var(--spacing-xs); width: 100%;">
                                         <!-- 备用浏览器直接下载 -->
-                                        <button class="btn btn-secondary" 
+                                        <button class="btn btn-secondary" id="btn-browser-download"
                                                 data-video-url="${this.esc(bestVideoUrl)}" 
                                                 data-desc="${this.esc(description)}" 
                                                 data-createtime="${this.esc(createtime)}" 
@@ -263,7 +281,7 @@ const ChannelsPage = {
                                         </button>
                                         
                                         <!-- 复制视频直链 -->
-                                        <button class="btn btn-secondary" 
+                                        <button class="btn btn-secondary" id="btn-copy-url"
                                                 data-video-url="${this.esc(bestVideoUrl)}" 
                                                 onclick="ChannelsPage.copyUrl(this)" 
                                                 style="flex: 1; padding: 10px; font-size: 0.85rem; border-radius: 8px;">
@@ -458,6 +476,54 @@ const ChannelsPage = {
             Toast.success('视频无密直链已复制到剪贴板！');
         } catch (err) {
             Toast.warning('复制直链失败，请手动选择复制');
+        }
+    },
+
+    updateSelectedQuality(select) {
+        const url = select.value;
+        const btnServer = document.getElementById('btn-server-download');
+        const btnBrowser = document.getElementById('btn-browser-download');
+        const btnCopy = document.getElementById('btn-copy-url');
+        if (btnServer) btnServer.setAttribute('data-video-url', url);
+        if (btnBrowser) btnBrowser.setAttribute('data-video-url', url);
+        if (btnCopy) btnCopy.setAttribute('data-video-url', url);
+
+        // 更新视频播放器源，以便用户预览所选清晰度
+        const videoPlayer = document.querySelector('#channels-result-container video');
+        if (videoPlayer) {
+            const currentTime = videoPlayer.currentTime;
+            const isPaused = videoPlayer.paused;
+            videoPlayer.src = url;
+            videoPlayer.load();
+            videoPlayer.currentTime = currentTime;
+            if (!isPaused) {
+                videoPlayer.play().catch(() => {});
+            }
+        }
+    },
+
+    async clearWechatCache() {
+        if (!confirm('此操作将尝试清除微信内置浏览器的网页缓存，以解决视频号 API 无法初始化或页面打不开的问题。\n\n请在点击【确定】之前，确保您已在电脑上【彻底退出并关闭微信】！是否继续？')) {
+            return;
+        }
+
+        const btn = document.getElementById('btn-clear-cache');
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner" style="width: 14px; height: 14px; border-width: 2px; display: inline-block; vertical-align: middle; margin-right: 6px;"></span> 正在清除...';
+        }
+
+        try {
+            const res = await API.channels.clearCache();
+            alert(res.message || '已成功清除微信网页缓存！');
+            Toast.success('清除缓存成功！');
+        } catch (err) {
+            // Error already toasted by API wrapper
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '🧹 清除微信缓存 (解决打不开/未初始化)';
+            }
         }
     },
 

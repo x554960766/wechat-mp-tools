@@ -1,9 +1,11 @@
 const DyLoginComponent = {
+    settings: {},
+
     render() {
         return `
             <div class="page-header">
                 <h2 class="page-title">抖音扫码登录</h2>
-                <p style="color: var(--text-secondary); margin-top: 8px;">扫码登录以获取完整的抖音下载功能</p>
+                <p style="color: var(--text-secondary); margin-top: 8px;">扫码登录或手动配置 Cookie，以获取完整的抖音下载和浏览功能</p>
             </div>
 
             <div class="card login-card" style="max-width: 520px; margin: 40px auto; text-align: center;">
@@ -42,6 +44,25 @@ const DyLoginComponent = {
                     </div>
                 </div>
             </div>
+
+            <!-- 手动配置 Cookie 卡片 -->
+            <div class="card" style="max-width: 520px; margin: 24px auto;">
+                <div class="card-header">
+                    <h3 class="card-title">⚙️ 手动填入 Cookie (高级)</h3>
+                </div>
+                <div class="card-body" style="padding: 0 var(--spacing-md) var(--spacing-md);">
+                    <div class="form-group" style="margin-top: var(--spacing-md); text-align: left;">
+                        <label class="form-label" style="color: var(--text-primary); font-weight: 500;">抖音网页版 Cookie 字符串</label>
+                        <textarea id="dy-cookie-textarea" class="form-input" style="height: 100px; font-family: monospace; font-size: 0.85rem; resize: vertical; border-radius: 8px;" placeholder="点击上面按钮自动获取，或者在此手动粘贴您的抖音 Cookie..."></textarea>
+                        <div class="form-hint" style="margin-top: 6px;">Cookie 优先级最高。手动粘贴并保存 Cookie 后将立即生效。</div>
+                    </div>
+
+                    <div style="display: flex; gap: var(--spacing-sm); justify-content: flex-end; margin-top: var(--spacing-md);">
+                        <button class="btn btn-secondary" onclick="DyLoginComponent.clearCookie()" style="padding: 8px 16px; border-radius: 8px;">清空</button>
+                        <button class="btn btn-primary" onclick="DyLoginComponent.saveCookie()" style="padding: 8px 20px; border-radius: 8px;">💾 保存凭证</button>
+                    </div>
+                </div>
+            </div>
         `;
     },
 
@@ -60,8 +81,65 @@ const DyLoginComponent = {
             this.cancelBtn.addEventListener('click', () => this.cancelLogin());
         }
 
-        // 初始化时检查一次状态
+        // 初始化时检查一次状态并加载 Cookie
         this.checkStatus();
+        this.loadSettings();
+    },
+
+    async loadSettings() {
+        try {
+            const data = await API.settings.get();
+            this.settings = data;
+            const textarea = document.getElementById('dy-cookie-textarea');
+            if (textarea) {
+                textarea.value = data.douyin_cookie || '';
+            }
+        } catch (err) {
+            console.error('Failed to load settings:', err);
+        }
+    },
+
+    async saveCookie() {
+        const textarea = document.getElementById('dy-cookie-textarea');
+        const cookieVal = textarea ? textarea.value.trim() : '';
+
+        try {
+            const settings = await API.settings.get();
+            settings.douyin_cookie = cookieVal;
+            await API.settings.save(settings);
+            Toast.show('抖音 Cookie 保存成功！', 'success');
+            this.settings = settings;
+            
+            // 刷新全局状态
+            if (window.App && typeof App.checkAuthStatus === 'function') {
+                await App.checkAuthStatus();
+            }
+            this.checkStatus(); // 刷新登录态显示
+        } catch (err) {
+            Toast.show('保存失败: ' + err.message, 'error');
+        }
+    },
+
+    async clearCookie() {
+        Modal.confirm('清除 Cookie 凭证', '确定要清除已保存的抖音 Cookie 凭证吗？', async () => {
+            try {
+                const settings = await API.settings.get();
+                settings.douyin_cookie = '';
+                await API.settings.save(settings);
+                Toast.show('抖音 Cookie 凭证已清空', 'success');
+                this.settings = settings;
+                const textarea = document.getElementById('dy-cookie-textarea');
+                if (textarea) textarea.value = '';
+                
+                // 刷新全局状态
+                if (window.App && typeof App.checkAuthStatus === 'function') {
+                    await App.checkAuthStatus();
+                }
+                this.checkStatus();
+            } catch (err) {
+                Toast.show('操作失败: ' + err.message, 'error');
+            }
+        });
     },
 
     async startLogin() {
