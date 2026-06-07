@@ -538,7 +538,7 @@ const ArticlesPage = {
 
     async openFolder() {
         try {
-            await API.articles.openFolder();
+            await API.articles.openFolder(this.currentName);
             Toast.success('下载目录已打开');
         } catch (err) {
             // shown by API

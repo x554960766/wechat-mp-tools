@@ -115,7 +115,7 @@ const API = {
         deleteHistory(index) {
             return API.delete(`/api/articles/history/${index}`);
         },
-        openFolder() { return API.post('/api/articles/open-folder'); },
+        openFolder(account = '') { return API.post('/api/articles/open-folder', { account }); },
         openFile(path) { return API.post('/api/articles/open-file', { path }); },
         openParent(path) { return API.post('/api/articles/open-parent', { path }); },
     },
