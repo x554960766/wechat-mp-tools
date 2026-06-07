@@ -500,7 +500,6 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
                 art_dir = new_art_dir
                 media_dir = art_dir / "media"
                 media_dir.mkdir(parents=True, exist_ok=True)
-                safe_title = new_art_dir.name
 
     # 提取正文区域
     content_html = extract_article_content(raw_html)

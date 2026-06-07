@@ -470,7 +470,7 @@ def _do_batch_download(task_id: str, articles: list, account_name: str):
         title = article.get("title", f"article_{i+1}")
 
         with _download_lock:
-            _download_tasks[task_id]["current"] = title
+            _download_tasks[task_id]["current"] = f"正在下载第 {i+1} 篇..."
 
         if not link:
             with _download_lock:
@@ -503,11 +503,13 @@ def _do_batch_download(task_id: str, articles: list, account_name: str):
         with _download_lock:
             if success:
                 _download_tasks[task_id]["completed"] += 1
+                _download_tasks[task_id]["current"] = f"已完成：{title}"
                 _download_tasks[task_id]["results"].append({
                     "title": title, "success": True, "path": downloaded_path or str(out_dir / title)
                 })
             else:
                 _download_tasks[task_id]["failed"] += 1
+                _download_tasks[task_id]["current"] = f"下载失败：{title}"
                 _download_tasks[task_id]["results"].append({
                     "title": title, "success": False, "error": error_msg
                 })
