@@ -499,7 +499,7 @@ def download_video():
 
     settings = get_settings()
     # 存放在配置的下载目录下的 channels 文件夹中
-    base_download_dir = Path(settings.get("download_dir", str(OUTPUT_DIR)))
+    base_download_dir = Path(settings.get("download_dir") or str(OUTPUT_DIR))
     channels_dir = base_download_dir / "channels"
     
     try:
@@ -573,7 +573,7 @@ def download_video():
 def open_folder():
     """在文件管理器中打开视频号下载文件夹"""
     settings = get_settings()
-    base_download_dir = Path(settings.get("download_dir", str(OUTPUT_DIR)))
+    base_download_dir = Path(settings.get("download_dir") or str(OUTPUT_DIR))
     channels_dir = base_download_dir / "channels"
     
     try:
@@ -882,7 +882,7 @@ def _do_async_download_video(task_id, video_url, description, createtime, decryp
     global _download_tasks
     
     settings = get_settings()
-    base_download_dir = Path(settings.get("download_dir", str(OUTPUT_DIR)))
+    base_download_dir = Path(settings.get("download_dir") or str(OUTPUT_DIR))
     channels_dir = base_download_dir / "channels"
     
     filepath = None

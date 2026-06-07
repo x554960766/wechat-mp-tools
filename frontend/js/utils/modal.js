@@ -45,13 +45,22 @@ const Modal = {
     },
 
     confirm(title, message, onConfirm) {
+        this._onConfirm = onConfirm;
         this.open({
             title,
             content: `<p style="color: var(--text-secondary)">${message}</p>`,
             footer: `
                 <button class="btn btn-secondary" onclick="Modal.close()">取消</button>
-                <button class="btn btn-primary" onclick="Modal.close(); (${onConfirm.toString()})()">确定</button>
+                <button class="btn btn-primary" onclick="Modal.handleConfirm()">确定</button>
             `,
         });
+    },
+
+    handleConfirm() {
+        this.close();
+        if (this._onConfirm) {
+            this._onConfirm();
+            this._onConfirm = null;
+        }
     },
 };

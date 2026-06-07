@@ -174,7 +174,7 @@ const DownloadPage = {
 
     async openFolder() {
         try {
-            await API.articles.openFolder();
+            await API.articles.openFolder('url_download');
             Toast.success('下载目录已打开');
         } catch (err) {
             // shown by API

@@ -427,7 +427,8 @@ def delete_history_item(index):
             else:
                 file_status = "missing"
         except Exception as e:
-            return jsonify({"error": f"删除文件失败，记录未删除: {str(e)}"}), 500
+            # 文件被占用或删除失败时不阻塞历史记录本身的删除
+            file_status = f"error: {str(e)}"
 
     history.pop(index)
     save_json(DOWNLOAD_HISTORY_FILE, history)
@@ -437,7 +438,8 @@ def delete_history_item(index):
         "missing": "下载文件已不存在，已删除记录",
         "no_path": "记录没有文件路径，已删除记录",
     }
-    return jsonify({"message": messages.get(file_status, "已删除记录"), "file_status": file_status})
+    msg = messages.get(file_status, f"下载文件清理失败（{file_status}），但已清除历史记录")
+    return jsonify({"message": msg, "file_status": file_status})
 
 
 def _do_batch_download(task_id: str, articles: list, account_name: str):
@@ -711,9 +713,15 @@ def open_folder():
     import subprocess
     import sys
     
+    data = request.get_json() or {}
+    account = data.get("account", "").strip()
+    
     settings = get_settings()
-    download_dir_str = settings.get("download_dir", str(OUTPUT_DIR))
+    download_dir_str = settings.get("download_dir") or str(OUTPUT_DIR)
     path = Path(download_dir_str)
+    
+    if account:
+        path = path / account
     
     try:
         path.mkdir(parents=True, exist_ok=True)
@@ -798,7 +806,7 @@ def serve_file(filepath):
     from flask import send_from_directory
     from urllib.parse import unquote
     settings = get_settings()
-    download_dir = Path(settings.get("download_dir", str(OUTPUT_DIR)))
+    download_dir = Path(settings.get("download_dir") or str(OUTPUT_DIR))
     
     try:
         # Resolve target path safely

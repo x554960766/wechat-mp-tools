@@ -27,6 +27,10 @@ def sanitize(name: str, mx: int = 60) -> str:
 
 def clean_html_to_text(html: str) -> str:
     """清理 HTML 并提取出纯文本，排除标签与非必要元素，用于 AI 快速转写"""
+    # 先剥离 script 和 style 标签及其内部的内容，避免污染提取出的文本
+    html = re.sub(r'<script\b[^>]*>([\s\S]*?)</script>', '', html, flags=re.I)
+    html = re.sub(r'<style\b[^>]*>([\s\S]*?)</style>', '', html, flags=re.I)
+    
     # 替换常见换行与段落标签为换行符
     text = re.sub(r'<(p|br|div|h1|h2|h3|h4|h5|h6|li|tr)[^>]*>', '\n', html)
     # 去除所有其他 HTML 标签
@@ -42,6 +46,105 @@ def clean_html_to_text(html: str) -> str:
         elif not clean_lines or clean_lines[-1] != "":
             clean_lines.append("")
     return '\n'.join(clean_lines).strip()
+
+
+def try_extract_gallery_article(raw_html: str) -> str:
+    """对于没有 js_content 但有 picture_page_info_list 的画廊/贴图文章，从 JS 变量中提取图片和文字重建 HTML"""
+    pos = raw_html.find("picture_page_info_list")
+    if pos == -1:
+        return None
+
+    # 提取 picture_page_info_list 数组的 JS 源码
+    content = raw_html[pos:]
+    brackets = 0
+    list_str = ""
+    started = False
+    for char in content:
+        if char == '[':
+            brackets += 1
+            started = True
+        elif char == ']':
+            brackets -= 1
+            if started and brackets == 0:
+                list_str += char
+                break
+        if started:
+            list_str += char
+
+    if not list_str:
+        return None
+
+    # 从数组中提取每个对象 block {}
+    items = []
+    item_brackets = 0
+    current_item = ""
+    item_started = False
+    for char in list_str:
+        if char == '{':
+            if item_brackets == 0:
+                item_started = True
+            item_brackets += 1
+        if item_started:
+            current_item += char
+        if char == '}':
+            item_brackets -= 1
+            if item_brackets == 0 and item_started:
+                items.append(current_item)
+                current_item = ""
+                item_started = False
+
+    img_urls = []
+    for item in items:
+        # 兼容单引号和双引号
+        cdn_url_match = re.search(r'cdn_url\s*:\s*["\']([^"\']+)["\']', item)
+        if cdn_url_match:
+            url = cdn_url_match.group(1)
+            # 解密可能存在的 JS 十六进制转义符与特殊编码
+            url = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), url)
+            url = url.replace('&amp;', '&')
+            img_urls.append(url)
+
+    # 提取描述文字 window.desc，使用支持转义引号的安全模式匹配 JS 字符串字面量
+    desc_match = re.search(r'window\.desc\s*=\s*"((?:[^"\\]|\\.)*)"', raw_html, re.DOTALL)
+    if not desc_match:
+        desc_match = re.search(r'window\.desc\s*=\s*\'((?:[^\'\\]|\\.)*)\'', raw_html, re.DOTALL)
+
+    desc_text = ""
+    if desc_match:
+        raw_desc = desc_match.group(1)
+        # 解开转义字符，包含 \xXX, \uXXXX, 常见 JS 控制符
+        desc_text = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), raw_desc)
+        desc_text = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), desc_text)
+        replacements = {
+            '\\n': '\n',
+            '\\t': '\t',
+            '\\r': '\r',
+            '\\"': '"',
+            "\\'": "'",
+            '\\\\': '\\'
+        }
+        for k, v in replacements.items():
+            desc_text = desc_text.replace(k, v)
+
+    if not img_urls and not desc_text:
+        return None
+
+    # 重建具有精美外观的画廊/贴图 HTML 正文
+    html_parts = []
+    html_parts.append('<div class="gallery-images" style="text-align: center; margin-bottom: 20px;">')
+    for u in img_urls:
+        html_parts.append(f'  <img src="{u}" style="max-width: 100%; height: auto; display: block; margin: 10px auto; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1);" />')
+    html_parts.append('</div>')
+
+    if desc_text:
+        html_parts.append('<div class="gallery-desc" style="font-size: 16px; color: #333; line-height: 1.6; background: #f9f9f9; padding: 15px; border-radius: 8px; border-left: 4px solid #07c160; margin-top: 20px;">')
+        paragraphs = [p.strip() for p in desc_text.split('\n') if p.strip()]
+        for p in paragraphs:
+            html_parts.append(f'  <p style="margin: 0 0 10px 0;">{p}</p>')
+        html_parts.append('</div>')
+
+    return '\n'.join(html_parts)
+
 
 
 def get_ext(url: str) -> str:
@@ -198,6 +301,11 @@ def _choose_video_url(candidates: list) -> str:
 
 
 def extract_article_content(raw_html: str) -> str:
+    # 优先检测并提取画廊/贴图类型文章
+    gallery_html = try_extract_gallery_article(raw_html)
+    if gallery_html:
+        return gallery_html
+
     marker = 'id="js_content"'
     marker_pos = raw_html.find(marker)
     if marker_pos < 0:
@@ -277,8 +385,8 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         resp.encoding = "utf-8"
         raw_html = resp.text
 
-        # 检测是否为微信屏蔽、删除或出错页面
-        has_js_content = 'id="js_content"' in raw_html
+        # 检测是否为微信屏蔽、删除或出错页面（贴图画廊类型可能不含 js_content，但含有 picture_page_info_list）
+        has_js_content = 'id="js_content"' in raw_html or 'picture_page_info_list' in raw_html
         
         # 提取标题辅助判断
         title_tag_match = re.search(r'<title>([^<]*)</title>', raw_html, re.I)
@@ -325,14 +433,31 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
 
     # 提取封面 URL、描述和发布时间
     cover_url = ""
-    cover_match = re.search(r'<meta\s+property="og:image"\s+content="([^"]*)"', raw_html)
+    cover_match = re.search(r'<meta\b[^>]*property="og:image"[^>]*content="([^"]*)"', raw_html)
+    if not cover_match:
+        cover_match = re.search(r'<meta\b[^>]*content="([^"]*)"[^>]*property="og:image"', raw_html)
     if cover_match:
         cover_url = normalize_url(cover_match.group(1))
 
     digest = ""
-    digest_match = re.search(r'<meta\s+property="og:description"\s+content="([^"]*)"', raw_html)
+    digest_match = re.search(r'<meta\b[^>]*property="og:description"[^>]*content="([^"]*)"', raw_html)
+    if not digest_match:
+        digest_match = re.search(r'<meta\b[^>]*content="([^"]*)"[^>]*property="og:description"', raw_html)
     if digest_match:
         digest = unescape(digest_match.group(1)).strip()
+        # 解开可能含有的 JS 十六进制转义符和 unicode 转义符，并替换控制字符
+        digest = re.sub(r'\\x([0-9a-fA-F]{2})', lambda m: chr(int(m.group(1), 16)), digest)
+        digest = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), digest)
+        replacements = {
+            '\\n': '\n',
+            '\\t': '\t',
+            '\\r': '\r',
+            '\\"': '"',
+            "\\'": "'",
+            '\\\\': '\\'
+        }
+        for k, v in replacements.items():
+            digest = digest.replace(k, v)
 
     publish_time = int(datetime.now(timezone.utc).timestamp())
     # 提取微信文章中的发布时间戳 ct
@@ -344,19 +469,38 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         if pt_match:
             publish_time = int(pt_match.group(1))
 
-    # 从 HTML 提取标题
-    title_match = re.search(r'<meta\s+property="og:title"\s+content="([^"]*)"', raw_html)
+    # 从 HTML 提取标题，增加多路 Fallback 兜底（属性顺序无关）
+    page_title = ""
+    title_match = re.search(r'<meta\b[^>]*property="og:title"[^>]*content="([^"]*)"', raw_html)
+    if not title_match:
+        title_match = re.search(r'<meta\b[^>]*content="([^"]*)"[^>]*property="og:title"', raw_html)
     if title_match:
         page_title = title_match.group(1).strip()
-        if page_title:
-            safe_title = sanitize(page_title)
-            # 更新目录名
-            new_art_dir = out_dir / safe_title
-            if new_art_dir != art_dir and not new_art_dir.exists():
+    if not page_title:
+        title_match = re.search(r'window\.title\s*=\s*["\'](.*?)["\']', raw_html)
+        if title_match:
+            page_title = title_match.group(1).strip()
+    if not page_title:
+        title_match = re.search(r'<title>([^<]*)</title>', raw_html, re.I)
+        if title_match:
+            page_title = title_match.group(1).strip()
+
+    if page_title:
+        safe_title = sanitize(page_title)
+        # 更新目录名，如果冲突则通过递增后缀消解
+        new_art_dir = out_dir / safe_title
+        if new_art_dir != art_dir:
+            counter = 1
+            while new_art_dir.exists() and new_art_dir != art_dir:
+                new_art_dir = out_dir / f"{safe_title}_{counter}"
+                counter += 1
+            
+            if new_art_dir != art_dir:
                 art_dir.rename(new_art_dir)
                 art_dir = new_art_dir
                 media_dir = art_dir / "media"
                 media_dir.mkdir(parents=True, exist_ok=True)
+                safe_title = new_art_dir.name
 
     # 提取正文区域
     content_html = extract_article_content(raw_html)
