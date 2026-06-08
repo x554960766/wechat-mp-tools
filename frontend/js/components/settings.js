@@ -6,6 +6,20 @@ const SettingsPage = {
     cookiePollTimer: null,
 
     render() {
+        let startOptions = '';
+        for (let i = 0; i <= 23; i++) {
+            startOptions += `<option value="${i}">${i} 点</option>`;
+        }
+        let endOptions = '';
+        for (let i = 0; i <= 24; i++) {
+            endOptions += `<option value="${i}">${i} 点</option>`;
+        }
+        let minuteOptions = '';
+        for (let i = 0; i <= 59; i++) {
+            const label = String(i).padStart(2, '0');
+            minuteOptions += `<option value="${i}">${label} 分</option>`;
+        }
+
         return `
             <div class="page-header">
                 <h2 class="page-title">系统设置</h2>
@@ -29,6 +43,12 @@ const SettingsPage = {
                             <label class="form-label" for="setting-concurrent">并发下载数 (图片/媒体)</label>
                             <input type="number" class="form-input" id="setting-concurrent" min="1" max="10" />
                             <div class="form-hint">并发下载静态资源的线程数，建议设为 1-3，过高可能被微信限制</div>
+                        </div>
+
+                        <div class="form-group">
+                            <label class="form-label" for="setting-device-id">设备 ID (deviceId)</label>
+                            <input type="text" class="form-input" id="setting-device-id" placeholder="请输入设备 ID..." />
+                            <div class="form-hint">下载文章时生成的 JSON 文件中的 deviceId 配置</div>
                         </div>
 
                         <div class="form-group" style="display: flex; gap: 24px; margin-top: var(--spacing-md);">
@@ -92,6 +112,54 @@ const SettingsPage = {
                         </div>
                     </div>
                 </div>
+
+                <!-- RSS 订阅配置 -->
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">📡 RSS 订阅时间段配置</h3>
+                    </div>
+                    <div class="card-body" style="padding: 0 var(--spacing-md) var(--spacing-md);">
+                        <div style="display: flex; gap: 16px; margin-top: var(--spacing-md);">
+                            <div class="form-group" style="flex: 1;">
+                                <label class="form-label" for="setting-rss-start-hour">开始时间</label>
+                                <div style="display: flex; gap: 8px;">
+                                    <select class="form-input" id="setting-rss-start-hour" style="min-width: 0;">
+                                        ${startOptions}
+                                    </select>
+                                    <select class="form-input" id="setting-rss-start-minute" style="min-width: 0;">
+                                        ${minuteOptions}
+                                    </select>
+                                </div>
+                                <div class="form-hint">自动采集开始时间，支持分钟</div>
+                            </div>
+                            <div class="form-group" style="flex: 1;">
+                                <label class="form-label" for="setting-rss-end-hour">结束时间</label>
+                                <div style="display: flex; gap: 8px;">
+                                    <select class="form-input" id="setting-rss-end-hour" style="min-width: 0;" onchange="SettingsPage.syncRssEndMinute()">
+                                        ${endOptions}
+                                    </select>
+                                    <select class="form-input" id="setting-rss-end-minute" style="min-width: 0;">
+                                        ${minuteOptions}
+                                    </select>
+                                </div>
+                                <div class="form-hint">自动采集结束时间，24 点仅支持 00 分</div>
+                            </div>
+                        </div>
+                        <div class="form-hint" style="margin-top: 8px;">默认 00:00 到 24:00 整天采集，只有在设置的时间范围内才会执行 RSS 自动采集</div>
+                        <div class="form-group" style="margin-top: var(--spacing-md);">
+                            <label class="form-checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
+                                <input type="checkbox" id="setting-rss-upload-enabled" style="width: 18px; height: 18px; accent-color: var(--primary);" />
+                                <span>RSS 新文章上传到服务器</span>
+                            </label>
+                            <div class="form-hint">开启后，RSS 自动抓取并下载成功的新文章会上传到指定接口</div>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label" for="setting-rss-upload-url">上传接口地址</label>
+                            <input type="url" class="form-input" id="setting-rss-upload-url" placeholder="https://example.com/api/data/gzhAdd" />
+                            <div class="form-hint">接口接收 articles 与 deviceId；正文 content 会以 base64 字符串上传</div>
+                        </div>
+                    </div>
+                </div>
             </div>
 
             <div class="card" style="margin-top: var(--spacing-lg);">
@@ -140,6 +208,13 @@ const SettingsPage = {
         const maxArticlesInput = document.getElementById('setting-max-articles');
         const maxRetriesInput = document.getElementById('setting-max-retries');
         const chWorkerInput = document.getElementById('setting-channels-worker');
+        const deviceIdInput = document.getElementById('setting-device-id');
+        const rssStartHour = document.getElementById('setting-rss-start-hour');
+        const rssStartMinute = document.getElementById('setting-rss-start-minute');
+        const rssEndHour = document.getElementById('setting-rss-end-hour');
+        const rssEndMinute = document.getElementById('setting-rss-end-minute');
+        const rssUploadEnabled = document.getElementById('setting-rss-upload-enabled');
+        const rssUploadUrl = document.getElementById('setting-rss-upload-url');
 
         if (dirInput) dirInput.value = data.download_dir || '';
         if (concurrentInput) concurrentInput.value = data.concurrent_downloads || 1;
@@ -151,6 +226,29 @@ const SettingsPage = {
         if (maxArticlesInput) maxArticlesInput.value = data.max_articles || 50;
         if (maxRetriesInput) maxRetriesInput.value = data.max_retries || 3;
         if (chWorkerInput) chWorkerInput.value = data.custom_channels_worker || '';
+        if (deviceIdInput) deviceIdInput.value = data.device_id || '';
+        if (rssStartHour) rssStartHour.value = data.rss_start_hour !== undefined ? data.rss_start_hour : 0;
+        if (rssStartMinute) rssStartMinute.value = data.rss_start_minute !== undefined ? data.rss_start_minute : 0;
+        if (rssEndHour) rssEndHour.value = data.rss_end_hour !== undefined ? data.rss_end_hour : 24;
+        if (rssEndMinute) rssEndMinute.value = data.rss_end_minute !== undefined ? data.rss_end_minute : 0;
+        if (rssUploadEnabled) rssUploadEnabled.checked = data.rss_upload_enabled !== undefined ? !!data.rss_upload_enabled : true;
+        if (rssUploadUrl) rssUploadUrl.value = data.rss_upload_url || 'https://hg.chenshipin.com/api/data/gzhAdd';
+        this.syncRssEndMinute();
+    },
+
+
+
+    syncRssEndMinute() {
+        const rssEndHour = document.getElementById('setting-rss-end-hour');
+        const rssEndMinute = document.getElementById('setting-rss-end-minute');
+        if (!rssEndHour || !rssEndMinute) return;
+
+        if (parseInt(rssEndHour.value) === 24) {
+            rssEndMinute.value = '0';
+            rssEndMinute.disabled = true;
+        } else {
+            rssEndMinute.disabled = false;
+        }
     },
 
 
@@ -165,6 +263,13 @@ const SettingsPage = {
         const maxArticlesInput = document.getElementById('setting-max-articles');
         const maxRetriesInput = document.getElementById('setting-max-retries');
         const chWorkerInput = document.getElementById('setting-channels-worker');
+        const deviceIdInput = document.getElementById('setting-device-id');
+        const rssStartHour = document.getElementById('setting-rss-start-hour');
+        const rssStartMinute = document.getElementById('setting-rss-start-minute');
+        const rssEndHour = document.getElementById('setting-rss-end-hour');
+        const rssEndMinute = document.getElementById('setting-rss-end-minute');
+        const rssUploadEnabled = document.getElementById('setting-rss-upload-enabled');
+        const rssUploadUrl = document.getElementById('setting-rss-upload-url');
 
         const request_delay = parseFloat(delayInput.value);
         if (isNaN(request_delay) || request_delay < 0.1) {
@@ -183,6 +288,13 @@ const SettingsPage = {
             max_articles: parseInt(maxArticlesInput.value) || 50,
             max_retries: parseInt(maxRetriesInput.value) || 3,
             custom_channels_worker: chWorkerInput ? chWorkerInput.value.trim() : '',
+            device_id: deviceIdInput ? deviceIdInput.value.trim() : '',
+            rss_start_hour: rssStartHour ? parseInt(rssStartHour.value) : 0,
+            rss_start_minute: rssStartMinute ? parseInt(rssStartMinute.value) : 0,
+            rss_end_hour: rssEndHour ? parseInt(rssEndHour.value) : 24,
+            rss_end_minute: rssEndMinute && !rssEndMinute.disabled ? parseInt(rssEndMinute.value) : 0,
+            rss_upload_enabled: rssUploadEnabled ? rssUploadEnabled.checked : true,
+            rss_upload_url: rssUploadUrl ? rssUploadUrl.value.trim() : 'https://hg.chenshipin.com/api/data/gzhAdd',
         };
 
         try {
@@ -207,6 +319,13 @@ const SettingsPage = {
                 concurrent_downloads: 1,
                 auto_save_images: true,
                 auto_save_videos: true,
+                device_id: '公众号_caiji6',
+                rss_start_hour: 0,
+                rss_start_minute: 0,
+                rss_end_hour: 24,
+                rss_end_minute: 0,
+                rss_upload_enabled: true,
+                rss_upload_url: 'https://hg.chenshipin.com/api/data/gzhAdd',
             };
             try {
                 await API.settings.save(defaults);

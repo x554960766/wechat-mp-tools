@@ -58,9 +58,10 @@ const Modal = {
 
     handleConfirm() {
         this.close();
-        if (this._onConfirm) {
-            this._onConfirm();
-            this._onConfirm = null;
+        const onConfirm = this._onConfirm;
+        this._onConfirm = null;
+        if (onConfirm) {
+            onConfirm();
         }
     },
 };

@@ -216,6 +216,27 @@ def download_article(url: str, out_dir: Path) -> bool:
     title = sanitize(extract_title(page))
     print(f"    📄 {title}")
 
+    # 提取封面 URL
+    cover_url = page.css('meta[property="og:image"]::attr(content)').get() or ""
+    cover_url = unescape(cover_url).replace("&amp;", "&").strip()
+    if cover_url.startswith("//"):
+        cover_url = "https:" + cover_url
+    elif cover_url.startswith("/"):
+        cover_url = "https://mp.weixin.qq.com" + cover_url
+
+    # 提取发布时间
+    publish_time = int(datetime.now(timezone.utc).timestamp())
+    for script_el in page.css("script"):
+        script_text = script_el.html_content or ""
+        ct_match = re.search(r'\bct\s*=\s*["\']?(\d+)["\']?', script_text)
+        if ct_match:
+            publish_time = int(ct_match.group(1))
+            break
+        pt_match = re.search(r'\bpublish_time\s*=\s*["\']?(\d+)["\']?', script_text)
+        if pt_match:
+            publish_time = int(pt_match.group(1))
+            break
+
     content = page.css("#js_content")
     if not content:
         print("    ⚠️  未找到 #js_content");  return False
@@ -266,12 +287,44 @@ def download_article(url: str, out_dir: Path) -> bool:
         "         font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;\n"
         "         line-height:1.8;color:#333}\n"
         "    img,video{max-width:100%;height:auto;display:block;margin:10px auto}\n"
+        "    #js_content, .rich_media_content { visibility: visible !important; }\n"
         "  </style>\n</head>\n<body>\n"
         "<div id=\"js_content\">\n" + localized + "\n</div>\n"
         "</body>\n</html>"
     )
     html_path = out_dir / f"{title}.html"
     html_path.write_text(full, encoding="utf-8")
+
+    # ── 保存原始 HTML ───────────────────────────────────────
+    raw_localized = raw_html
+    raw_localized = re.sub(r'data-src="([^"]*)"', r'src="\1"', raw_localized)
+    raw_full = (
+        "<!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n"
+        "  <meta charset=\"UTF-8\">\n"
+        "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
+        f"  <title>{title}</title>\n"
+        "  <style>\n"
+        "    body{max-width:680px;margin:0 auto;padding:20px;\n"
+        "         font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;\n"
+        "         line-height:1.8;color:#333}\n"
+        "    img,video{max-width:100%;height:auto;display:block;margin:10px auto}\n"
+        "    #js_content, .rich_media_content { visibility: visible !important; }\n"
+        "  </style>\n</head>\n<body>\n"
+        "<div id=\"js_content\">\n" + raw_localized + "\n</div>\n"
+        "</body>\n</html>"
+    )
+    (out_dir / f"{title}_raw.html").write_text(raw_full, encoding="utf-8")
+
+    source = out_dir.parent.name
+    new_json_data = {
+        "source": source,
+        "title": title,
+        "url": url,
+        "cover_url": cover_url,
+        "publish_time": publish_time,
+        "content": raw_localized
+    }
+    (out_dir / "data.json").write_text(json.dumps(new_json_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # metadata
     meta = {"title": title, "url": url, "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),

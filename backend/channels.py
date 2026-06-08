@@ -793,13 +793,27 @@ def stop_proxy_server():
 
 @channels_bp.route("/proxy/install-cert", methods=["POST"])
 def force_install_cert():
-    """安装/信任 CA 证书"""
-    from backend.mitm_proxy import install_system_cert, CA_CERT_PATH
-    success = install_system_cert(CA_CERT_PATH)
+    """生成并安装/信任 CA 证书"""
+    from backend.mitm_proxy import install_system_cert, ensure_ca_certificates
+    _, ca_cert_path = ensure_ca_certificates()
+    success = install_system_cert(ca_cert_path)
     if success:
-        return jsonify({"message": "证书安装成功"})
+        return jsonify({"message": "证书安装/信任成功"})
     else:
-        return jsonify({"error": "证书安装失败，请手动下载证书进行安装"}), 500
+        return jsonify({"error": "证书安装失败，请检查系统权限后重试"}), 500
+
+
+@channels_bp.route("/proxy/uninstall-cert", methods=["POST"])
+def force_uninstall_cert():
+    """卸载 CA 证书"""
+    from backend.mitm_proxy import uninstall_system_cert, check_cert_trusted
+    if not check_cert_trusted():
+        return jsonify({"message": "证书已卸载"})
+    success = uninstall_system_cert()
+    if success:
+        return jsonify({"message": "证书卸载成功"})
+    else:
+        return jsonify({"error": "证书卸载失败，请检查系统权限后重试"}), 500
 
 
 @channels_bp.route("/proxy/download-cert", methods=["GET"])
@@ -1049,6 +1063,5 @@ def cancel_async_download(task_id):
         task["cancel_event"].set()
         task["status"] = "cancelled"
         return jsonify({"success": True, "message": "下载已请求取消"})
-
 
 

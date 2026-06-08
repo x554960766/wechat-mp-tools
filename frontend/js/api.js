@@ -177,6 +177,7 @@ const API = {
         startProxy() { return API.post('/api/channels/proxy/start'); },
         stopProxy() { return API.post('/api/channels/proxy/stop'); },
         installCert() { return API.post('/api/channels/proxy/install-cert'); },
+        uninstallCert() { return API.post('/api/channels/proxy/uninstall-cert'); },
         clearCache() { return API.post('/api/channels/clear-cache'); },
     },
 

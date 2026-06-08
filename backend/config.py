@@ -48,6 +48,13 @@ DEFAULT_SETTINGS = {
     "concurrent_downloads": 1,
     "auto_save_images": True,
     "auto_save_videos": True,
+    "device_id": "公众号_caiji6",
+    "rss_start_hour": 0,
+    "rss_start_minute": 0,
+    "rss_end_hour": 24,
+    "rss_end_minute": 0,
+    "rss_upload_enabled": True,
+    "rss_upload_url": "https://hg.chenshipin.com/api/data/gzhAdd",
 }
 
 

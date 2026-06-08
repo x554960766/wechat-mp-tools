@@ -6,6 +6,11 @@ RSS 自动订阅调度模块
 import time
 import threading
 import logging
+import base64
+import binascii
+import json
+import requests
+from pathlib import Path
 
 from backend.config import DATA_DIR, load_json, save_json
 
@@ -13,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 RSS_SUBSCRIPTIONS_FILE = DATA_DIR / "rss_subscriptions.json"
 RSS_ARTICLES_FILE = DATA_DIR / "rss_articles.json"
+RSS_UPLOAD_PENDING_FILE = DATA_DIR / "rss_upload_pending.json"
+RSS_UPLOAD_URL = "https://hg.chenshipin.com/api/data/gzhAdd"
 
 # 每个公众号 RSS 最多保留的文章数
 MAX_ARTICLES_PER_ACCOUNT = 200
@@ -60,6 +67,12 @@ class RssScheduler:
                 "last_fetch_count": 0,
                 "last_error": None,
                 "total_articles": 0,
+                "last_upload_time": 0,
+                "last_upload_count": 0,
+                "last_upload_error": None,
+                "pending_upload_count": 0,
+                "last_upload_attempted": False,
+                "last_upload_disabled": False,
             }
             subs.append(new_sub)
             self._save_subscriptions(subs)
@@ -85,6 +98,168 @@ class RssScheduler:
         all_articles[nickname] = articles[:MAX_ARTICLES_PER_ACCOUNT]
         save_json(RSS_ARTICLES_FILE, all_articles)
 
+    # ── 新文章上传 ────────────────────────────────────────
+
+    @staticmethod
+    def _content_looks_base64(value: str) -> bool:
+        if not isinstance(value, str) or not value or len(value) % 4 != 0:
+            return False
+        try:
+            base64.b64decode(value.encode("ascii"), validate=True).decode("utf-8")
+            return True
+        except (binascii.Error, UnicodeError, ValueError):
+            return False
+
+    def _normalize_upload_article(self, article: dict, encode_content: bool = True) -> dict | None:
+        if not isinstance(article, dict):
+            return None
+        normalized = dict(article)
+        normalized["source"] = normalized.get("source") or normalized.get("author") or ""
+        normalized["title"] = normalized.get("title") or ""
+        normalized["url"] = normalized.get("url") or normalized.get("link") or ""
+        if not normalized["title"] or not normalized["url"]:
+            return None
+
+        content = normalized.get("content")
+        content_encoding = normalized.pop("content_encoding", None)
+        content_is_base64 = (
+            bool(normalized.pop("_rss_content_base64", False))
+            or content_encoding == "base64"
+            or self._content_looks_base64(content)
+        )
+        if isinstance(content, str) and content:
+            if encode_content:
+                if not content_is_base64:
+                    normalized["content"] = base64.b64encode(content.encode("utf-8")).decode("ascii")
+            elif content_is_base64:
+                normalized["_rss_content_base64"] = True
+        return normalized
+
+    def _article_upload_key(self, article: dict) -> str:
+        return article.get("url") or article.get("link") or json.dumps(article, ensure_ascii=False, sort_keys=True)
+
+    def _dedupe_upload_articles(self, articles: list, encode_content: bool = True) -> list:
+        seen = set()
+        deduped = []
+        for article in articles:
+            normalized = self._normalize_upload_article(article, encode_content=encode_content)
+            if not normalized:
+                continue
+            key = self._article_upload_key(normalized)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(normalized)
+        return deduped
+
+    def _load_pending_upload_articles(self) -> list:
+        pending = load_json(RSS_UPLOAD_PENDING_FILE, [])
+        return pending if isinstance(pending, list) else []
+
+    def _save_pending_upload_articles(self, articles: list):
+        save_json(RSS_UPLOAD_PENDING_FILE, self._dedupe_upload_articles(articles, encode_content=False))
+
+    def _read_downloaded_article_data(self, article_dir: str, fallback: dict) -> dict | None:
+        data_path = Path(article_dir) / "data.json"
+        data = load_json(data_path, {})
+        if isinstance(data, dict) and data:
+            return data
+        if fallback.get("title") and fallback.get("url"):
+            return fallback
+        return None
+
+    def _upload_new_articles(self, new_articles: list) -> dict:
+        from backend.config import get_settings, get_proxies_dict
+
+        settings = get_settings()
+        pending_articles = self._dedupe_upload_articles(
+            self._load_pending_upload_articles(),
+            encode_content=False,
+        )
+        if not settings.get("rss_upload_enabled", True):
+            return {
+                "success": True,
+                "attempted": False,
+                "count": 0,
+                "pending_count": len(pending_articles),
+                "error": None,
+                "disabled": True,
+            }
+
+        pending_to_save = self._dedupe_upload_articles(
+            pending_articles + new_articles,
+            encode_content=False,
+        )
+        upload_articles = self._dedupe_upload_articles(pending_to_save)
+        if not upload_articles:
+            return {
+                "success": True,
+                "attempted": False,
+                "count": 0,
+                "pending_count": 0,
+                "error": None,
+                "disabled": False,
+            }
+
+        upload_url = (settings.get("rss_upload_url") or RSS_UPLOAD_URL).strip() or RSS_UPLOAD_URL
+        payload = {
+            "articles": upload_articles,
+            "deviceId": settings.get("device_id") or "公众号_caiji6",
+        }
+
+        try:
+            resp = requests.post(
+                upload_url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                proxies=get_proxies_dict(),
+                timeout=30,
+            )
+            resp.raise_for_status()
+            try:
+                data = resp.json()
+                if isinstance(data, dict) and data.get("success") is False:
+                    raise RuntimeError(data.get("message") or data.get("error") or "远端接口返回失败")
+            except ValueError:
+                pass
+            self._save_pending_upload_articles([])
+            logger.info("RSS 新文章上传成功: %d 篇", len(upload_articles))
+            return {
+                "success": True,
+                "attempted": True,
+                "count": len(upload_articles),
+                "pending_count": 0,
+                "error": None,
+                "disabled": False,
+            }
+        except Exception as e:
+            self._save_pending_upload_articles(pending_to_save)
+            logger.warning("RSS 新文章上传失败，已加入待重试队列: %s", e)
+            return {
+                "success": False,
+                "attempted": True,
+                "count": 0,
+                "pending_count": len(pending_to_save),
+                "error": str(e),
+                "disabled": False,
+            }
+
+    def _defer_upload_articles(self, new_articles: list, reason: str) -> dict:
+        upload_articles = self._dedupe_upload_articles(
+            self._load_pending_upload_articles() + new_articles,
+            encode_content=False,
+        )
+        self._save_pending_upload_articles(upload_articles)
+        logger.info("RSS 新文章上传暂缓: %s，待上传 %d 篇", reason, len(upload_articles))
+        return {
+            "success": False,
+            "attempted": False,
+            "count": 0,
+            "pending_count": len(upload_articles),
+            "error": reason,
+            "disabled": False,
+        }
+
     # ── 抓取逻辑 ──────────────────────────────────────────
 
     def _fetch_for_account(self, sub: dict):
@@ -99,6 +274,9 @@ class RssScheduler:
         last_error = None
         new_count = 0
         total_articles = 0
+        upload_articles = []
+        all_downloads_success = True
+        upload_result = None
 
         try:
             articles, _total = _fetch_articles_page(fakeid, begin=0, count=10)
@@ -157,6 +335,8 @@ class RssScheduler:
                             break
 
                     is_permanent = result.get("is_permanent", False) if isinstance(result, dict) else False
+                    if not success and not is_permanent:
+                        all_downloads_success = False
 
                     if existing_history_item:
                         # 只有当新结果成功，或者之前也是失败时，才更新（避免用失败覆盖成功）
@@ -201,6 +381,18 @@ class RssScheduler:
                         existing.insert(0, rss_item)
                         new_count += 1
 
+                    if success and downloaded_path:
+                        article_data = self._read_downloaded_article_data(
+                            downloaded_path,
+                            {
+                                "source": nickname,
+                                "title": result.get("title") or title,
+                                "url": link,
+                            },
+                        )
+                        if article_data:
+                            upload_articles.append(article_data)
+
                     # 避免抓取频率过快，加入延迟
                     if i < len(new_articles) - 1:
                         time.sleep(delay)
@@ -212,6 +404,13 @@ class RssScheduler:
             existing = existing[:MAX_ARTICLES_PER_ACCOUNT]
             self._save_articles(nickname, existing)
             total_articles = len(existing)
+            if all_downloads_success:
+                upload_result = self._upload_new_articles(upload_articles)
+            else:
+                upload_result = self._defer_upload_articles(
+                    upload_articles,
+                    "等待本轮 RSS 新文章全部下载成功后再上传",
+                )
         except PermissionError:
             last_error = "登录已过期"
             logger.warning("RSS 抓取跳过 [%s]: 登录已过期", nickname)
@@ -228,6 +427,14 @@ class RssScheduler:
                     s["last_fetch_count"] = new_count
                     s["last_error"] = last_error
                     s["total_articles"] = total_articles
+                    if upload_result:
+                        if upload_result.get("attempted", False):
+                            s["last_upload_time"] = time.time()
+                            s["last_upload_count"] = upload_result.get("count", 0)
+                        s["last_upload_error"] = upload_result.get("error")
+                        s["pending_upload_count"] = upload_result.get("pending_count", 0)
+                        s["last_upload_attempted"] = upload_result.get("attempted", False)
+                        s["last_upload_disabled"] = upload_result.get("disabled", False)
                     break
             self._save_subscriptions(subs)
 
@@ -247,7 +454,38 @@ class RssScheduler:
             self._stop_event.wait(30)
         logger.info("RSS 调度器已停止")
 
+    @staticmethod
+    def _safe_int(value, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _get_fetch_window_minutes(self) -> tuple[int, int]:
+        from backend.config import get_settings
+
+        settings = get_settings()
+        start_hour = max(0, min(23, self._safe_int(settings.get("rss_start_hour", 0), 0)))
+        start_minute = max(0, min(59, self._safe_int(settings.get("rss_start_minute", 0), 0)))
+        end_hour = max(0, min(24, self._safe_int(settings.get("rss_end_hour", 24), 24)))
+        end_minute = 0 if end_hour == 24 else max(0, min(59, self._safe_int(settings.get("rss_end_minute", 0), 0)))
+        return start_hour * 60 + start_minute, end_hour * 60 + end_minute
+
+    def is_in_fetch_window(self, now=None) -> bool:
+        import datetime
+
+        current = now or datetime.datetime.now()
+        start_minute, end_minute = self._get_fetch_window_minutes()
+        current_minute = current.hour * 60 + current.minute
+
+        if start_minute <= end_minute:
+            return start_minute <= current_minute < end_minute
+        return current_minute >= start_minute or current_minute < end_minute
+
     def _tick(self):
+        if not self.is_in_fetch_window():
+            return
+
         subs = self.get_subscriptions()
         now = time.time()
 
