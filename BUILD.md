@@ -4,7 +4,7 @@
 1. **数据外置**：打包后，所有的 Cookie、历史记录、下载的文章数据均会自动保存到用户可写目录中，完全不影响迁移和备份。
    - **macOS**: `~/Library/Application Support/WeChat MP Tools/data/`
    - **Windows**: 可执行文件旁边的 `data/` 目录
-2. **资源内置**：网页前端的 `frontend` 静态文件、Playwright 运行所需的 Chromium 浏览器都会打包进程序中，无需用户手动安装 Python、Playwright 或 Chromium。
+2. **资源内置/轻量双版本**：网页前端的 `frontend` 静态文件始终内置；完整版会额外内置 Playwright Chromium，轻量版不内置浏览器，会自动使用用户电脑上的 Google Chrome / Microsoft Edge。
 
 ---
 
@@ -20,14 +20,25 @@
    - 打开您的 GitHub 仓库页面，点击顶部的 **Actions** 标签。
    - 看到名为 `Build WeChat MP Tools Executables` 的工作流，点击进入最新的一条记录。
    - 滚动到页面底部，即可在 **Artifacts (产物)** 栏直接下载已经打包压缩好的：
-     - 🎁 `WeChat-MP-Tools-Windows-Executable` (内含完整绿色程序包，Windows 用户解压后双击 `.exe` 即用)
-     - 🎁 `WeChat-MP-Tools-macOS-Executable` (内含 `.app` 双击程序包)
+     - 🎁 `WeChat-MP-Tools-Windows-Full` / `WeChat-MP-Tools-macOS-Full`：内置 Chromium，体积较大，用户无需额外安装浏览器。
+     - 🎁 `WeChat-MP-Tools-Windows-Lite` / `WeChat-MP-Tools-macOS-Lite`：不内置 Chromium，体积更小，需要用户电脑已安装 Google Chrome 或 Microsoft Edge。
 
 ---
 
 ## 🍎 方案二：在 macOS 本地打包（生成 Mac 专用的 `.app`）
 
 我们已在您的 Mac 上完成了打包测试，编译输出文件为双击运行的 **Mac 应用程序 (`.app`)**。
+
+完整版（内置 Chromium）：
+```bash
+PLAYWRIGHT_BROWSERS_PATH=ms-playwright python3 -m playwright install chromium --no-shell
+pyinstaller wechat_mp_tools.spec
+```
+
+轻量版（不内置 Chromium，运行时使用系统 Chrome / Edge）：
+```bash
+WECHAT_MP_TOOLS_BUNDLE_BROWSER=0 pyinstaller wechat_mp_tools.spec
+```
 
 ### 1. 打包成果位置
 打包生成的文件位于项目根目录的：
@@ -62,14 +73,22 @@ pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 # 安装打包工具 PyInstaller
 pip install pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 下载会被打包进程序的 Chromium 浏览器
+# 完整版需要先下载会被打包进程序的 Chromium 浏览器（不打包单独的 headless shell，减小体积）
 $env:PLAYWRIGHT_BROWSERS_PATH="ms-playwright"
-python -m playwright install chromium chromium-headless-shell
+python -m playwright install chromium --no-shell
 ```
 
 ### 3. 一键编译打包
-使用我们已经写好的通用 spec 规约文件进行打包：
+使用我们已经写好的通用 spec 规约文件进行打包。
+
+完整版（内置 Chromium）：
 ```powershell
+pyinstaller wechat_mp_tools.spec
+```
+
+轻量版（不内置 Chromium，运行时使用系统 Chrome / Edge）：
+```powershell
+$env:WECHAT_MP_TOOLS_BUNDLE_BROWSER="0"
 pyinstaller wechat_mp_tools.spec
 ```
 
@@ -87,11 +106,13 @@ pyinstaller wechat_mp_tools.spec
 ## ⚠️ 常见问题说明
 
 ### 1. Windows 用户还需要安装 Python 或浏览器吗？
-不需要。GitHub Actions 产物会把 Python 运行时、项目依赖和 Playwright Chromium 一起放进 `WeChat MP Tools` 文件夹。
+完整版不需要。GitHub Actions 的 Full 产物会把 Python 运行时、项目依赖和 Playwright Chromium 一起放进 `WeChat MP Tools` 文件夹。
 
-本地源码运行时如果提示 `chromium_headless_shell` 不存在，请在项目目录执行：
+轻量版需要用户电脑已安装 Google Chrome 或 Microsoft Edge，否则扫码登录/自动获取 Cookie 这类浏览器自动化功能无法启动。
+
+本地源码运行时如果提示 Chromium 浏览器不存在，请在项目目录执行：
 ```bash
-python3 -m playwright install chromium chromium-headless-shell
+python3 -m playwright install chromium --no-shell
 ```
 
 ### 2. macOS 下载后打不开？

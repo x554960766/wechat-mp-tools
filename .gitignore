@@ -6,6 +6,7 @@ __pycache__/
 # PyInstaller packaging output
 build/
 dist/
+ms-playwright/
 
 # Local WeChat/Douyin data, credentials and logs (CRITICAL FOR SECURITY)
 data/

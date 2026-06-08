@@ -12,7 +12,8 @@ datas = [
 ]
 
 playwright_browsers = os.path.join(project_root, 'ms-playwright')
-if os.path.isdir(playwright_browsers):
+bundle_browser = os.environ.get('WECHAT_MP_TOOLS_BUNDLE_BROWSER', '1') != '0'
+if bundle_browser and os.path.isdir(playwright_browsers):
     datas.append((playwright_browsers, 'ms-playwright'))
 
 # ── 依赖配置 ──────────────────────────────────────────────
@@ -23,7 +24,7 @@ hiddenimports = [
     'urllib3',
     'playwright',
     'playwright.sync_api',
-    'pysocks',
+    'socks',
     'jinja2',
     'werkzeug',
     'click',
@@ -87,6 +88,24 @@ a = Analysis(
         'tcl',
         'tk',
         'FixTk',
+        'PySide6',
+        'PyQt5',
+        'PyQt6',
+        'PySide2',
+        'qtpy',
+        'qfluentwidgets',
+        'torch',
+        'torchvision',
+        'paddle',
+        'paddleocr',
+        'paddlex',
+        'cv2',
+        'numpy',
+        'scipy',
+        'pandas',
+        'matplotlib',
+        'skimage',
+        'backend.subtitle_remover',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

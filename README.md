@@ -88,7 +88,8 @@ python3 main.py
 ## 📦 打包构建指南
 
 为了方便分发和免安装运行，项目已集成 **PyInstaller**。
-* **macOS 本地打包**：直接在终端运行 `pyinstaller wechat_mp_tools.spec` 即可在 `dist/` 目录下生成可直接双击运行的 `WeChat MP Tools.app`。
+* **完整版打包**：先运行 `PLAYWRIGHT_BROWSERS_PATH=ms-playwright python3 -m playwright install chromium --no-shell`，再运行 `pyinstaller wechat_mp_tools.spec`，产物内置 Chromium。
+* **轻量版打包**：运行 `WECHAT_MP_TOOLS_BUNDLE_BROWSER=0 pyinstaller wechat_mp_tools.spec`，产物不内置 Chromium，会使用用户电脑上的 Chrome / Edge。
 * **Windows 打包与云端自动构建**：请参考 [BUILD.md](file:///Users/apple/Downloads/wechat-mp-tools/BUILD.md) 获取详细的 Windows 打包及 GitHub Actions 自动构建方案。
 
 ---

@@ -8,6 +8,7 @@ from flask import Blueprint, jsonify
 from playwright.sync_api import sync_playwright
 
 from backend.config import get_settings, save_settings
+from backend.runtime import launch_chromium
 
 douyin_auth_bp = Blueprint("douyin_auth", __name__, url_prefix="/api/douyin/auth")
 
@@ -156,7 +157,8 @@ def _do_login():
     try:
         with sync_playwright() as p:
             # 启动浏览器（非 headless 模式，让用户看到登录界面）
-            browser = p.chromium.launch(
+            browser = launch_chromium(
+                p.chromium,
                 headless=False,
                 args=['--disable-blink-features=AutomationControlled']
             )

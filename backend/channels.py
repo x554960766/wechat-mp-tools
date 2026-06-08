@@ -15,6 +15,7 @@ from pathlib import Path
 from flask import Blueprint, jsonify, request
 
 from backend.config import DATA_DIR, OUTPUT_DIR, get_settings, load_json, save_json
+from backend.runtime import launch_chromium
 
 channels_bp = Blueprint("channels", __name__, url_prefix="/api/channels")
 CHANNELS_HISTORY_FILE = DATA_DIR / "channels_history.json"
@@ -289,14 +290,7 @@ def _do_cookie_acquisition():
         
     try:
         with sync_playwright() as p:
-            # 优先尝试启动本地 Chrome 浏览器以提供最佳免安装体验；若失败则退回 Playwright 默认 Chromium
-            try:
-                browser = p.chromium.launch(headless=False, channel="chrome")
-            except Exception:
-                try:
-                    browser = p.chromium.launch(headless=False)
-                except Exception as e:
-                    raise RuntimeError("未检测到本地 Chrome 浏览器，请先安装 Chrome 浏览器，或在终端运行 'playwright install chromium' 补全驱动。")
+            browser = launch_chromium(p.chromium, headless=False)
             
             context = browser.new_context(
                 user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -1063,5 +1057,4 @@ def cancel_async_download(task_id):
         task["cancel_event"].set()
         task["status"] = "cancelled"
         return jsonify({"success": True, "message": "下载已请求取消"})
-
 

@@ -11,6 +11,7 @@ from flask import Blueprint, jsonify, request
 from playwright.sync_api import sync_playwright
 
 from backend.config import get_settings, save_settings
+from backend.runtime import launch_chromium
 
 douyin_login_bp = Blueprint("douyin_login", __name__, url_prefix="/api/douyin-auth")
 
@@ -228,7 +229,7 @@ def _do_login():
     try:
         with sync_playwright() as p:
             # 抖音有很强的反爬，建议非无头模式，让用户自己扫码
-            browser = p.chromium.launch(headless=False, args=['--disable-blink-features=AutomationControlled'])
+            browser = launch_chromium(p.chromium, headless=False, args=['--disable-blink-features=AutomationControlled'])
             _active_browser = browser
             
             context = browser.new_context(

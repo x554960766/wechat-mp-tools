@@ -14,6 +14,7 @@ from backend.config import (
     CONFIG_FILE, DATA_DIR, load_json, save_json,
     get_proxy_config, get_proxy_url
 )
+from backend.runtime import launch_chromium
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
@@ -254,7 +255,7 @@ def _do_login():
                     launch_kwargs["proxy"]["username"] = proxy_config["username"]
                     launch_kwargs["proxy"]["password"] = proxy_config.get("password", "")
 
-            browser = p.chromium.launch(**launch_kwargs)
+            browser = launch_chromium(p.chromium, **launch_kwargs)
             
             with _login_lock:
                 _active_browser = browser

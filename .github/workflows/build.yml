@@ -27,22 +27,41 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
           pip install pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
-          python -m playwright install chromium chromium-headless-shell
+          python -m playwright install chromium --no-shell
 
-      - name: Build Windows EXE
+      - name: Build Windows EXE (Full)
         run: |
-          pyinstaller wechat_mp_tools.spec
+          pyinstaller --clean --noconfirm wechat_mp_tools.spec
 
-      - name: Compress Build Result
+      - name: Compress Windows Full Build
         shell: powershell
         run: |
-          Compress-Archive -Path "dist\WeChat MP Tools" -DestinationPath WeChat_MP_Tools_Windows.zip
+          Compress-Archive -Path "dist\WeChat MP Tools" -DestinationPath WeChat_MP_Tools_Windows_Full.zip
 
-      - name: Upload Windows Artifact
+      - name: Build Windows EXE (Lite)
+        shell: powershell
+        run: |
+          Remove-Item -Recurse -Force build, dist
+          $env:WECHAT_MP_TOOLS_BUNDLE_BROWSER="0"
+          pyinstaller --clean --noconfirm wechat_mp_tools.spec
+
+      - name: Compress Windows Lite Build
+        shell: powershell
+        run: |
+          Compress-Archive -Path "dist\WeChat MP Tools" -DestinationPath WeChat_MP_Tools_Windows_Lite.zip
+
+      - name: Upload Windows Full Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WeChat-MP-Tools-Windows-Executable
-          path: WeChat_MP_Tools_Windows.zip
+          name: WeChat-MP-Tools-Windows-Full
+          path: WeChat_MP_Tools_Windows_Full.zip
+          retention-days: 7
+
+      - name: Upload Windows Lite Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeChat-MP-Tools-Windows-Lite
+          path: WeChat_MP_Tools_Windows_Lite.zip
           retention-days: 7
 
   build-macos:
@@ -64,22 +83,40 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
           pip install pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
-          python -m playwright install chromium chromium-headless-shell
+          python -m playwright install chromium --no-shell
 
-      - name: Build macOS APP
+      - name: Build macOS APP (Full)
         run: |
-          pyinstaller wechat_mp_tools.spec
+          pyinstaller --clean --noconfirm wechat_mp_tools.spec
           # codesign --deep often fails on nested Chromium symlinks. If it fails, we ignore it as PyInstaller's built-in ad-hoc signing is sufficient.
           codesign --force --deep --sign - "dist/WeChat MP Tools.app" || true
 
-      - name: Compress Build Result
+      - name: Compress macOS Full Build
         run: |
           cd dist
-          ditto -c -k --keepParent "WeChat MP Tools.app" ../WeChat_MP_Tools_macOS.zip
+          ditto -c -k --keepParent "WeChat MP Tools.app" ../WeChat_MP_Tools_macOS_Full.zip
 
-      - name: Upload macOS Artifact
+      - name: Build macOS APP (Lite)
+        run: |
+          rm -rf build dist
+          WECHAT_MP_TOOLS_BUNDLE_BROWSER=0 pyinstaller --clean --noconfirm wechat_mp_tools.spec
+          codesign --force --deep --sign - "dist/WeChat MP Tools.app" || true
+
+      - name: Compress macOS Lite Build
+        run: |
+          cd dist
+          ditto -c -k --keepParent "WeChat MP Tools.app" ../WeChat_MP_Tools_macOS_Lite.zip
+
+      - name: Upload macOS Full Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WeChat-MP-Tools-macOS-Executable
-          path: WeChat_MP_Tools_macOS.zip
+          name: WeChat-MP-Tools-macOS-Full
+          path: WeChat_MP_Tools_macOS_Full.zip
+          retention-days: 7
+
+      - name: Upload macOS Lite Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WeChat-MP-Tools-macOS-Lite
+          path: WeChat_MP_Tools_macOS_Lite.zip
           retention-days: 7
