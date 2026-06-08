@@ -243,11 +243,15 @@ const AccountsPage = {
                     </div>
                     <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
                         <span style="color: var(--text-muted);">抓取间隔：</span>
-                        <span>每 ${interval >= 60 ? (interval / 60) + ' 小时' : interval + ' 分钟'}</span>
+                        <span>${this.formatRssIntervalRange(interval)}</span>
                     </div>
                     <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
                         <span style="color: var(--text-muted);">上次抓取：</span>
                         <span>${sub?.last_fetch_time ? new Date(sub.last_fetch_time * 1000).toLocaleString() : '暂无'}</span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                        <span style="color: var(--text-muted);">下次预计：</span>
+                        <span>${sub?.next_fetch_time ? new Date(sub.next_fetch_time * 1000).toLocaleString() : '等待调度'}</span>
                     </div>
                     <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
                         <span style="color: var(--text-muted);">上次新增：</span>
@@ -274,7 +278,7 @@ const AccountsPage = {
             ` : `
                 <div style="margin-top: var(--spacing-md); padding: var(--spacing-sm) var(--spacing-md); background: var(--bg-glass); border-radius: var(--radius-md); border: 1px solid var(--border-color); font-size: 0.82rem;">
                     <p style="color: var(--text-muted); margin: 0; text-align: center;">
-                        💡 开启自动订阅后，系统会定时抓取该公众号最新文章并更新到 RSS。
+                        💡 开启自动订阅后，系统会随机间隔抓取该公众号最新文章并更新到 RSS。
                     </p>
                 </div>
             `;
@@ -290,7 +294,7 @@ const AccountsPage = {
                         <div class="switch-group" style="margin-bottom: var(--spacing-md);">
                             <div class="switch-label">
                                 <span class="label-title">自动订阅抓取</span>
-                                <span class="label-desc">开启后系统后台定时抓取该公众号最新文章</span>
+                                <span class="label-desc">开启后系统后台随机间隔抓取该公众号最新文章</span>
                             </div>
                             <label class="switch">
                                 <input type="checkbox" id="rss-enable-checkbox" ${isSubscribed ? 'checked' : ''}>
@@ -304,13 +308,13 @@ const AccountsPage = {
                                 抓取时间间隔
                             </label>
                             <select class="form-input" id="rss-interval-select" style="width: 100%;">
-                                <option value="15" ${interval === 15 ? 'selected' : ''}>每 15 分钟</option>
-                                <option value="30" ${interval === 30 ? 'selected' : ''}>每 30 分钟</option>
-                                <option value="60" ${interval === 60 ? 'selected' : ''}>每 1 小时 (推荐)</option>
-                                <option value="120" ${interval === 120 ? 'selected' : ''}>每 2 小时</option>
-                                <option value="360" ${interval === 360 ? 'selected' : ''}>每 6 小时</option>
-                                <option value="720" ${interval === 720 ? 'selected' : ''}>每 12 小时</option>
-                                <option value="1440" ${interval === 1440 ? 'selected' : ''}>每 24 小时</option>
+                                <option value="15" ${interval === 15 ? 'selected' : ''}>${this.formatRssIntervalRange(15)}</option>
+                                <option value="30" ${interval === 30 ? 'selected' : ''}>${this.formatRssIntervalRange(30)}</option>
+                                <option value="60" ${interval === 60 ? 'selected' : ''}>${this.formatRssIntervalRange(60)} (推荐)</option>
+                                <option value="120" ${interval === 120 ? 'selected' : ''}>${this.formatRssIntervalRange(120)}</option>
+                                <option value="360" ${interval === 360 ? 'selected' : ''}>${this.formatRssIntervalRange(360)}</option>
+                                <option value="720" ${interval === 720 ? 'selected' : ''}>${this.formatRssIntervalRange(720)}</option>
+                                <option value="1440" ${interval === 1440 ? 'selected' : ''}>${this.formatRssIntervalRange(1440)}</option>
                             </select>
                         </div>
 
@@ -406,9 +410,9 @@ const AccountsPage = {
                     const res = await API.accounts.rssSubscribe(fakeid, selectedInterval);
                     sub = res.subscription;
                     interval = selectedInterval;
-                    const intervalText = selectedInterval >= 60 ? (selectedInterval / 60) + ' 小时' : selectedInterval + ' 分钟';
+                    const intervalText = this.formatRssIntervalRange(selectedInterval);
                     const suffix = res.immediate_fetch === false ? '，当前不在采集时间段内' : '';
-                    Toast.success(`订阅抓取间隔已更新为每 ${intervalText}${suffix}`);
+                    Toast.success(`订阅随机抓取间隔已更新为 ${intervalText}${suffix}`);
                     updateModalBody();
                 } catch (err) {
                     intervalSelect.value = interval;
@@ -441,6 +445,29 @@ const AccountsPage = {
             document.execCommand('copy');
             Toast.success('RSS 地址已复制');
         }
+    },
+
+    getRssIntervalRange(intervalMinutes) {
+        const interval = Math.max(15, parseInt(intervalMinutes, 10) || 60);
+        const jitter = Math.max(5, Math.round(interval * 0.25));
+        return {
+            min: Math.max(5, interval - jitter),
+            max: interval + jitter,
+        };
+    },
+
+    formatRssDuration(minutes) {
+        if (minutes < 60) return `${minutes} 分钟`;
+        const hours = minutes / 60;
+        return `${Number.isInteger(hours) ? hours : Number(hours.toFixed(1))} 小时`;
+    },
+
+    formatRssIntervalRange(intervalMinutes) {
+        const range = this.getRssIntervalRange(intervalMinutes);
+        if (range.max <= 180) {
+            return `约 ${range.min}-${range.max} 分钟随机`;
+        }
+        return `约 ${this.formatRssDuration(range.min)} - ${this.formatRssDuration(range.max)} 随机`;
     },
 
     formatRssUploadStatus(sub) {

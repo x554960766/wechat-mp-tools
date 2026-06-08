@@ -9,17 +9,18 @@ import logging
 import base64
 import binascii
 import json
+import random
 import requests
 from pathlib import Path
 
-from backend.config import DATA_DIR, load_json, save_json
+from backend.config import DATA_DIR, DEFAULT_RSS_UPLOAD_URL, load_json, save_json
 
 logger = logging.getLogger(__name__)
 
 RSS_SUBSCRIPTIONS_FILE = DATA_DIR / "rss_subscriptions.json"
 RSS_ARTICLES_FILE = DATA_DIR / "rss_articles.json"
 RSS_UPLOAD_PENDING_FILE = DATA_DIR / "rss_upload_pending.json"
-RSS_UPLOAD_URL = "https://hg.chenshipin.com/api/data/gzhAdd"
+RSS_UPLOAD_URL = DEFAULT_RSS_UPLOAD_URL
 
 # 每个公众号 RSS 最多保留的文章数
 MAX_ARTICLES_PER_ACCOUNT = 200
@@ -49,12 +50,16 @@ class RssScheduler:
 
     def subscribe(self, fakeid: str, nickname: str, interval_minutes: int = 60) -> dict:
         with self._lock:
+            interval_minutes = self._normalize_interval_minutes(interval_minutes)
             subs = self.get_subscriptions()
             for sub in subs:
                 if sub.get("fakeid") == fakeid:
+                    old_interval = self._normalize_interval_minutes(sub.get("interval_minutes", 60))
                     sub["nickname"] = nickname
                     sub["interval_minutes"] = interval_minutes
                     sub["enabled"] = True
+                    if old_interval != interval_minutes or not self._safe_float(sub.get("next_fetch_time"), 0):
+                        self._schedule_next_fetch(sub)
                     self._save_subscriptions(subs)
                     return sub
 
@@ -74,6 +79,7 @@ class RssScheduler:
                 "last_upload_attempted": False,
                 "last_upload_disabled": False,
             }
+            self._schedule_next_fetch(new_sub)
             subs.append(new_sub)
             self._save_subscriptions(subs)
             return new_sub
@@ -176,7 +182,7 @@ class RssScheduler:
             self._load_pending_upload_articles(),
             encode_content=False,
         )
-        if not settings.get("rss_upload_enabled", True):
+        if not settings.get("rss_upload_enabled", False):
             return {
                 "success": True,
                 "attempted": False,
@@ -201,10 +207,13 @@ class RssScheduler:
                 "disabled": False,
             }
 
-        upload_url = (settings.get("rss_upload_url") or RSS_UPLOAD_URL).strip() or RSS_UPLOAD_URL
+        upload_url = (settings.get("rss_upload_url") or "").strip()
+        if not upload_url:
+            return self._defer_upload_articles(new_articles, "RSS 上传接口地址未配置")
+
         payload = {
             "articles": upload_articles,
-            "deviceId": settings.get("device_id") or "公众号_caiji6",
+            "deviceId": settings.get("device_id") or "公众号_caiji100",
         }
 
         try:
@@ -423,10 +432,12 @@ class RssScheduler:
             subs = self.get_subscriptions()
             for s in subs:
                 if s.get("fakeid") == fakeid:
-                    s["last_fetch_time"] = time.time()
+                    now = time.time()
+                    s["last_fetch_time"] = now
                     s["last_fetch_count"] = new_count
                     s["last_error"] = last_error
                     s["total_articles"] = total_articles
+                    self._schedule_next_fetch(s, now)
                     if upload_result:
                         if upload_result.get("attempted", False):
                             s["last_upload_time"] = time.time()
@@ -461,6 +472,37 @@ class RssScheduler:
         except (TypeError, ValueError):
             return default
 
+    @staticmethod
+    def _safe_float(value, default: float = 0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @classmethod
+    def _normalize_interval_minutes(cls, value) -> int:
+        return max(15, cls._safe_int(value, 60))
+
+    @classmethod
+    def _get_interval_range_minutes(cls, interval_minutes: int) -> tuple[int, int]:
+        interval = cls._normalize_interval_minutes(interval_minutes)
+        jitter = max(5, round(interval * 0.25))
+        return max(5, interval - jitter), interval + jitter
+
+    def _schedule_next_fetch(self, sub: dict, start_time: float | None = None) -> float:
+        min_minutes, max_minutes = self._get_interval_range_minutes(sub.get("interval_minutes", 60))
+        next_fetch_time = (start_time or time.time()) + random.randint(min_minutes * 60, max_minutes * 60)
+        sub["next_fetch_time"] = next_fetch_time
+        return next_fetch_time
+
+    def _ensure_next_fetch_time(self, sub: dict, now: float) -> bool:
+        if self._safe_float(sub.get("next_fetch_time"), 0) > 0:
+            return False
+
+        last_fetch = self._safe_float(sub.get("last_fetch_time"), 0)
+        self._schedule_next_fetch(sub, last_fetch or now)
+        return True
+
     def _get_fetch_window_minutes(self) -> tuple[int, int]:
         from backend.config import get_settings
 
@@ -486,16 +528,33 @@ class RssScheduler:
         if not self.is_in_fetch_window():
             return
 
-        subs = self.get_subscriptions()
         now = time.time()
+        due_subs = []
 
-        for sub in subs:
-            if not sub.get("enabled"):
-                continue
-            interval_sec = sub.get("interval_minutes", 60) * 60
-            last_fetch = sub.get("last_fetch_time", 0)
-            if now - last_fetch >= interval_sec:
-                self._fetch_for_account(sub)
+        with self._lock:
+            subs = self.get_subscriptions()
+            changed = False
+
+            for sub in subs:
+                if not sub.get("enabled"):
+                    continue
+
+                interval_minutes = self._normalize_interval_minutes(sub.get("interval_minutes", 60))
+                if sub.get("interval_minutes") != interval_minutes:
+                    sub["interval_minutes"] = interval_minutes
+                    changed = True
+
+                if self._ensure_next_fetch_time(sub, now):
+                    changed = True
+
+                if now >= self._safe_float(sub.get("next_fetch_time"), 0):
+                    due_subs.append(dict(sub))
+
+            if changed:
+                self._save_subscriptions(subs)
+
+        for sub in due_subs:
+            self._fetch_for_account(sub)
 
 
     # ── 启停控制 ──────────────────────────────────────────
