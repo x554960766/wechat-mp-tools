@@ -358,7 +358,7 @@ const HistoryPage = {
 
     async loadHistory() {
         try {
-            const data = await API.articles.history(100);
+            const data = await API.articles.history(999999);
             const history = data.history || [];
 
             // 过滤成功且包含可用文件路径的条目，或者永久性失败的条目（比如作者已删除/内容被屏蔽/链接已过期）
@@ -588,9 +588,7 @@ const HistoryPage = {
                         path.toLowerCase().endsWith('.avi') || 
                         path.toLowerCase().endsWith('.webm');
         
-        // 构建 served HTML url
-        const safeTitle = item.title;
-        const serveUrl = `/api/articles/serve-file/${encodeURIComponent(item.account)}/${encodeURIComponent(safeTitle)}/${encodeURIComponent(safeTitle)}.html`;
+        const serveUrl = this.buildArticleServeUrl(item);
 
         viewer.innerHTML = `
             <div class="history-right-header">
@@ -621,6 +619,30 @@ const HistoryPage = {
         `;
     },
 
+    buildArticleServeUrl(item) {
+        const title = item.title || 'article';
+        const filename = `${title}.html`;
+        const rawPath = String(item.path || '').replace(/\\/g, '/');
+        const marker = '/articles_full/';
+        const markerIndex = rawPath.lastIndexOf(marker);
+        let relativeDir = '';
+
+        if (markerIndex >= 0) {
+            relativeDir = rawPath.slice(markerIndex + marker.length);
+        } else {
+            const parts = rawPath.split('/').filter(Boolean);
+            const dirName = parts.length ? parts[parts.length - 1] : title;
+            relativeDir = [item.account || '', dirName].filter(Boolean).join('/');
+        }
+
+        const encodedDir = relativeDir
+            .split('/')
+            .filter(Boolean)
+            .map(segment => encodeURIComponent(segment))
+            .join('/');
+        return `/api/articles/serve-file/${encodedDir}/${encodeURIComponent(filename)}`;
+    },
+
     /**
      * 当内嵌 iframe 加载完毕时运行
      * 1. 注入图片灯箱脚本，点击放大显示图片
@@ -648,12 +670,13 @@ const HistoryPage = {
                     color: #222222 !important;
                     font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "PingFang SC", "Microsoft YaHei", sans-serif !important;
                 }
-                #js_article, #page-content, .rich_media_area_primary, .rich_media_content {
+                #js_article, #page-content, .rich_media_area_primary, .rich_media_content, #js_content {
                     max-width: 100% !important;
                     width: 100% !important;
                     box-sizing: border-box !important;
                     padding: 0 !important;
                     margin: 0 auto !important;
+                    visibility: visible !important;
                 }
                 /* 图片样式，手势放大 */
                 img {

@@ -30,7 +30,7 @@ def clean_html_to_text(html: str) -> str:
     # 先剥离 script 和 style 标签及其内部的内容，避免污染提取出的文本
     html = re.sub(r'<script\b[^>]*>([\s\S]*?)</script>', '', html, flags=re.I)
     html = re.sub(r'<style\b[^>]*>([\s\S]*?)</style>', '', html, flags=re.I)
-    
+
     # 替换常见换行与段落标签为换行符
     text = re.sub(r'<(p|br|div|h1|h2|h3|h4|h5|h6|li|tr)[^>]*>', '\n', html)
     # 去除所有其他 HTML 标签
@@ -301,20 +301,17 @@ def _choose_video_url(candidates: list) -> str:
 
 
 def extract_article_content(raw_html: str) -> str:
-    # 优先检测并提取画廊/贴图类型文章
-    gallery_html = try_extract_gallery_article(raw_html)
-    if gallery_html:
-        return gallery_html
-
     marker = 'id="js_content"'
     marker_pos = raw_html.find(marker)
     if marker_pos < 0:
-        return raw_html
+        gallery_html = try_extract_gallery_article(raw_html)
+        return gallery_html or raw_html
 
     start_tag_begin = raw_html.rfind("<div", 0, marker_pos)
     start_tag_end = raw_html.find(">", marker_pos)
     if start_tag_begin < 0 or start_tag_end < 0:
-        return raw_html
+        gallery_html = try_extract_gallery_article(raw_html)
+        return gallery_html or raw_html
 
     end_candidates = [
         raw_html.find('id="js_tags_preview_toast"', start_tag_end),
@@ -328,7 +325,11 @@ def extract_article_content(raw_html: str) -> str:
     last_close = content.rfind("</div>")
     if last_close >= 0:
         content = content[:last_close]
-    return content
+    if content.strip():
+        return content
+
+    gallery_html = try_extract_gallery_article(raw_html)
+    return gallery_html or raw_html
 
 
 def replace_video_iframe(html: str, video: dict, local: str) -> str:
@@ -387,15 +388,15 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
 
         # 检测是否为微信屏蔽、删除或出错页面（贴图画廊类型可能不含 js_content，但含有 picture_page_info_list）
         has_js_content = 'id="js_content"' in raw_html or 'picture_page_info_list' in raw_html
-        
+
         # 提取标题辅助判断
         title_tag_match = re.search(r'<title>([^<]*)</title>', raw_html, re.I)
         page_title_tag = title_tag_match.group(1).strip() if title_tag_match else ""
-        
+
         is_error = False
         error_msg = ""
         is_permanent = False
-        
+
         if not has_js_content:
             if any(kw in raw_html for kw in ["内容已被作者删除", "已被作者删除"]):
                 is_error = True
@@ -413,7 +414,7 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
                 is_error = True
                 error_msg = "系统出错"
                 is_permanent = False
-        
+
         if not is_error and any(kw in page_title_tag for kw in ["该内容暂时无法查看", "系统出错"]):
             is_error = True
             if "该内容暂时无法查看" in page_title_tag:
@@ -422,7 +423,7 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
             else:
                 error_msg = "系统出错"
                 is_permanent = False
-                
+
         if is_error:
             report_proxy_status(proxy_url, success=False)
             return {"success": False, "title": safe_title, "error": error_msg, "is_permanent": is_permanent}
@@ -494,7 +495,7 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
             while new_art_dir.exists() and new_art_dir != art_dir:
                 new_art_dir = out_dir / f"{safe_title}_{counter}"
                 counter += 1
-            
+
             if new_art_dir != art_dir:
                 art_dir.rename(new_art_dir)
                 art_dir = new_art_dir
@@ -510,7 +511,7 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
     url_map = {}
     if save_images:
         img_urls = set()
-        
+
         # 优先下载封面图
         if cover_url:
             cover_ext = get_ext(cover_url) or "jpg"
@@ -597,6 +598,7 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         "         font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;\n"
         '         line-height:1.8;color:#333}\n'
         '    img,video{max-width:100%;height:auto;display:block;margin:10px auto}\n'
+        '    #js_content, .rich_media_content { visibility: visible !important; }\n'
         '  </style>\n</head>\n<body>\n'
         f'<h1>{safe_title}</h1>\n'
         '<div id="js_content">\n' + localized + '\n</div>\n'
@@ -605,6 +607,54 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
 
     html_path = art_dir / f"{safe_title}.html"
     html_path.write_text(full_html, encoding="utf-8")
+
+    # 生成并保存原始 HTML (保持外部资源链接不变)
+    raw_localized = content_html
+    raw_localized = re.sub(r'data-src="([^"]*)"', r'src="\1"', raw_localized)
+    raw_full_html = (
+        '<!DOCTYPE html>\n<html lang="zh-CN">\n<head>\n'
+        '  <meta charset="UTF-8">\n'
+        '  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
+        f'  <title>{safe_title}</title>\n'
+        '  <style>\n'
+        '    body{max-width:680px;margin:0 auto;padding:20px;\n'
+        "         font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;\n"
+        '         line-height:1.8;color:#333}\n'
+        '    img,video{max-width:100%;height:auto;display:block;margin:10px auto}\n'
+        '    #js_content, .rich_media_content { visibility: visible !important; }\n'
+        '  </style>\n</head>\n<body>\n'
+        f'<h1>{safe_title}</h1>\n'
+        '<div id="js_content">\n' + raw_localized + '\n</div>\n'
+        '</body>\n</html>'
+    )
+    (art_dir / f"{safe_title}_raw.html").write_text(raw_full_html, encoding="utf-8")
+
+    # 提取公众号 source 名字
+    source = ""
+    nickname_match = re.search(r'\bnickname\s*=\s*["\']([^"\']+)["\']', raw_html)
+    if nickname_match:
+        source = unescape(nickname_match.group(1)).strip()
+    if not source:
+        nickname_match = re.search(r'class="profile_nickname"[^>]*>([^<]+)<', raw_html)
+        if nickname_match:
+            source = unescape(nickname_match.group(1)).strip()
+    if not source:
+        nickname_match = re.search(r'id="js_name"[^>]*>([^<]+)<', raw_html)
+        if nickname_match:
+            source = unescape(nickname_match.group(1)).strip()
+
+    if not source or out_dir.name != "url_download":
+        source = out_dir.name
+
+    new_json_data = {
+        "source": source,
+        "title": page_title or safe_title,
+        "url": url,
+        "cover_url": cover_url,
+        "publish_time": publish_time,
+        "content": raw_localized
+    }
+    (art_dir / "data.json").write_text(json.dumps(new_json_data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # 保存纯文本内容（用于 AI 一键转写）
     clean_text = clean_html_to_text(content_html)

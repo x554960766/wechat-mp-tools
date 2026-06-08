@@ -253,6 +253,19 @@ const AccountsPage = {
                         <span style="color: var(--text-muted);">上次新增：</span>
                         <span>${sub?.last_fetch_count !== undefined ? sub.last_fetch_count + ' 篇' : '暂无'}</span>
                     </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                        <span style="color: var(--text-muted);">上传状态：</span>
+                        <span style="font-weight: 600; color: ${sub?.last_upload_error ? 'var(--badge-warning-color)' : 'var(--success, #4caf50)'};">
+                            ${this.formatRssUploadStatus(sub)}
+                        </span>
+                    </div>
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                        <span style="color: var(--text-muted);">上次上传：</span>
+                        <span>${sub?.last_upload_time ? new Date(sub.last_upload_time * 1000).toLocaleString() : '暂无'}</span>
+                    </div>
+                    <div style="display: flex; justify-content: flex-end; margin-top: 8px;">
+                        <button class="btn btn-secondary btn-sm" id="rss-refresh-status-btn" style="padding: 3px 10px; font-size: 0.75rem;">刷新状态</button>
+                    </div>
                     <div style="display: flex; justify-content: space-between;">
                         <span style="color: var(--text-muted);">累计抓取：</span>
                         <span>${sub?.total_articles || 0} 篇</span>
@@ -337,6 +350,17 @@ const AccountsPage = {
             const checkbox = overlay.querySelector('#rss-enable-checkbox');
             const intervalContainer = overlay.querySelector('#rss-interval-container');
             const intervalSelect = overlay.querySelector('#rss-interval-select');
+            const refreshStatusBtn = overlay.querySelector('#rss-refresh-status-btn');
+
+            if (refreshStatusBtn) {
+                refreshStatusBtn.addEventListener('click', async () => {
+                    const subsData = await API.accounts.rssSubscriptions();
+                    sub = (subsData.subscriptions || []).find(s => s.fakeid === fakeid);
+                    isSubscribed = sub ? sub.enabled : false;
+                    interval = sub ? sub.interval_minutes : interval;
+                    updateModalBody();
+                });
+            }
 
             checkbox.addEventListener('change', async (e) => {
                 const checked = e.target.checked;
@@ -347,7 +371,7 @@ const AccountsPage = {
                         Toast.info('正在开启自动订阅...');
                         const res = await API.accounts.rssSubscribe(fakeid, selectedInterval);
                         sub = res.subscription;
-                        Toast.success(`已开启 RSS 自动抓取：${nickname}`);
+                        Toast.success(res.message || `已开启 RSS 自动抓取：${nickname}`);
                         // Re-fetch subscriptions to refresh detailed info
                         const subsData = await API.accounts.rssSubscriptions();
                         sub = (subsData.subscriptions || []).find(s => s.fakeid === fakeid);
@@ -382,7 +406,9 @@ const AccountsPage = {
                     const res = await API.accounts.rssSubscribe(fakeid, selectedInterval);
                     sub = res.subscription;
                     interval = selectedInterval;
-                    Toast.success(`订阅抓取间隔已更新为每 ${selectedInterval >= 60 ? (selectedInterval / 60) + ' 小时' : selectedInterval + ' 分钟'}`);
+                    const intervalText = selectedInterval >= 60 ? (selectedInterval / 60) + ' 小时' : selectedInterval + ' 分钟';
+                    const suffix = res.immediate_fetch === false ? '，当前不在采集时间段内' : '';
+                    Toast.success(`订阅抓取间隔已更新为每 ${intervalText}${suffix}`);
                     updateModalBody();
                 } catch (err) {
                     intervalSelect.value = interval;
@@ -415,5 +441,23 @@ const AccountsPage = {
             document.execCommand('copy');
             Toast.success('RSS 地址已复制');
         }
+    },
+
+    formatRssUploadStatus(sub) {
+        if (!sub) return '暂无';
+        const pending = sub.pending_upload_count || 0;
+        if (sub.last_upload_disabled) {
+            return pending > 0 ? `已关闭，待上传 ${pending} 篇` : '已关闭';
+        }
+        if (pending > 0) {
+            return `待上传 ${pending} 篇`;
+        }
+        if (sub.last_upload_error) {
+            return `异常：${sub.last_upload_error}`;
+        }
+        if (sub.last_upload_time) {
+            return `成功 ${sub.last_upload_count || 0} 篇`;
+        }
+        return '暂无';
     },
 };

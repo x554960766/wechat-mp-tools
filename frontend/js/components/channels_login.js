@@ -91,16 +91,16 @@ const ChannelsLoginPage = {
                     
                     <div style="display: flex; gap: var(--spacing-sm); flex-wrap: wrap; align-items: center;">
                         <button class="btn btn-secondary" id="btn-install-cert" onclick="ChannelsLoginPage.installCert()" style="font-size: 0.85rem; padding: 10px 16px; display: flex; align-items: center; gap: 6px;">
-                            🛡️ 安装/信任证书
+                            🛡️ 一键安装证书
                         </button>
-                        <a href="/api/channels/proxy/download-cert" class="btn btn-secondary" style="font-size: 0.85rem; padding: 10px 16px; text-decoration: none; display: flex; align-items: center; gap: 6px;" title="下载证书供手动安装">
-                            📥 下载证书
-                        </a>
+                        <button class="btn btn-secondary" id="btn-uninstall-cert" onclick="ChannelsLoginPage.uninstallCert()" style="font-size: 0.85rem; padding: 10px 16px; display: none; align-items: center; gap: 6px;">
+                            🗑️ 一键卸载证书
+                        </button>
                         <button class="btn btn-primary" id="btn-toggle-proxy" onclick="ChannelsLoginPage.toggleProxy()" style="min-width: 140px; font-weight: 600; padding: 10px 20px;">
                             🚀 启动同步助手
                         </button>
-                        <button class="btn btn-secondary" onclick="ChannelsLoginPage.clearWechatCache()" id="btn-clear-cache" style="font-size: 0.85rem; padding: 10px 16px; color: var(--error, #e53e3e); border-color: rgba(229, 62, 62, 0.3); display: flex; align-items: center; gap: 6px;">
-                            🧹 清除微信缓存 (解决打不开/未初始化)
+                        <button class="btn btn-secondary" onclick="ChannelsLoginPage.clearWechatCache()" id="btn-clear-cache" title="解决视频号页面打不开或 API 未初始化" style="font-size: 0.85rem; padding: 10px 14px; color: var(--error, #e53e3e); border-color: rgba(229, 62, 62, 0.3); display: flex; align-items: center; gap: 6px;">
+                            🧹 清理缓存
                         </button>
                     </div>
                 </div>
@@ -258,6 +258,7 @@ const ChannelsLoginPage = {
         const certBadge = document.getElementById('cert-status-badge');
         const toggleBtn = document.getElementById('btn-toggle-proxy');
         const installBtn = document.getElementById('btn-install-cert');
+        const uninstallBtn = document.getElementById('btn-uninstall-cert');
         
         if (!proxyBadge || !toggleBtn) return;
         
@@ -279,13 +280,15 @@ const ChannelsLoginPage = {
             toggleBtn.style.borderColor = '';
         }
         
-        if (certBadge && installBtn) {
+        if (certBadge && installBtn && uninstallBtn) {
             if (status.cert_installed) {
                 certBadge.innerHTML = 'CA 证书: <strong style="color: #07c160;">已信任</strong>';
                 installBtn.style.display = 'none';
+                uninstallBtn.style.display = 'inline-flex';
             } else {
                 certBadge.innerHTML = 'CA 证书: <strong style="color: #ff9500;">未信任</strong>';
                 installBtn.style.display = 'inline-flex';
+                uninstallBtn.style.display = 'none';
             }
         }
     },
@@ -317,14 +320,29 @@ const ChannelsLoginPage = {
         if (installBtn) installBtn.disabled = true;
         
         try {
-            Toast.info('请在系统弹窗中确认信任该本地证书...');
+            Toast.info('正在生成并安装证书，请在系统弹窗中确认信任...');
             await API.channels.installCert();
-            Toast.success('证书安装/信任成功！');
+            Toast.success('证书安装成功！');
             await this.checkProxyStatus();
         } catch (err) {
             Toast.error('安装证书失败: ' + err.message);
         } finally {
             if (installBtn) installBtn.disabled = false;
+        }
+    },
+
+    async uninstallCert() {
+        const uninstallBtn = document.getElementById('btn-uninstall-cert');
+        if (uninstallBtn) uninstallBtn.disabled = true;
+
+        try {
+            await API.channels.uninstallCert();
+            Toast.success('证书卸载成功！');
+            await this.checkProxyStatus();
+        } catch (err) {
+            Toast.error('卸载证书失败: ' + err.message);
+        } finally {
+            if (uninstallBtn) uninstallBtn.disabled = false;
         }
     },
 
@@ -348,7 +366,7 @@ const ChannelsLoginPage = {
         } finally {
             if (btn) {
                 btn.disabled = false;
-                btn.innerHTML = '🧹 清除微信缓存 (解决打不开/未初始化)';
+                btn.innerHTML = '🧹 清理缓存';
             }
         }
     }

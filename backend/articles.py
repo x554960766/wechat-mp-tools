@@ -395,7 +395,8 @@ def get_history():
     indexed_history.sort(key=lambda x: x.get("time", 0), reverse=True)
     # 限制返回数量
     limit = request.args.get("limit", 50, type=int)
-    return jsonify({"history": indexed_history[:limit], "total": len(indexed_history)})
+    sliced_history = indexed_history if limit <= 0 else indexed_history[:limit]
+    return jsonify({"history": sliced_history, "total": len(indexed_history)})
 
 
 @articles_bp.route("/history", methods=["DELETE"])
