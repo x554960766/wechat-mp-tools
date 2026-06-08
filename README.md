@@ -1,106 +1,157 @@
-# 📱 微信公众号/视频号/抖音批量下载与视频转码工具箱
+# 微信公众号 / 视频号 / 抖音下载与转码工具箱
 
-一款集成了**微信公众号文章离线下载**、**视频号高清视频解析与批量下载**、**抖音全能下载（单视频/图集/主页批量/收藏/合集）**以及**高级视频转码与压缩**的桌面全能工具箱。
+一个本地运行的 Web/桌面工具箱，用于微信公众号文章离线下载、RSS 订阅、微信视频号下载、抖音资源下载，以及已下载视频的转码压缩。
 
-项目提供现代化的 **Web 交互界面 (Glassmorphism 玻璃拟态设计)**，既可以通过极简网页进行操作，也支持以**原生桌面应用**形式独立运行，同时保留了轻量级的 CLI 脚本。
-
----
-
-## 🌟 核心功能一览
-
-### 1. 微信公众号下载
-* **扫码登录凭证获取**：采用 Playwright 自动化技术，扫码一次即可自动保存登录态，支持 1-3 天长期有效。
-* **批量文章下载**：支持批量获取公众号文章列表（标题、链接、发布时间），并一键导出。
-* **完整离线化保存**：高保真下载文章正文，将 HTML 页面、图片、音视频文件全部本地化，生成独立的可离线阅读文件夹。
-* **贴图与画廊文章自适应解析**：完美支持“上下贴图+下方描述文字”的画廊/贴图形式文章（item_show_type == 8），能自动提取高清贴图与文字描述，去除垃圾 JS 污染，重建清爽纯净的离线阅读排版。
-* **RSS 自动订阅随机调度**：按公众号开启自动订阅后，系统会在所选档位的随机范围内抓取新文章（例如 1 小时档约 45-75 分钟），并更新到 RSS Feed。
-
-### 2. 微信视频号下载
-* **高清直链解析**：输入视频号分享链接，自动解析出无密、无水印的高清视频直链。
-* **自定义画质选择**：网址解析下载与作者页单视频下载均支持弹窗选择不同画质（包含原始无压缩原画、H265极高画质、H264标准兼容画质以及默认最佳画质）。
-* **作者主页批量下载**：支持已收藏作者作品列表的多选、全选以及一键批量下载，配备详细的百分比进度条与流式实时日志看板，支持中途随时“终止下载”。
-* **一键定位与高亮**：集成系统文件管理器（macOS Finder 与 Windows 资源管理器）联动，下载/转码完成后点击“定位文件夹”可**直接打开并高亮选中**当前所下的视频文件，提供极致便捷的体验。
-* **微信极速同步助手**：一站式整合在“扫码登录”页面最下方，支持一键配置证书、开启系统代理同步，并提供 `🧹 清除微信缓存` 快捷入口，省心省力。
-
-### 3. 抖音全能下载
-* **丰富下载模式**：支持单视频解析、高清图集打包、用户主页批量下载、喜欢/收藏列表下载、合集下载以及关键词搜索下载。
-* **扫码/密码登录**：内置扫码和密码登录界面，获取个人状态 Cookie，支持下载需要登录或私密的视频。
-* **下载历史管理**：独立的任务队列与历史下载记录，区分微信、视频号及抖音下载历史。
-
-### 4. 视频转码与压缩工具箱
-* **高级视频转码**：支持 MP4、MKV、MOV、WebM 及 MP3 音频提取，内置 GPU 硬件加速编码（VideoToolbox / NVENC / QSV），速度提升 5-10 倍。
-* **智能三阶段体积压缩**：根据视频特征自动优化码率并实施三阶段自适应兜底，可在不牺牲画质的前提下节省空间（可达 50-80%）。
-* **已下载视频快捷导入**：支持一键扫描已下载的公众号、视频号、抖音视频，直接导入转码队列中进行格式转换或体积压缩。
+项目可以用浏览器访问 Flask 后端，也可以通过 `pywebview` 以桌面应用方式运行。打包规则基于 PyInstaller，并支持 Full / Lite 两种产物：Full 内置 Playwright Chromium，Lite 不内置浏览器、依赖用户电脑已有 Chrome 或 Edge。
 
 ---
 
-## 🚀 快速开始
+## 功能概览
 
-### 运行环境准备
-项目推荐使用 Python 3.10 / 3.11 / 3.12 运行。
+### 微信公众号
+
+- 扫码登录微信公众平台，保存 `data/wechat_mp_config.json` 凭证。
+- 搜索、收藏公众号，并获取文章列表。
+- 支持按列表、范围或单篇 URL 下载公众号文章，离线保存 HTML、图片、音视频等资源。
+- 支持画廊/贴图类文章解析，例如 `item_show_type == 8` 的上下贴图和描述文字。
+- 支持 RSS Feed：已下载文章和 RSS 自动抓取文章会合并输出到 `/api/articles/rss`，也支持按公众号输出。
+- RSS 自动订阅按随机间隔抓取新文章，例如 1 小时档会在约 45-75 分钟范围内安排下一次抓取。
+- RSS 新文章上传服务器默认关闭；开启后才显示上传配置。设备 ID 默认是 `公众号_caiji100`。源码本地调试会填充默认上传接口，打包版默认不显示默认接口地址。
+
+### 微信视频号
+
+- 支持粘贴视频号分享链接解析并下载。
+- 支持腾讯元宝 Cookie 本地解析，也支持云端/Worker 回退配置。
+- 支持收藏视频号作者、查看作者作品、批量下载、取消任务和下载历史管理。
+- 内置微信极速同步助手，可配置证书、开启本地代理，并在微信内置页面中同步作者作品。
+
+### 抖音
+
+- 支持单条视频/图文链接下载。
+- 支持用户主页批量下载、推荐流、用户搜索、喜欢/收藏列表读取。
+- 支持扫码或手动 Cookie 登录，以获取需要登录态的内容。
+- 下载历史可查看、定位、清空。
+
+### 视频转码
+
+- 支持扫描视频号和抖音已下载视频，也支持从本地拖入视频。
+- 支持 MP4、MKV、MOV、WebM 和 MP3 音频提取。
+- 支持 H.264/H.265 转码、音频转码、CRF/码率控制，以及 VideoToolbox / NVENC / QSV 等硬件编码器。
+- 内置三阶段体积压缩兜底逻辑。
+
+---
+
+## 源码运行
+
+推荐 Python 3.10 / 3.11 / 3.12。
 
 ```bash
-# 1. 克隆/切换到项目根目录
-cd /Users/apple/Downloads/wechat-mp-tools
+git clone https://github.com/x554960766/wechat-mp-tools.git
+cd wechat-mp-tools
 
-# 2. 安装项目依赖
+python3 -m venv .venv
+source .venv/bin/activate
+
 pip install -r requirements.txt
-
-# 3. 安装 Playwright 浏览器驱动（用于扫码鉴权与自动获取 Cookie）
-python3 -m playwright install chromium chromium-headless-shell
+python3 -m playwright install chromium --no-shell
 ```
 
----
+启动 Web 管理面板：
 
-## 💻 启动应用
-
-项目支持**两种**运行模式，您可以根据喜好选择：
-
-### 模式一：现代化 Web 浏览器界面（推荐）
-在终端中启动 Flask 后端，系统将自动在默认浏览器中打开管理面板：
 ```bash
 python3 app.py
 ```
-* 默认访问地址：[http://localhost:5200](http://localhost:5200)
-* 支持命令行参数：`python3 app.py --port 5100 --no-browser`
 
-### 模式二：独立原生桌面窗口
-运行桌面端应用启动器，程序将使用 `pywebview` 渲染原生独立窗口，摆脱控制台和浏览器的跳转：
+默认地址是 [http://localhost:5200](http://localhost:5200)。也可以指定端口或不自动打开浏览器：
+
+```bash
+python3 app.py --port 5100 --no-browser
+```
+
+启动桌面窗口：
+
 ```bash
 python3 main.py
 ```
 
 ---
 
-## 🛠️ CLI 命令行脚本说明
+## CLI 脚本
 
-如果您不需要使用 Web 界面，也可以直接运行根目录下的轻量级脚本完成公众号的下载：
+如果只需要公众号文章相关的轻量脚本，可以直接运行根目录下的 CLI：
 
-| 脚本文件 | 功能描述 | 使用场景 |
-| :--- | :--- | :--- |
-| `wechat_mp_login.py` | 扫码登录并保存凭证到 `data/wechat_mp_config.json` | 首次使用或登录态过期时运行一次 |
-| `wechat_mp_article_fetcher.py` | 获取指定公众号的文章列表（标题、链接等）并输出 markdown | 仅需要文章清单，不需要下载正文时 |
-| `wechat_mp_batch_downloader.py` | 批量获取列表并下载完整离线正文 (HTML+图片+视频) | 日常批量离线下载公众号文章 |
+| 脚本 | 作用 |
+| :--- | :--- |
+| `wechat_mp_login.py` | 扫码登录并保存公众号后台凭证到 `data/wechat_mp_config.json` |
+| `wechat_mp_article_fetcher.py` | 根据脚本内 `TARGET_ACCOUNTS` 获取文章列表，并输出 JSON/Markdown |
+| `wechat_mp_batch_downloader.py` | 根据脚本内 `TARGET_ACCOUNTS` 批量下载文章离线正文 |
 
-*使用 CLI 前，请先编辑 `wechat_mp_batch_downloader.py` 顶部的 `TARGET_ACCOUNTS` 配置目标公众号名。*
-
----
-
-## 📦 打包构建指南
-
-为了方便分发和免安装运行，项目已集成 **PyInstaller**。
-* **完整版打包**：先运行 `PLAYWRIGHT_BROWSERS_PATH=ms-playwright python3 -m playwright install chromium --no-shell`，再运行 `pyinstaller wechat_mp_tools.spec`，产物内置 Chromium。
-* **轻量版打包**：运行 `WECHAT_MP_TOOLS_BUNDLE_BROWSER=0 pyinstaller wechat_mp_tools.spec`，产物不内置 Chromium，会使用用户电脑上的 Chrome / Edge。
-* **Windows 打包与云端自动构建**：请参考 [BUILD.md](file:///Users/apple/Downloads/wechat-mp-tools/BUILD.md) 获取详细的 Windows 打包及 GitHub Actions 自动构建方案。
+使用 CLI 前请先编辑对应脚本顶部的 `TARGET_ACCOUNTS`、`MAX_ARTICLES` 等配置。
 
 ---
 
-## ⚠️ 常见问题说明
+## 打包
 
-1. **视频号解析提示“失效/不可用”？**
-   - 视频号解析默认通过云端通道，如果失效，您可以在设置中开启**“本地解析”**。
-   - 开启后，点击“获取凭证”，程序将自动拉起浏览器，您只需使用微信扫码登录**腾讯元宝**对话页，程序将自动截获 Cookie，此后将 100% 在您本地电脑进行免封锁的稳定解析。
-2. **Cookie 凭证多长时间过期？**
-   - 微信公众号/视频号扫码登录的凭证通常有效时间为 1~3 天，过期后重新扫一次码即可恢复。
-3. **RSS 自动抓取为什么是随机时间间隔？**
-   - RSS 订阅会在所选档位上下约 25% 的范围内随机安排下一次抓取，避免所有公众号都按固定整点或固定分钟数运行。随机间隔只能减少固定周期特征，不能保证规避平台风控；请控制订阅数量与抓取频率。
+项目已集成 PyInstaller，详细说明见 [BUILD.md](BUILD.md)。
+
+本地 macOS 打包 Full 版：
+
+```bash
+PLAYWRIGHT_BROWSERS_PATH=ms-playwright python3 -m playwright install chromium --no-shell
+pyinstaller wechat_mp_tools.spec
+```
+
+本地 macOS 打包 Lite 版：
+
+```bash
+WECHAT_MP_TOOLS_BUNDLE_BROWSER=0 pyinstaller wechat_mp_tools.spec
+```
+
+GitHub Actions 会在推送到 `main` / `master` 时自动打包 Windows 和 macOS 的 Full / Lite 产物，也可以在 Actions 页面手动触发。若只是上传代码、不希望触发打包，可以在提交信息中加入 `[skip ci]`。
+
+---
+
+## 数据目录
+
+源码运行时，数据默认保存在项目根目录下的 `data/`。
+
+打包后数据会保存到用户可写目录：
+
+- macOS：`~/Library/Application Support/WeChat MP Tools/data/`
+- Windows：可执行文件旁边的 `data/`
+
+常见数据包括登录 Cookie、收藏账号、下载历史、RSS 订阅状态和下载文件。
+
+---
+
+## 常见问题
+
+### Playwright 提示找不到浏览器？
+
+源码运行时执行：
+
+```bash
+python3 -m playwright install chromium --no-shell
+```
+
+Lite 打包版不会内置 Chromium，需要用户电脑已安装 Google Chrome 或 Microsoft Edge。
+
+### 视频号解析失败怎么办？
+
+可以在设置中配置腾讯元宝 Cookie，走本地解析；也可以配置私有 Worker。若登录态过期，请重新获取 Cookie。
+
+### RSS 随机间隔能避免平台风控吗？
+
+随机间隔只能减少固定周期特征，不能保证规避平台风控。建议控制订阅数量、抓取频率，并保留合理的采集时间段。
+
+### RSS 上传为什么默认没开？
+
+RSS 新文章上传服务器默认关闭。只有在系统设置里勾选“RSS 新文章上传到服务器”后，才会显示采集时间、设备 ID 和上传接口配置。
+
+### macOS 打包应用打不开？
+
+如果没有 Apple Developer ID 签名，首次运行可能被系统拦截。请右键 `WeChat MP Tools.app`，选择“打开”。如果启动后秒退，查看 `~/Library/Application Support/WeChat MP Tools/wechat_mp_tools.log`。
+
+### Windows 打包版打开没反应？
+
+查看 `WeChat MP Tools\wechat_mp_tools.log`。极少数精简系统可能需要安装 Microsoft Edge WebView2 Runtime。
