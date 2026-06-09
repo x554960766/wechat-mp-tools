@@ -223,6 +223,9 @@ def _do_login():
                 if proxy_config.get("username"):
                     launch_kwargs["proxy"]["username"] = proxy_config["username"]
                     launch_kwargs["proxy"]["password"] = proxy_config.get("password", "")
+            else:
+                # 内建代理未开启时显式直连，避免 Chromium 读取 macOS 系统代理残留
+                launch_args.append("--proxy-server='direct://'")
 
             browser = launch_chromium(p.chromium, **launch_kwargs)
             
