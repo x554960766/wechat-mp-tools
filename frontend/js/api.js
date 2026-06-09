@@ -83,6 +83,7 @@ const API = {
             return API.delete(`/api/accounts/${fakeid}/rss-subscribe`);
         },
         rssSubscriptions() { return API.get('/api/accounts/rss-subscriptions'); },
+        rssForceUpload(fakeid) { return API.post(`/api/accounts/${fakeid}/rss-force-upload`); },
     },
 
     // ── Articles API ─────────────────────────────────

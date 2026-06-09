@@ -89,8 +89,10 @@ const AccountsPage = {
             return;
         }
 
-        container.innerHTML = this.accounts.map(acc => `
-            <div class="account-card" data-fakeid="${acc.fakeid}">
+        container.innerHTML = this.accounts.map(acc => {
+            const safeName = acc.nickname.replace(/'/g, "\\'");
+            return `
+            <div class="account-card" data-fakeid="${acc.fakeid}" style="cursor: pointer;" onclick="AccountsPage.openArticles('${acc.fakeid}', '${safeName}')">
                 ${acc.round_head_img
                     ? `<img class="account-avatar" src="${acc.round_head_img}" alt="${acc.nickname}" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';">
                        <div class="account-avatar-placeholder" style="display: none;">${acc.nickname.charAt(0)}</div>`
@@ -102,18 +104,18 @@ const AccountsPage = {
                     ${acc.signature ? `<div style="font-size: 0.78rem; color: var(--text-muted); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${acc.signature}</div>` : ''}
                 </div>
                 <div class="account-actions">
-                    <button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); Router.navigate('articles', { fakeid: '${acc.fakeid}', name: '${acc.nickname}' })">
+                    <button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); AccountsPage.openArticles('${acc.fakeid}', '${safeName}')">
                         📰 文章
                     </button>
-                    <button class="btn btn-sm" style="background: rgba(255, 152, 0, 0.12); color: #ff9800; border: 1px solid rgba(255, 152, 0, 0.25);" onclick="event.stopPropagation(); AccountsPage.showRssModal('${acc.fakeid}', '${acc.nickname.replace(/'/g, "\\'")}')">
+                    <button class="btn btn-sm" style="background: rgba(255, 152, 0, 0.12); color: #ff9800; border: 1px solid rgba(255, 152, 0, 0.25);" onclick="event.stopPropagation(); AccountsPage.showRssModal('${acc.fakeid}', '${safeName}')">
                         📡 RSS
                     </button>
-                    <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); AccountsPage.removeAccount('${acc.fakeid}', '${acc.nickname}')">
+                    <button class="btn btn-sm btn-danger" onclick="event.stopPropagation(); AccountsPage.removeAccount('${acc.fakeid}', '${safeName}')">
                         🗑
                     </button>
                 </div>
             </div>
-        `).join('');
+        `}).join('');
     },
 
     async search() {
@@ -196,6 +198,10 @@ const AccountsPage = {
         }
     },
 
+    openArticles(fakeid, name) {
+        Router.navigate('articles', { fakeid: fakeid, name: name });
+    },
+
     async removeAccount(fakeid, nickname) {
         Modal.confirm('删除确认', `确定要从收藏中移除「${nickname}」吗？`, async () => {
             try {
@@ -264,7 +270,7 @@ const AccountsPage = {
                     </div>
                     <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
                         <span style="color: var(--text-muted);">上传状态：</span>
-                        <span style="font-weight: 600; color: ${sub?.last_upload_error ? 'var(--badge-warning-color)' : 'var(--success, #4caf50)'};">
+                        <span style="font-weight: 600; color: ${globalUploadEnabled && (sub?.pending_upload_count || 0) > 0 ? 'var(--badge-warning-color)' : (globalUploadEnabled ? 'var(--success, #4caf50)' : 'var(--text-muted)')};">
                             ${this.formatRssUploadStatus(sub, globalUploadEnabled)}
                         </span>
                     </div>
@@ -272,7 +278,8 @@ const AccountsPage = {
                         <span style="color: var(--text-muted);">上次上传：</span>
                         <span>${sub?.last_upload_time ? new Date(sub.last_upload_time * 1000).toLocaleString() : '暂无'}</span>
                     </div>
-                    <div style="display: flex; justify-content: flex-end; margin-top: 8px;">
+                    <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px;">
+                        ${globalUploadEnabled ? `<button class="btn btn-sm" style="background: rgba(7, 193, 96, 0.12); color: #07c160; border: 1px solid rgba(7, 193, 96, 0.25);" id="rss-force-upload-btn">📤 上传历史文章</button>` : ''}
                         <button class="btn btn-secondary btn-sm" id="rss-refresh-status-btn" style="padding: 3px 10px; font-size: 0.75rem;">刷新状态</button>
                     </div>
                     <div style="display: flex; justify-content: space-between;">
@@ -363,6 +370,35 @@ const AccountsPage = {
 
             if (refreshStatusBtn) {
                 refreshStatusBtn.addEventListener('click', async () => {
+                    const [subsData, settingsData] = await Promise.all([
+                        API.accounts.rssSubscriptions(),
+                        API.settings.get(),
+                    ]);
+                    sub = (subsData.subscriptions || []).find(s => s.fakeid === fakeid);
+                    isSubscribed = sub ? sub.enabled : false;
+                    interval = sub ? sub.interval_minutes : interval;
+                    globalUploadEnabled = !!settingsData.rss_upload_enabled;
+                    updateModalBody();
+                });
+            }
+
+            // 上传历史文章按钮
+            const forceUploadBtn = overlay.querySelector('#rss-force-upload-btn');
+            if (forceUploadBtn) {
+                forceUploadBtn.addEventListener('click', async () => {
+                    forceUploadBtn.disabled = true;
+                    forceUploadBtn.textContent = '⏳ 上传中...';
+                    try {
+                        const res = await API.accounts.rssForceUpload(fakeid);
+                        if (res.success) {
+                            Toast.success(`上传成功 ${res.count} 篇`);
+                        } else {
+                            Toast.warning(res.error || '上传失败');
+                        }
+                    } catch (err) {
+                        Toast.error('上传请求失败');
+                    }
+                    // 刷新状态
                     const [subsData, settingsData] = await Promise.all([
                         API.accounts.rssSubscriptions(),
                         API.settings.get(),
@@ -481,23 +517,9 @@ const AccountsPage = {
 
     formatRssUploadStatus(sub, globalUploadEnabled) {
         if (!globalUploadEnabled) {
-            const pending = sub ? (sub.pending_upload_count || 0) : 0;
-            return pending > 0 ? `全局已关闭，待上传 ${pending} 篇` : '全局已关闭（系统设置）';
+            return '已关闭';
         }
-        if (!sub) return '暂无';
-        const pending = sub.pending_upload_count || 0;
-        if (sub.last_upload_disabled) {
-            return pending > 0 ? `已关闭，待上传 ${pending} 篇` : '已关闭';
-        }
-        if (pending > 0) {
-            return `待上传 ${pending} 篇`;
-        }
-        if (sub.last_upload_error) {
-            return `异常：${sub.last_upload_error}`;
-        }
-        if (sub.last_upload_time) {
-            return `成功 ${sub.last_upload_count || 0} 篇`;
-        }
-        return '暂无';
+        const pending = sub ? (sub.pending_upload_count || 0) : 0;
+        return pending > 0 ? `${pending}篇待上传` : '已开启';
     },
 };

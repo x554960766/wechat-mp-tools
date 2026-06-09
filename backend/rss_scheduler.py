@@ -268,6 +268,73 @@ class RssScheduler:
             "disabled": False,
         }
 
+    def force_upload_all(self, nickname: str) -> dict:
+        """强制上传该公众号所有待上传文章 + 下载历史中未上传的文章（同步）"""
+        from backend.config import get_settings, get_proxies_dict, load_json as _load_json, DOWNLOAD_HISTORY_FILE, OUTPUT_DIR
+
+        settings = get_settings()
+        upload_url = (settings.get("rss_upload_url") or "").strip()
+        if not upload_url:
+            return {"success": False, "count": 0, "pending_count": 0, "error": "RSS 上传接口地址未配置"}
+
+        # 1. 加载 pending 队列
+        pending = self._load_pending_upload_articles()
+
+        # 2. 扫描下载历史中该公众号的文章（成功下载且有路径的）
+        history = _load_json(DOWNLOAD_HISTORY_FILE, [])
+        scanned = []
+        pending_urls = {a.get("url", a.get("link", "")) for a in pending if isinstance(a, dict)}
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+            if item.get("account") != nickname:
+                continue
+            if not item.get("success"):
+                continue
+            link = item.get("link", "")
+            if link and link in pending_urls:
+                continue
+            if not item.get("path"):
+                continue
+            data = self._read_downloaded_article_data(
+                item["path"],
+                {"source": nickname, "title": item.get("title", ""), "url": link},
+            )
+            if data:
+                scanned.append(data)
+                pending_urls.add(data.get("url", link))
+
+        # 3. 合并、去重、编码
+        all_articles = self._dedupe_upload_articles(pending + scanned, encode_content=True)
+        if not all_articles:
+            return {"success": True, "count": 0, "pending_count": 0, "error": None}
+
+        # 4. 上传
+        payload = {
+            "articles": all_articles,
+            "deviceId": settings.get("device_id") or "公众号_caiji100",
+        }
+        try:
+            resp = requests.post(
+                upload_url, json=payload,
+                headers={"Content-Type": "application/json"},
+                proxies=get_proxies_dict(), timeout=30,
+            )
+            resp.raise_for_status()
+            try:
+                data = resp.json()
+                if isinstance(data, dict) and data.get("success") is False:
+                    raise RuntimeError(data.get("message") or data.get("error") or "远端接口返回失败")
+            except ValueError:
+                pass
+            self._save_pending_upload_articles([])
+            logger.info("RSS 手动上传成功 [%s]: %d 篇", nickname, len(all_articles))
+            return {"success": True, "count": len(all_articles), "pending_count": 0, "error": None}
+        except Exception as e:
+            self._save_pending_upload_articles(all_articles)
+            logger.warning("RSS 手动上传失败 [%s]: %s", nickname, e)
+            return {"success": False, "count": 0, "pending_count": len(all_articles), "error": str(e)}
+
     # ── 抓取逻辑 ──────────────────────────────────────────
 
     def _fetch_for_account(self, sub: dict):

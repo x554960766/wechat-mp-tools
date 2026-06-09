@@ -113,41 +113,46 @@ const SettingsPage = {
                         <h3 class="card-title">📡 RSS 订阅时间段配置</h3>
                     </div>
                     <div class="card-body" style="padding: 0 var(--spacing-md) var(--spacing-md);">
-                        <div class="form-group" style="margin-top: var(--spacing-md);">
+                        <!-- 时间配置 — 控制整体自动抓取，始终可见 -->
+                        <div style="display: flex; gap: 16px; margin-top: var(--spacing-md);">
+                            <div class="form-group" style="flex: 1;">
+                                <label class="form-label" for="setting-rss-start-hour">开始时间</label>
+                                <div style="display: flex; gap: 8px;">
+                                    <select class="form-input" id="setting-rss-start-hour" style="min-width: 0;">
+                                        ${startOptions}
+                                    </select>
+                                    <select class="form-input" id="setting-rss-start-minute" style="min-width: 0;">
+                                        ${minuteOptions}
+                                    </select>
+                                </div>
+                                <div class="form-hint">自动采集开始时间，支持分钟</div>
+                            </div>
+                            <div class="form-group" style="flex: 1;">
+                                <label class="form-label" for="setting-rss-end-hour">结束时间</label>
+                                <div style="display: flex; gap: 8px;">
+                                    <select class="form-input" id="setting-rss-end-hour" style="min-width: 0;" onchange="SettingsPage.syncRssEndMinute()">
+                                        ${endOptions}
+                                    </select>
+                                    <select class="form-input" id="setting-rss-end-minute" style="min-width: 0;">
+                                        ${minuteOptions}
+                                    </select>
+                                </div>
+                                <div class="form-hint">自动采集结束时间，24 点仅支持 00 分</div>
+                            </div>
+                        </div>
+                        <div class="form-hint" style="margin-top: 8px;">默认 00:00 到 24:00 整天采集，只有在设置的时间范围内才会执行 RSS 自动采集</div>
+
+                        <hr style="border: 0; border-top: 1px solid var(--border-color); margin: var(--spacing-md) 0;" />
+
+                        <!-- 上传开关 + 上传配置 — 仅控制上传行为 -->
+                        <div class="form-group">
                             <label class="form-checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
-                                <input type="checkbox" id="setting-rss-upload-enabled" onchange="SettingsPage.toggleRssConfig()" style="width: 18px; height: 18px; accent-color: var(--primary);" />
+                                <input type="checkbox" id="setting-rss-upload-enabled" onchange="SettingsPage.toggleRssUpload()" style="width: 18px; height: 18px; accent-color: var(--primary);" />
                                 <span>RSS 新文章上传到服务器</span>
                             </label>
-                            <div class="form-hint">开启后显示 RSS 上传相关配置，并在自动抓取下载成功后上传新文章</div>
+                            <div class="form-hint">开启后自动抓取下载成功时上传新文章到指定接口</div>
                         </div>
-                        <div id="setting-rss-config-panel" style="display: none;">
-                            <div style="display: flex; gap: 16px; margin-top: var(--spacing-md);">
-                                <div class="form-group" style="flex: 1;">
-                                    <label class="form-label" for="setting-rss-start-hour">开始时间</label>
-                                    <div style="display: flex; gap: 8px;">
-                                        <select class="form-input" id="setting-rss-start-hour" style="min-width: 0;">
-                                            ${startOptions}
-                                        </select>
-                                        <select class="form-input" id="setting-rss-start-minute" style="min-width: 0;">
-                                            ${minuteOptions}
-                                        </select>
-                                    </div>
-                                    <div class="form-hint">自动采集开始时间，支持分钟</div>
-                                </div>
-                                <div class="form-group" style="flex: 1;">
-                                    <label class="form-label" for="setting-rss-end-hour">结束时间</label>
-                                    <div style="display: flex; gap: 8px;">
-                                        <select class="form-input" id="setting-rss-end-hour" style="min-width: 0;" onchange="SettingsPage.syncRssEndMinute()">
-                                            ${endOptions}
-                                        </select>
-                                        <select class="form-input" id="setting-rss-end-minute" style="min-width: 0;">
-                                            ${minuteOptions}
-                                        </select>
-                                    </div>
-                                    <div class="form-hint">自动采集结束时间，24 点仅支持 00 分</div>
-                                </div>
-                            </div>
-                            <div class="form-hint" style="margin-top: 8px;">默认 00:00 到 24:00 整天采集，只有在设置的时间范围内才会执行 RSS 自动采集</div>
+                        <div id="setting-rss-upload-panel" style="display: none;">
                             <div class="form-group" style="margin-top: var(--spacing-md);">
                                 <label class="form-label" for="setting-device-id">设备 ID (deviceId)</label>
                                 <input type="text" class="form-input" id="setting-device-id" placeholder="请输入设备 ID..." />
@@ -239,14 +244,14 @@ const SettingsPage = {
         if (rssEndMinute) rssEndMinute.value = data.rss_end_minute !== undefined ? data.rss_end_minute : 0;
         if (rssUploadEnabled) rssUploadEnabled.checked = data.rss_upload_enabled !== undefined ? !!data.rss_upload_enabled : false;
         if (rssUploadUrl) rssUploadUrl.value = data.rss_upload_url || '';
-        this.toggleRssConfig();
+        this.toggleRssUpload();
         this.syncRssEndMinute();
     },
 
 
-    toggleRssConfig() {
+    toggleRssUpload() {
         const rssUploadEnabled = document.getElementById('setting-rss-upload-enabled');
-        const panel = document.getElementById('setting-rss-config-panel');
+        const panel = document.getElementById('setting-rss-upload-panel');
         if (!panel) return;
         panel.style.display = rssUploadEnabled && rssUploadEnabled.checked ? 'block' : 'none';
     },

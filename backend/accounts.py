@@ -229,3 +229,34 @@ def rss_subscriptions():
 
     subs = rss_scheduler.get_subscriptions()
     return jsonify({"subscriptions": subs})
+
+
+@accounts_bp.route("/<fakeid>/rss-force-upload", methods=["POST"])
+def rss_force_upload(fakeid):
+    """强制上传该公众号所有待上传 + 历史未上传文章"""
+    from backend.rss_scheduler import rss_scheduler
+    from backend.accounts import accounts_bp as _a
+    import threading
+
+    sub = rss_scheduler.get_subscription(fakeid)
+    if not sub or not sub.get("enabled"):
+        return jsonify({"error": "该公众号未开启 RSS 订阅"}), 404
+
+    nickname = sub.get("nickname", "")
+    result = rss_scheduler.force_upload_all(nickname)
+
+    # 同步更新订阅的上传状态
+    with rss_scheduler._lock:
+        subs = rss_scheduler.get_subscriptions()
+        for s in subs:
+            if s.get("fakeid") == fakeid:
+                s["last_upload_time"] = time.time()
+                s["last_upload_count"] = result.get("count", 0)
+                s["last_upload_error"] = result.get("error")
+                s["pending_upload_count"] = result.get("pending_count", 0)
+                s["last_upload_attempted"] = True
+                s["last_upload_disabled"] = False
+                break
+        rss_scheduler._save_subscriptions(subs)
+
+    return jsonify(result)
