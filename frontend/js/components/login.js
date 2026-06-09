@@ -50,10 +50,10 @@ const LoginPage = {
                             <polyline points="10,17 15,12 10,7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                             <line x1="15" y1="12" x2="3" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                         </svg>
-                        显示登录二维码
+                        启动浏览器扫码登录
                     </button>
                     <p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 12px;">
-                        点击后将在下方直接加载登录二维码，使用微信扫描即可完成登录
+                        浏览器窗口登录成功后会自动保存凭证
                     </p>
                 </div>
 
@@ -180,13 +180,7 @@ const LoginPage = {
                 }
                 container.innerHTML = `
                     <div style="text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px 0;">
-                        ${loginState.qrcode ? `
-                            <div class="qrcode-wrapper" style="background: white; padding: 12px; border-radius: 12px; border: 1px solid var(--border-color); box-shadow: var(--shadow-lg); margin-bottom: 16px; transition: all 0.3s ease; display: inline-block;">
-                                <img src="data:image/png;base64,${loginState.qrcode}" style="width: 200px; height: 200px; display: block; border-radius: 8px;" />
-                            </div>
-                        ` : `
-                            <div class="spinner" style="margin: 0 auto 16px;"></div>
-                        `}
+                        <div class="spinner" style="margin: 0 auto 16px;"></div>
                         <p style="color: var(--text-primary); font-weight: 600; margin-bottom: 8px;">${loginState.message}</p>
                         <div class="progress-bar" style="width: 80%; margin: 8px auto 0;">
                             <div class="progress-fill" style="width: ${loginState.progress}%"></div>
@@ -233,18 +227,7 @@ const LoginPage = {
                 if (data.logged_in || (data.login_state?.status !== 'scanning' && data.login_state?.status !== 'idle')) {
                     clearInterval(this._pollTimer);
                     this._pollTimer = null;
-                    const btn = document.getElementById('btn-start-login');
-                    if (btn) {
-                        btn.disabled = false;
-                        btn.innerHTML = `
-                            <svg viewBox="0 0 24 24" fill="none" width="20" height="20">
-                                <path d="M15 3H19C20.1 3 21 3.9 21 5V19C21 20.1 20.1 21 19 21H15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                                <polyline points="10,17 15,12 10,7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                                <line x1="15" y1="12" x2="3" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                            </svg>
-                            显示登录二维码
-                        `;
-                    }
+                    this.resetStartButtons();
                 }
             } catch (err) {
                 // 静默处理
@@ -266,33 +249,43 @@ const LoginPage = {
         }
     },
 
-    async startLogin() {
+    resetStartButtons() {
         const btn = document.getElementById('btn-start-login');
         if (btn) {
-            btn.disabled = true;
+            btn.disabled = false;
+            btn.innerHTML = `
+                <svg viewBox="0 0 24 24" fill="none" width="20" height="20">
+                    <path d="M15 3H19C20.1 3 21 3.9 21 5V19C21 20.1 20.1 21 19 21H15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    <polyline points="10,17 15,12 10,7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    <line x1="15" y1="12" x2="3" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                </svg>
+                启动浏览器扫码登录
+            `;
+        }
+    },
+
+    setStartButtonsDisabled(disabled) {
+        const btn = document.getElementById('btn-start-login');
+        if (btn) btn.disabled = disabled;
+    },
+
+    async startLogin() {
+        const btn = document.getElementById('btn-start-login');
+        this.setStartButtonsDisabled(true);
+        if (btn) {
             btn.innerHTML = '<div class="spinner" style="width: 18px; height: 18px; border-width: 2px;"></div> 正在启动...';
         }
 
         try {
             await API.auth.login();
-            Toast.info('已启动登录流程，正在获取登录二维码...');
+            Toast.info('已启动浏览器登录流程，请在弹出的窗口中扫码...');
 
             // 开始轮询状态
             this.startStatusPolling();
 
         } catch (err) {
             Toast.error('启动登录失败: ' + err.message);
-            if (btn) {
-                btn.disabled = false;
-                btn.innerHTML = `
-                    <svg viewBox="0 0 24 24" fill="none" width="20" height="20">
-                        <path d="M15 3H19C20.1 3 21 3.9 21 5V19C21 20.1 20.1 21 19 21H15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                        <polyline points="10,17 15,12 10,7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                        <line x1="15" y1="12" x2="3" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    </svg>
-                    显示登录二维码
-                `;
-            }
+            this.resetStartButtons();
         }
     },
 

@@ -18,6 +18,14 @@ from backend.runtime import configure_runtime, log_file, write_startup_error
 multiprocessing.freeze_support()
 configure_runtime()
 
+# ── 修复打包后白屏：当 console=False 时 stdout/stderr 为 None，
+#    部分第三方库（如 Werkzeug）写入 None 流会直接崩溃导致白屏。
+#    将其重定向到系统空设备以保证安全。
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, 'w', encoding='utf-8')
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, 'w', encoding='utf-8')
+
 # ── 路径与端口初始化 ──────────────────────────────────────
 
 def find_free_port(start=5200, end=5220):
@@ -58,8 +66,12 @@ if __name__ == '__main__':
         # 从主程序 app 导入 Flask 实例与初始化
         from app import app
         from backend.config import ensure_dirs
+        import logging
 
         ensure_dirs()
+
+        # 抑制 Werkzeug 请求日志，防止在无控制台环境下写入空流导致崩溃
+        logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
         # 动态获取可用端口
         port = find_free_port()
@@ -94,13 +106,16 @@ if __name__ == '__main__':
             webview.start()
             os._exit(1)
 
+        # 服务就绪后额外等待 0.5 秒，确保 Socket 完全稳定，减少白屏概率
+        time.sleep(0.5)
+
         # 延迟导入 webview，防止初始化干扰
         import webview
 
         # 创建桌面端原生容器窗口
         window = webview.create_window(
             title='微信公众号文章下载管理工具',
-            url=f'http://127.0.0.1:{port}',
+            url=f'http://127.0.0.1:{port}/',
             width=1280,
             height=800,
             resizable=True,

@@ -181,6 +181,11 @@ const SettingsPage = {
         await this.loadSettings();
     },
 
+    /** SPA 路由复用缓存页时调用，重新从后端拉取最新设置 */
+    async onShow() {
+        await this.loadSettings();
+    },
+
     destroy() {
         if (this.cookiePollTimer) {
             clearInterval(this.cookiePollTimer);

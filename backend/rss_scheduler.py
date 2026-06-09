@@ -13,14 +13,13 @@ import random
 import requests
 from pathlib import Path
 
-from backend.config import DATA_DIR, DEFAULT_RSS_UPLOAD_URL, load_json, save_json
+from backend.config import DATA_DIR, load_json, save_json
 
 logger = logging.getLogger(__name__)
 
 RSS_SUBSCRIPTIONS_FILE = DATA_DIR / "rss_subscriptions.json"
 RSS_ARTICLES_FILE = DATA_DIR / "rss_articles.json"
 RSS_UPLOAD_PENDING_FILE = DATA_DIR / "rss_upload_pending.json"
-RSS_UPLOAD_URL = DEFAULT_RSS_UPLOAD_URL
 
 # 每个公众号 RSS 最多保留的文章数
 MAX_ARTICLES_PER_ACCOUNT = 200

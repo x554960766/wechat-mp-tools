@@ -9,8 +9,8 @@ const App = {
         Toast.init();
         Modal.init();
 
-        // 首次加载认证状态
-        await this.checkAuthStatus();
+        // 首次加载认证状态（非阻塞，不影响页面首屏渲染速度）
+        this.checkAuthStatus();
 
         // 初始化路由
         Router.init();

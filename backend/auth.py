@@ -31,43 +31,6 @@ _login_lock = threading.Lock()
 _active_browser = None      # 当前活跃的后台 Playwright 浏览器实例
 
 
-def _find_qrcode_element(page):
-    """Locate the visible WeChat login QR code across page variants."""
-    selectors = [
-        ".login__qrcode",
-        ".login_qrcode",
-        "[class*='qrcode'] img",
-        "[class*='qr'] img",
-        "img[src*='qrcode']",
-        "img",
-        "[class*='qrcode']",
-        "[class*='qr']",
-    ]
-
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        for selector in selectors:
-            locator = page.locator(selector)
-            try:
-                count = locator.count()
-            except Exception:
-                continue
-
-            for index in range(min(count, 10)):
-                element = locator.nth(index)
-                try:
-                    box = element.bounding_box(timeout=1000)
-                    if not box:
-                        continue
-                    if box["width"] >= 80 and box["height"] >= 80:
-                        return element
-                except Exception:
-                    continue
-        time.sleep(0.5)
-
-    return None
-
-
 def _set_login_state(status: str, message: str = "", progress: int = 0, qrcode: str = ""):
     with _login_lock:
         _login_state["status"] = status
@@ -209,7 +172,7 @@ def get_status():
 
 @auth_bp.route("/login", methods=["POST"])
 def start_login():
-    """启动扫码登录（异步）"""
+    """启动浏览器窗口扫码登录（异步）"""
     if _login_state["status"] == "scanning":
         return jsonify({"error": "正在登录中，请勿重复操作"}), 400
 
@@ -219,8 +182,14 @@ def start_login():
     return jsonify({"message": "已启动登录流程，请在弹出的浏览器窗口中扫码"})
 
 
+@auth_bp.route("/login-browser", methods=["POST"])
+def start_browser_login():
+    """兼容旧前端按钮，实际复用浏览器窗口扫码登录。"""
+    return start_login()
+
+
 def _do_login():
-    """执行扫码登录（在后台线程中运行，支持端内直显二维码）"""
+    """执行扫码登录（在后台线程中运行，使用浏览器窗口登录并保存凭证）"""
     global _active_browser
     
     # 强行中止之前未完成的后台 Playwright 浏览器
@@ -246,7 +215,7 @@ def _do_login():
                 "--disable-blink-features=AutomationControlled"
             ]
             launch_kwargs = {
-                "headless": True, # Headless 运行，避免弹窗
+                "headless": False,
                 "args": launch_args,
             }
             if proxy_url:
@@ -271,25 +240,7 @@ def _do_login():
             page.goto("https://mp.weixin.qq.com/", timeout=30000)
             page.wait_for_load_state("networkidle", timeout=15000)
 
-            _set_login_state("scanning", "正在获取登录二维码...", 30)
-
-            # 获取并截图二维码元素
-            try:
-                qr_elem = _find_qrcode_element(page)
-                if not qr_elem:
-                    raise Exception("未能定位到登录二维码元素")
-                
-                import base64
-                qr_bytes = qr_elem.screenshot(timeout=10000)
-                qr_base64 = base64.b64encode(qr_bytes).decode("utf-8")
-                
-                _set_login_state("scanning", "📱 请使用微信扫描网页内二维码", 50, qrcode=qr_base64)
-            except Exception as qr_err:
-                _set_login_state("failed", f"获取二维码失败: {str(qr_err)}")
-                browser.close()
-                with _login_lock:
-                    _active_browser = None
-                return
+            _set_login_state("scanning", "请在弹出的浏览器窗口中扫码登录", 50)
 
             # 等待登录跳转（最多 5 分钟）
             try:
@@ -314,21 +265,6 @@ def _do_login():
                     _active_browser = None
                 return
 
-            # 提取公众号账号信息
-            nickname = ""
-            avatar = ""
-            try:
-                page.wait_for_selector(".weui-desktop-account__nickname", timeout=5000)
-                nickname = page.locator(".weui-desktop-account__nickname").inner_text()
-                avatar_elem = page.locator(".weui-desktop-account__avatar")
-                if avatar_elem.count() > 0:
-                    avatar = avatar_elem.first.get_attribute("src")
-            except Exception:
-                try:
-                    nickname = page.locator(".weui-desktop-account__name").first.inner_text()
-                except Exception:
-                    pass
-
             # 保存 cookies
             cookies = ctx.cookies()
             cookie_str = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
@@ -339,16 +275,40 @@ def _do_login():
                 "cookies": cookies,
                 "save_time": time.time(),
                 "account_info": {
-                    "nickname": nickname or "公众号未命名",
-                    "avatar": avatar
+                    "nickname": "公众号未命名",
+                    "avatar": ""
                 }
             }
 
             DATA_DIR.mkdir(parents=True, exist_ok=True)
             save_json(CONFIG_FILE, config)
 
-            # 先更新状态为成功，让前端及早响应，避免因 browser.close() 挂起导致一直卡在“正在保存凭证”
+            # token/cookie 已经可用，先让前端结束等待；昵称头像只是展示信息，后续短超时补充。
             _set_login_state("success", f"登录成功！token = {token[:12]}...", 100)
+
+            try:
+                nickname = ""
+                avatar = ""
+                nickname_locator = page.locator(".weui-desktop-account__nickname")
+                if nickname_locator.count() > 0:
+                    nickname = nickname_locator.first.inner_text(timeout=1200)
+                else:
+                    name_locator = page.locator(".weui-desktop-account__name")
+                    if name_locator.count() > 0:
+                        nickname = name_locator.first.inner_text(timeout=1200)
+
+                avatar_elem = page.locator(".weui-desktop-account__avatar")
+                if avatar_elem.count() > 0:
+                    avatar = avatar_elem.first.get_attribute("src", timeout=1200) or ""
+
+                if nickname or avatar:
+                    config["account_info"] = {
+                        "nickname": nickname or "公众号未命名",
+                        "avatar": avatar
+                    }
+                    save_json(CONFIG_FILE, config)
+            except Exception:
+                pass
 
             try:
                 browser.close()
