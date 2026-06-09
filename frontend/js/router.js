@@ -89,7 +89,14 @@ const Router = {
 
         const promptEl = document.getElementById('dy-login-prompt-page');
         const hasParams = hash.includes('?');
-        
+
+        // 解析 hash 查询参数，透传给 page.init()
+        const routeParams = {};
+        if (hasParams) {
+            const qs = hash.split('?')[1];
+            new URLSearchParams(qs).forEach((v, k) => { routeParams[k] = decodeURIComponent(v); });
+        }
+
         // 含有动态参数的路由（如 ?sec_uid= 或 ?fakeid=）每次重新渲染，避免缓存导致页面内容不更新
         if (hasParams && this.pageCache[pageKey]) {
             if (this.pageCache[pageKey].el) {
@@ -203,7 +210,7 @@ const Router = {
 
             // 初始化新页面
             if (typeof page.init === 'function') {
-                await page.init();
+                await page.init(routeParams);
             }
         } catch (err) {
             console.error('Routing load error:', err);
@@ -277,7 +284,12 @@ const Router = {
         });
     },
 
-    navigate(path) {
-        window.location.hash = '#' + path;
+    navigate(path, params) {
+        let hash = '#' + path;
+        if (params) {
+            const qs = new URLSearchParams(params).toString();
+            if (qs) hash += '?' + qs;
+        }
+        window.location.hash = hash;
     }
 };
