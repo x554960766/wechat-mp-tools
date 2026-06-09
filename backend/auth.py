@@ -223,9 +223,6 @@ def _do_login():
                 if proxy_config.get("username"):
                     launch_kwargs["proxy"]["username"] = proxy_config["username"]
                     launch_kwargs["proxy"]["password"] = proxy_config.get("password", "")
-            else:
-                # 未开启代理时强制直连，防止系统代理残留（如 Clash 端口 7897）干扰
-                launch_args.append("--no-proxy-server")
 
             browser = launch_chromium(p.chromium, **launch_kwargs)
             
