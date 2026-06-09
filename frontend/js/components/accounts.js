@@ -220,11 +220,16 @@ const AccountsPage = {
         overlay.className = 'modal-overlay active';
         document.body.appendChild(overlay);
 
-        // Fetch current subscription status
+        // Fetch current subscription status and global upload setting
         let sub = null;
+        let globalUploadEnabled = false;
         try {
-            const data = await API.accounts.rssSubscriptions();
-            sub = (data.subscriptions || []).find(s => s.fakeid === fakeid);
+            const [subsRes, settingsRes] = await Promise.all([
+                API.accounts.rssSubscriptions(),
+                API.settings.get(),
+            ]);
+            sub = (subsRes.subscriptions || []).find(s => s.fakeid === fakeid);
+            globalUploadEnabled = !!settingsRes.rss_upload_enabled;
         } catch (err) {
             console.error("加载订阅状态失败", err);
         }
@@ -260,7 +265,7 @@ const AccountsPage = {
                     <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
                         <span style="color: var(--text-muted);">上传状态：</span>
                         <span style="font-weight: 600; color: ${sub?.last_upload_error ? 'var(--badge-warning-color)' : 'var(--success, #4caf50)'};">
-                            ${this.formatRssUploadStatus(sub)}
+                            ${this.formatRssUploadStatus(sub, globalUploadEnabled)}
                         </span>
                     </div>
                     <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
@@ -358,10 +363,14 @@ const AccountsPage = {
 
             if (refreshStatusBtn) {
                 refreshStatusBtn.addEventListener('click', async () => {
-                    const subsData = await API.accounts.rssSubscriptions();
+                    const [subsData, settingsData] = await Promise.all([
+                        API.accounts.rssSubscriptions(),
+                        API.settings.get(),
+                    ]);
                     sub = (subsData.subscriptions || []).find(s => s.fakeid === fakeid);
                     isSubscribed = sub ? sub.enabled : false;
                     interval = sub ? sub.interval_minutes : interval;
+                    globalUploadEnabled = !!settingsData.rss_upload_enabled;
                     updateModalBody();
                 });
             }
@@ -470,7 +479,11 @@ const AccountsPage = {
         return `约 ${this.formatRssDuration(range.min)} - ${this.formatRssDuration(range.max)} 随机`;
     },
 
-    formatRssUploadStatus(sub) {
+    formatRssUploadStatus(sub, globalUploadEnabled) {
+        if (!globalUploadEnabled) {
+            const pending = sub ? (sub.pending_upload_count || 0) : 0;
+            return pending > 0 ? `全局已关闭，待上传 ${pending} 篇` : '全局已关闭（系统设置）';
+        }
         if (!sub) return '暂无';
         const pending = sub.pending_upload_count || 0;
         if (sub.last_upload_disabled) {

@@ -11,7 +11,7 @@ import string
 import threading
 from pathlib import Path
 
-from backend.runtime import app_dir, is_frozen
+from backend.runtime import app_dir
 
 # ── 路径配置 ──────────────────────────────────────────────
 if getattr(sys, 'frozen', False):
@@ -38,8 +38,6 @@ DEFAULT_HEADERS = {
     "Accept": "application/json, text/plain, */*",
 }
 
-DEFAULT_RSS_UPLOAD_URL = "https://hg.chenshipin.com/api/data/gzhAdd"
-
 # ── 默认应用设置 ──────────────────────────────────────────
 DEFAULT_SETTINGS = {
     "download_dir": str(OUTPUT_DIR),
@@ -56,7 +54,7 @@ DEFAULT_SETTINGS = {
     "rss_end_hour": 24,
     "rss_end_minute": 0,
     "rss_upload_enabled": False,
-    "rss_upload_url": "" if is_frozen() else DEFAULT_RSS_UPLOAD_URL,
+    "rss_upload_url": "",
 }
 
 
@@ -94,8 +92,6 @@ def get_settings() -> dict:
     for key, val in DEFAULT_SETTINGS.items():
         if key not in settings:
             settings[key] = val
-    if is_frozen() and settings.get("rss_upload_url") == DEFAULT_RSS_UPLOAD_URL:
-        settings["rss_upload_url"] = ""
     return settings
 
 
