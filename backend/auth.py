@@ -238,7 +238,7 @@ def _do_login():
             page = ctx.new_page()
 
             page.goto("https://mp.weixin.qq.com/", timeout=30000)
-            page.wait_for_load_state("networkidle", timeout=15000)
+            # goto 已等到 load 事件，页面可用。不等待 networkidle，因微信页面有长轮询/WebSocket 永不 idle
 
             _set_login_state("scanning", "请在弹出的浏览器窗口中扫码登录", 50)
 
