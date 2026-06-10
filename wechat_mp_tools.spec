@@ -16,6 +16,9 @@ bundle_browser = os.environ.get('WECHAT_MP_TOOLS_BUNDLE_BROWSER', '1') != '0'
 if bundle_browser and os.path.isdir(playwright_browsers):
     datas.append((playwright_browsers, 'ms-playwright'))
 
+# ── binaries 列表（Windows 平台会追加 .NET DLL）──
+binaries = []
+
 # ── 依赖配置 ──────────────────────────────────────────────
 hiddenimports = [
     'flask',
@@ -71,12 +74,31 @@ if sys.platform == 'win32':
         'webview.platforms.edgechromium',
     ])
 
+    # ── 关键修复：收集 pythonnet / clr_loader 的原生 .NET DLL ──
+    # PyInstaller hiddenimports 不会自动收集 .NET 运行时 DLL，
+    # 必须手动收集否则打包后 pywebview WinForms 后端初始化失败 → 白屏/加载中
+    try:
+        from PyInstaller.utils.hooks import collect_dynamic_libs
+        for pkg in ('clr_loader', 'pythonnet'):
+            dlls = collect_dynamic_libs(pkg)
+            binaries.extend(dlls)
+    except Exception:
+        # PyInstaller 版本过老时 fallback：手动扫描 clr_loader 目录
+        import clr_loader
+        clr_path = os.path.dirname(clr_loader.__file__)
+        for root, dirs, files in os.walk(clr_path):
+            for f in files:
+                if f.endswith(('dll', 'so', 'pyd')):
+                    src = os.path.join(root, f)
+                    dst = os.path.relpath(src, os.path.dirname(clr_loader.__file__))
+                    binaries.append((src, os.path.join('clr_loader', dst)))
+
 block_cipher = None
 
 a = Analysis(
     ['main.py'],  # ── 入口点修改为 main.py ──
     pathex=[project_root],
-    binaries=[],
+    binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
@@ -154,6 +176,8 @@ if sys.platform == 'darwin':
     )
 elif sys.platform == 'win32':
     # Windows 打包配置：打包为绿色免安装文件夹
+    # ── 关键修复：Windows 端禁用 UPX 压缩 ──
+    # UPX 会损坏 pythonnet / clr_loader 的 .NET DLL，导致 WebView2 后端初始化失败
     exe = EXE(
         pyz,
         a.scripts,
@@ -163,7 +187,7 @@ elif sys.platform == 'win32':
         debug=False,
         bootloader_ignore_signals=False,
         strip=False,
-        upx=True,
+        upx=False,  # 禁用 UPX，避免 .NET DLL 被损坏
         upx_exclude=[],
         console=False,  # ── 关键修改：Windows 端也完全关闭黑窗口控制台 ──
         disable_windowed_traceback=False,

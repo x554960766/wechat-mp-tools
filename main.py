@@ -63,6 +63,37 @@ if __name__ == '__main__':
         # 启用环境变量标明运行在 PyWebview 容器下（备用逻辑）
         os.environ['USE_PYWEBVIEW'] = '1'
 
+        # ── Windows WebView2 Runtime 预检测 ──
+        # Win10 精简版/老版本可能缺少 WebView2，pywebview 无法创建窗口
+        # 使用 ctypes 调用 Win32 MessageBox API，不依赖 tkinter（spec 中 tkinter 已被排除）
+        if sys.platform == 'win32':
+            import subprocess
+            try:
+                result = subprocess.run(
+                    ['reg', 'query', 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BEB-56B135A0CD3F}', '/v', 'pv'],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.returncode != 0:
+                    # 32位注册表也没找到，再查64位
+                    result = subprocess.run(
+                        ['reg', 'query', 'HKLM\\SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BEB-56B135A0CD3F}', '/v', 'pv'],
+                        capture_output=True, text=True, timeout=5
+                    )
+                if result.returncode != 0:
+                    import ctypes
+                    ctypes.windll.user32.MessageBoxW(
+                        0,
+                        '本程序需要 Microsoft Edge WebView2 Runtime 才能运行。\n\n'
+                        '请前往以下地址下载安装后重新启动程序：\n'
+                        'https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download-section\n\n'
+                        '选择 "Evergreen Bootstrapper" 安装即可。',
+                        '缺少 WebView2 Runtime',
+                        0x10  # MB_ICONERROR
+                    )
+                    os._exit(1)
+            except Exception:
+                pass  # 检测失败时静默继续，让 pywebview 自行处理
+
         # 从主程序 app 导入 Flask 实例与初始化
         from app import app
         from backend.config import ensure_dirs
