@@ -62,6 +62,7 @@ if __name__ == '__main__':
     try:
         # 启用环境变量标明运行在 PyWebview 容器下（备用逻辑）
         os.environ['USE_PYWEBVIEW'] = '1'
+        browser_fallback_mode = False
 
         # ── Windows WebView2 Runtime 自动安装 ──
         # Win10 精简版/老版本可能缺少 WebView2，pywebview 无法创建窗口
@@ -125,8 +126,9 @@ if __name__ == '__main__':
                     choice = ctypes.windll.user32.MessageBoxW(
                         0,
                         '检测到您的系统缺少 Microsoft Edge WebView2 Runtime，\n'
-                        '程序需要它才能正常运行。\n\n'
-                        '是否现在自动安装？（约需 1-3 分钟，需要网络连接）',
+                        '程序需要它才能以桌面窗口模式运行。\n\n'
+                        '是否现在自动安装？（约需 1-3 分钟，需要网络连接）\n'
+                        '【选择“否”将自动降级为浏览器模式运行】',
                         '缺少运行组件',
                         MB_YESNO | MB_ICONQUESTION
                     )
@@ -146,38 +148,34 @@ if __name__ == '__main__':
                             # 安装成功，继续启动
                             pass
                         else:
-                            ctypes.windll.user32.MessageBoxW(
+                            fallback_choice = ctypes.windll.user32.MessageBoxW(
                                 0,
-                                'WebView2 Runtime 安装失败，请检查网络连接或手动安装。\n\n'
-                                '手动下载地址：\n'
-                                'https://developer.microsoft.com/en-us/microsoft-edge/webview2/',
+                                'WebView2 Runtime 安装失败。\n\n'
+                                '是否切换为【浏览器网页模式】启动？\n'
+                                '（将在您系统的默认浏览器中打开操作页面）',
                                 '安装失败',
-                                MB_OK | MB_ICONERROR
+                                MB_YESNO | MB_ICONQUESTION
                             )
-                            os._exit(1)
+                            if fallback_choice == IDYES:
+                                browser_fallback_mode = True
+                            else:
+                                os._exit(1)
                     else:
-                        ctypes.windll.user32.MessageBoxW(
-                            0,
-                            '程序需要 WebView2 Runtime 才能运行。\n'
-                            '您可以随时重新打开程序进行自动安装，\n'
-                            '或前往以下地址手动下载：\n'
-                            'https://developer.microsoft.com/en-us/microsoft-edge/webview2/',
-                            '缺少运行组件',
-                            MB_OK | MB_ICONINFORMATION
-                        )
-                        os._exit(1)
+                        browser_fallback_mode = True
                 else:
                     # 无引导程序（开发模式未下载）→ 给出下载指引
-                    ctypes.windll.user32.MessageBoxW(
+                    fallback_choice = ctypes.windll.user32.MessageBoxW(
                         0,
-                        '缺少 Microsoft Edge WebView2 Runtime。\n\n'
-                        '请下载安装后重新启动程序：\n'
-                        'https://developer.microsoft.com/en-us/microsoft-edge/webview2/\n\n'
-                        '选择 "Evergreen Bootstrapper" 即可。',
+                        '缺少 Microsoft Edge WebView2 Runtime，无法启动桌面窗口。\n\n'
+                        '是否切换为【浏览器网页模式】启动？\n'
+                        '（将在您系统的默认浏览器中打开操作页面）',
                         '缺少 WebView2 Runtime',
-                        MB_OK | MB_ICONERROR
+                        MB_YESNO | MB_ICONQUESTION
                     )
-                    os._exit(1)
+                    if fallback_choice == IDYES:
+                        browser_fallback_mode = True
+                    else:
+                        os._exit(1)
 
         # 从主程序 app 导入 Flask 实例与初始化
         from app import app
@@ -211,19 +209,47 @@ if __name__ == '__main__':
 
         # 等待 Flask 完全就绪
         if not wait_for_server(port):
-            import webview
-            # 如果启动超时，弹窗告知用户
-            webview.create_window(
-                title='服务启动失败',
-                html=f'<h2>应用初始化失败</h2><p>本地服务端口 {port} 启动超时，请尝试重新打开软件。</p><p>日志文件：{log_file()}</p>',
-                width=520,
-                height=260
-            )
-            webview.start()
+            if sys.platform == 'win32' and browser_fallback_mode:
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(
+                    0,
+                    f'本地服务端口 {port} 启动超时，请尝试重新打开软件。\n日志文件：{log_file()}',
+                    '服务启动失败',
+                    0x10 # MB_OK | MB_ICONERROR
+                )
+            else:
+                import webview
+                # 如果启动超时，弹窗告知用户
+                webview.create_window(
+                    title='服务启动失败',
+                    html=f'<h2>应用初始化失败</h2><p>本地服务端口 {port} 启动超时，请尝试重新打开软件。</p><p>日志文件：{log_file()}</p>',
+                    width=520,
+                    height=260
+                )
+                webview.start()
             os._exit(1)
 
         # 服务就绪后额外等待 0.5 秒，确保 Socket 完全稳定，减少白屏概率
         time.sleep(0.5)
+
+        if sys.platform == 'win32' and browser_fallback_mode:
+            import webbrowser
+            import ctypes
+            # 弹窗提示用户已切换到浏览器模式
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                f'由于缺少 WebView2，已自动切换为【浏览器网页模式】启动。\n\n'
+                f'服务地址：http://127.0.0.1:{port}/\n\n'
+                f'程序已在后台运行，请不要关闭打开的浏览器网页。\n'
+                f'提示：要关闭本程序，请在系统“任务管理器”中结束本进程。',
+                '浏览器模式启动',
+                0x40 # MB_OK | MB_ICONINFORMATION
+            )
+            # 打开浏览器
+            webbrowser.open(f'http://127.0.0.1:{port}/')
+            # 保持主进程持续运行
+            while True:
+                time.sleep(1)
 
         # 延迟导入 webview，防止初始化干扰
         import webview
@@ -248,13 +274,22 @@ if __name__ == '__main__':
     except Exception as e:
         write_startup_error(e)
         try:
-            import webview
-            webview.create_window(
-                title='启动失败',
-                html=f'<h2>应用启动失败</h2><p>{str(e)}</p><p>日志文件：{log_file()}</p>',
-                width=640,
-                height=320
-            )
-            webview.start()
+            if sys.platform == 'win32' and 'browser_fallback_mode' in locals() and browser_fallback_mode:
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(
+                    0,
+                    f'应用启动失败：\n{str(e)}\n\n日志文件：{log_file()}',
+                    '启动失败',
+                    0x10 # MB_OK | MB_ICONERROR
+                )
+            else:
+                import webview
+                webview.create_window(
+                    title='启动失败',
+                    html=f'<h2>应用启动失败</h2><p>{str(e)}</p><p>日志文件：{log_file()}</p>',
+                    width=640,
+                    height=320
+                )
+                webview.start()
         except Exception:
             raise
