@@ -63,36 +63,121 @@ if __name__ == '__main__':
         # 启用环境变量标明运行在 PyWebview 容器下（备用逻辑）
         os.environ['USE_PYWEBVIEW'] = '1'
 
-        # ── Windows WebView2 Runtime 预检测 ──
+        # ── Windows WebView2 Runtime 自动安装 ──
         # Win10 精简版/老版本可能缺少 WebView2，pywebview 无法创建窗口
-        # 使用 ctypes 调用 Win32 MessageBox API，不依赖 tkinter（spec 中 tkinter 已被排除）
+        # 打包时内置了 Evergreen Bootstrapper，用户一键即可安装
         if sys.platform == 'win32':
             import subprocess
-            try:
-                result = subprocess.run(
-                    ['reg', 'query', 'HKLM\\SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BEB-56B135A0CD3F}', '/v', 'pv'],
-                    capture_output=True, text=True, timeout=5
-                )
-                if result.returncode != 0:
-                    # 32位注册表也没找到，再查64位
-                    result = subprocess.run(
-                        ['reg', 'query', 'HKLM\\SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BEB-56B135A0CD3F}', '/v', 'pv'],
-                        capture_output=True, text=True, timeout=5
+            import ctypes
+
+            MB_OK = 0x00
+            MB_YESNO = 0x04
+            MB_ICONERROR = 0x10
+            MB_ICONQUESTION = 0x20
+            MB_ICONINFORMATION = 0x40
+            IDYES = 6
+
+            def _find_webview2_bootstrapper():
+                """定位打包内置的 WebView2 引导安装程序"""
+                if getattr(sys, 'frozen', False):
+                    return os.path.join(sys._MEIPASS, 'webview2_bootstrapper',
+                                         'MicrosoftEdgeWebview2Setup.exe')
+                return os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    'webview2_bootstrapper',
+                                    'MicrosoftEdgeWebview2Setup.exe')
+
+            def _webview2_is_installed():
+                """检测 WebView2 Evergreen Runtime 是否已安装（注册表 + 文件双重验证）"""
+                # 方法1: 注册表（系统级 + 用户级）
+                reg_paths = [
+                    r'HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEB-56B135A0CD3F}',
+                    r'HKLM\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEB-56B135A0CD3F}',
+                    r'HKCU\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEB-56B135A0CD3F}',
+                ]
+                for reg_path in reg_paths:
+                    try:
+                        r = subprocess.run(
+                            ['reg', 'query', reg_path, '/v', 'pv'],
+                            capture_output=True, text=True, timeout=5
+                        )
+                        if r.returncode == 0:
+                            return True
+                    except Exception:
+                        continue
+
+                # 方法2: 文件系统（兜底，Edge 可能通过其他方式安装）
+                for base in [
+                    os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'),
+                    os.environ.get('ProgramFiles', r'C:\Program Files'),
+                    os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Microsoft', 'EdgeWebView'),
+                ]:
+                    candidate = os.path.join(base, 'Microsoft', 'EdgeWebView', 'Application', 'msedgewebview2.exe')
+                    if os.path.isfile(candidate):
+                        return True
+
+                return False
+
+            if not _webview2_is_installed():
+                bootstrapper = _find_webview2_bootstrapper()
+
+                if os.path.isfile(bootstrapper):
+                    # 有引导程序 → 询问用户一键安装
+                    choice = ctypes.windll.user32.MessageBoxW(
+                        0,
+                        '检测到您的系统缺少 Microsoft Edge WebView2 Runtime，\n'
+                        '程序需要它才能正常运行。\n\n'
+                        '是否现在自动安装？（约需 1-3 分钟，需要网络连接）',
+                        '缺少运行组件',
+                        MB_YESNO | MB_ICONQUESTION
                     )
-                if result.returncode != 0:
-                    import ctypes
+
+                    if choice == IDYES:
+                        try:
+                            proc = subprocess.Popen(
+                                [bootstrapper, '/silent', '/install'],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                            )
+                            proc.wait(timeout=300)  # 最多等 5 分钟
+                        except subprocess.TimeoutExpired:
+                            proc.kill()
+
+                        if _webview2_is_installed():
+                            # 安装成功，继续启动
+                            pass
+                        else:
+                            ctypes.windll.user32.MessageBoxW(
+                                0,
+                                'WebView2 Runtime 安装失败，请检查网络连接或手动安装。\n\n'
+                                '手动下载地址：\n'
+                                'https://developer.microsoft.com/en-us/microsoft-edge/webview2/',
+                                '安装失败',
+                                MB_OK | MB_ICONERROR
+                            )
+                            os._exit(1)
+                    else:
+                        ctypes.windll.user32.MessageBoxW(
+                            0,
+                            '程序需要 WebView2 Runtime 才能运行。\n'
+                            '您可以随时重新打开程序进行自动安装，\n'
+                            '或前往以下地址手动下载：\n'
+                            'https://developer.microsoft.com/en-us/microsoft-edge/webview2/',
+                            '缺少运行组件',
+                            MB_OK | MB_ICONINFORMATION
+                        )
+                        os._exit(1)
+                else:
+                    # 无引导程序（开发模式未下载）→ 给出下载指引
                     ctypes.windll.user32.MessageBoxW(
                         0,
-                        '本程序需要 Microsoft Edge WebView2 Runtime 才能运行。\n\n'
-                        '请前往以下地址下载安装后重新启动程序：\n'
-                        'https://developer.microsoft.com/en-us/microsoft-edge/webview2/#download-section\n\n'
-                        '选择 "Evergreen Bootstrapper" 安装即可。',
+                        '缺少 Microsoft Edge WebView2 Runtime。\n\n'
+                        '请下载安装后重新启动程序：\n'
+                        'https://developer.microsoft.com/en-us/microsoft-edge/webview2/\n\n'
+                        '选择 "Evergreen Bootstrapper" 即可。',
                         '缺少 WebView2 Runtime',
-                        0x10  # MB_ICONERROR
+                        MB_OK | MB_ICONERROR
                     )
                     os._exit(1)
-            except Exception:
-                pass  # 检测失败时静默继续，让 pywebview 自行处理
 
         # 从主程序 app 导入 Flask 实例与初始化
         from app import app

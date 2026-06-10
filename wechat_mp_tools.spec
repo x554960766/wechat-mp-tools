@@ -16,6 +16,12 @@ bundle_browser = os.environ.get('WECHAT_MP_TOOLS_BUNDLE_BROWSER', '1') != '0'
 if bundle_browser and os.path.isdir(playwright_browsers):
     datas.append((playwright_browsers, 'ms-playwright'))
 
+# ── WebView2 引导安装程序：Windows 端内置，启动时自动检测并一键安装 ──
+webview2_bootstrapper_dir = os.path.join(project_root, 'webview2_bootstrapper')
+webview2_bootstrapper_exe = os.path.join(webview2_bootstrapper_dir, 'MicrosoftEdgeWebview2Setup.exe')
+if sys.platform == 'win32' and os.path.isfile(webview2_bootstrapper_exe):
+    datas.append((webview2_bootstrapper_dir, 'webview2_bootstrapper'))
+
 # ── binaries 列表（Windows 平台会追加 .NET DLL）──
 binaries = []
 

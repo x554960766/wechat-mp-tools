@@ -29,6 +29,13 @@ jobs:
           pip install pyinstaller -i https://pypi.tuna.tsinghua.edu.cn/simple
           python -m playwright install chromium --no-shell
 
+      - name: Download WebView2 Evergreen Bootstrapper
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path webview2_bootstrapper
+          Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" -OutFile "webview2_bootstrapper\MicrosoftEdgeWebview2Setup.exe"
+          Write-Host "WebView2 Bootstrapper downloaded: $((Get-Item 'webview2_bootstrapper\MicrosoftEdgeWebview2Setup.exe').Length) bytes"
+
       - name: Build Windows EXE (Full)
         run: |
           pyinstaller --clean --noconfirm wechat_mp_tools.spec
