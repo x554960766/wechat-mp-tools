@@ -230,6 +230,24 @@ class RssScheduler:
                     raise RuntimeError(data.get("message") or data.get("error") or "远端接口返回失败")
             except ValueError:
                 pass
+
+            # 更新下载历史中的上传标记并保存
+            from backend.config import load_json as _load_json, save_json as _save_json, DOWNLOAD_HISTORY_FILE
+            try:
+                history = _load_json(DOWNLOAD_HISTORY_FILE, [])
+                if history:
+                    uploaded_urls = {a.get("url") for a in upload_articles if a.get("url")}
+                    history_changed = False
+                    for item in history:
+                        if isinstance(item, dict) and item.get("link") in uploaded_urls:
+                            if not item.get("uploaded"):
+                                item["uploaded"] = True
+                                history_changed = True
+                    if history_changed:
+                        _save_json(DOWNLOAD_HISTORY_FILE, history)
+            except Exception as history_err:
+                logger.warning("更新下载历史上传标记失败: %s", history_err)
+
             self._save_pending_upload_articles([])
             logger.info("RSS 新文章上传成功: %d 篇", len(upload_articles))
             return {
@@ -270,7 +288,7 @@ class RssScheduler:
 
     def force_upload_all(self, nickname: str) -> dict:
         """强制上传该公众号所有待上传文章 + 下载历史中未上传的文章（同步）"""
-        from backend.config import get_settings, get_proxies_dict, load_json as _load_json, DOWNLOAD_HISTORY_FILE, OUTPUT_DIR
+        from backend.config import get_settings, get_proxies_dict, load_json as _load_json, save_json as _save_json, DOWNLOAD_HISTORY_FILE, OUTPUT_DIR
 
         settings = get_settings()
         upload_url = (settings.get("rss_upload_url") or "").strip()
@@ -290,6 +308,8 @@ class RssScheduler:
             if item.get("account") != nickname:
                 continue
             if not item.get("success"):
+                continue
+            if item.get("uploaded"):
                 continue
             link = item.get("link", "")
             if link and link in pending_urls:
@@ -327,6 +347,21 @@ class RssScheduler:
                     raise RuntimeError(data.get("message") or data.get("error") or "远端接口返回失败")
             except ValueError:
                 pass
+
+            # 更新下载历史中的上传标记并保存
+            try:
+                uploaded_urls = {a.get("url") for a in all_articles if a.get("url")}
+                history_changed = False
+                for item in history:
+                    if isinstance(item, dict) and item.get("link") in uploaded_urls:
+                        if not item.get("uploaded"):
+                            item["uploaded"] = True
+                            history_changed = True
+                if history_changed:
+                    _save_json(DOWNLOAD_HISTORY_FILE, history)
+            except Exception as history_err:
+                logger.warning("手动上传更新历史标记失败: %s", history_err)
+
             self._save_pending_upload_articles([])
             logger.info("RSS 手动上传成功 [%s]: %d 篇", nickname, len(all_articles))
             return {"success": True, "count": len(all_articles), "pending_count": 0, "error": None}
