@@ -63,6 +63,11 @@ const Router = {
             return;
         }
 
+        if ((pageKey === 'transcode' || pageKey === 'dy_transcode') && App.ffmpegAvailable === false) {
+            window.location.hash = '#login';
+            return;
+        }
+
         // 依据当前激活路由，动态切换主题色系 (微信绿色系 vs 抖音暗黑极致灰)
         if (pageKey.startsWith('dy_')) {
             document.body.classList.add('dy-theme');

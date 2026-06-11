@@ -981,6 +981,17 @@ def resolve_path():
     except Exception as e:
         return jsonify({"error": f"解析路径异常: {str(e)}"}), 500
 
+@transcode_bp.route("/check-ffmpeg", methods=["GET"])
+def check_ffmpeg():
+    """检查系统是否安装了 ffmpeg/ffprobe"""
+    import shutil
+    has_ffmpeg = shutil.which("ffmpeg") is not None
+    has_ffprobe = shutil.which("ffprobe") is not None
+    return jsonify({
+        "success": True,
+        "available": has_ffmpeg and has_ffprobe
+    })
+
 # ── 垃圾清理 (临时上传文件) ───────────────────────────────────
 def cleanup_temp_uploads():
     """启动时或定时清理临时上传文件夹"""

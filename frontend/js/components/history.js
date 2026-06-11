@@ -605,7 +605,7 @@ const HistoryPage = {
                     <button class="btn btn-secondary btn-sm" data-path="${path}" onclick="HistoryPage.openFile(this.dataset.path)" style="padding: 4px 10px; font-size: 0.78rem;">
                         打开文件夹
                     </button>
-                    ${isVideo ? `
+                    ${(isVideo && App.ffmpegAvailable) ? `
                     <button class="btn btn-secondary btn-sm" data-path="${path}" data-title="${title}" onclick="HistoryPage.importToTranscode(this.dataset.path, this.dataset.title)" style="padding: 4px 10px; font-size: 0.78rem; background: var(--gradient-primary); color: white;">
                         导入转码
                     </button>

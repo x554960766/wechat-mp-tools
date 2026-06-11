@@ -184,6 +184,7 @@ const API = {
 
     // ── Video Transcoder API ─────────────────────────
     transcode: {
+        checkFFmpeg() { return API.get('/api/transcode/check-ffmpeg', { showError: false }); },
         scanDownloads() { return API.get('/api/transcode/scan-downloads'); },
         videoInfo(path) { return API.post('/api/transcode/video-info', { path }); },
         start(inputPath, params) { return API.post('/api/transcode/start', { input_path: inputPath, params }); },

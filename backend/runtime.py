@@ -49,6 +49,38 @@ def configure_runtime():
     if bundled_browsers.exists():
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(bundled_browsers)
 
+    # Ensure common executable search paths (like Homebrew / usr/local/bin) are in PATH.
+    # On macOS, GUI apps / environment might miss /opt/homebrew/bin and /usr/local/bin,
+    # causing subprocess calls to ffmpeg/ffprobe to fail even if they are installed.
+    # Also, dynamically prepend bundled ffmpeg directories as a fallback.
+    path_env = os.environ.get("PATH", "")
+    paths = path_env.split(os.pathsep) if path_env else []
+    
+    extra_paths = []
+    if sys.platform != "win32":
+        # System common paths for homebrew/mac/linux
+        for p in ["/opt/homebrew/bin", "/usr/local/bin"]:
+            if p not in paths and os.path.exists(p):
+                extra_paths.append(p)
+                
+    # Detect bundled ffmpeg folder in subtitle_remover (if it exists)
+    ffmpeg_base = Path(__file__).resolve().parent / "subtitle_remover" / "backend" / "ffmpeg"
+    bundled_ffmpeg_dir = None
+    if sys.platform == "win32":
+        bundled_ffmpeg_dir = ffmpeg_base / "win_x64"
+    elif sys.platform == "darwin":
+        bundled_ffmpeg_dir = ffmpeg_base / "macos"
+    else:
+        bundled_ffmpeg_dir = ffmpeg_base / "linux_x64"
+
+    if bundled_ffmpeg_dir.exists():
+        bundled_path_str = str(bundled_ffmpeg_dir.resolve())
+        if bundled_path_str not in paths:
+            extra_paths.append(bundled_path_str)
+
+    if extra_paths:
+        os.environ["PATH"] = os.pathsep.join(extra_paths + paths)
+
 
 def bundled_browsers_available() -> bool:
     return (resource_dir() / "ms-playwright").exists()

@@ -160,7 +160,7 @@ const ChannelsHistoryPage = {
                         <button class="btn btn-secondary btn-sm" onclick="ChannelsHistoryPage.openParent('${index}')" style="padding: 4px 10px; font-size: 0.85rem; margin-right: 4px;">
                             📂 打开目录
                         </button>
-                        ${item.type === '视频' ? `
+                        ${(item.type === '视频' && App.ffmpegAvailable) ? `
                         <button class="btn btn-secondary btn-sm" onclick="ChannelsHistoryPage.importToTranscode('${index}')" style="padding: 4px 10px; font-size: 0.85rem; background: var(--gradient-primary); color: white;">
                             导入转码
                         </button>

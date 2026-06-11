@@ -2,6 +2,10 @@
  * 微信公众号文章下载管理工具 — 全局应用管理器
  */
 const App = {
+    ffmpegAvailable: true,
+    isDouyinLoggedIn: false,
+    douyinAccountInfo: null,
+
     async init() {
         console.log('App initializing...');
 
@@ -11,6 +15,13 @@ const App = {
 
         // 首次加载认证状态（非阻塞，不影响页面首屏渲染速度）
         this.checkAuthStatus();
+
+        // 检查 ffmpeg 可用状态
+        try {
+            await this.checkFFmpegStatus();
+        } catch (e) {
+            console.error('Failed to run initial checkFFmpegStatus:', e);
+        }
 
         // 初始化路由
         Router.init();
@@ -57,6 +68,25 @@ const App = {
         } catch (err) {
             console.error('Failed to fetch auth status:', err);
             this.updateLoginStatus(false, false, false);
+        }
+    },
+
+    async checkFFmpegStatus() {
+        try {
+            const data = await API.transcode.checkFFmpeg();
+            const transcodeNav = document.getElementById('nav-transcode');
+            if (data && data.available) {
+                if (transcodeNav) transcodeNav.style.display = 'flex';
+                this.ffmpegAvailable = true;
+            } else {
+                if (transcodeNav) transcodeNav.style.display = 'none';
+                this.ffmpegAvailable = false;
+            }
+        } catch (err) {
+            console.error('Failed to check ffmpeg status:', err);
+            const transcodeNav = document.getElementById('nav-transcode');
+            if (transcodeNav) transcodeNav.style.display = 'none';
+            this.ffmpegAvailable = false;
         }
     },
 
