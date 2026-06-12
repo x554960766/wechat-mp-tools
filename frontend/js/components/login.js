@@ -1,8 +1,10 @@
 /**
- * 扫码登录页面组件
+ * 账号池页面组件（由原 LoginPage / 扫码登录页改造而来）
+ * 路由 key 仍为 'login'，保持向后兼容
  */
 const LoginPage = {
     _pollTimer: null,
+    _eventTimer: null,
 
     formatDate(timestamp) {
         return timestamp
@@ -20,54 +22,57 @@ const LoginPage = {
         return `${Math.max(1, minutes)}分钟`;
     },
 
+    formatCooldown(cooldownUntil) {
+        if (!cooldownUntil) return '';
+        const remaining = Math.max(0, Math.ceil((cooldownUntil * 1000 - Date.now()) / 60000));
+        return remaining > 0 ? `${remaining}分钟` : '即将恢复';
+    },
+
+    statusLabel(status) {
+        const map = {
+            active: '正常',
+            cooldown: '冷却中',
+            banned: '已踢出 · 风控',
+            invalid: '已踢出 · 登录失效',
+        };
+        return map[status] || status;
+    },
+
+    statusColor(status) {
+        const map = {
+            active: 'var(--success)',
+            cooldown: 'var(--warning)',
+            banned: 'var(--error)',
+            invalid: 'var(--error)',
+        };
+        return map[status] || 'var(--text-muted)';
+    },
+
     render() {
         return `
-            <div class="page-header">
-                <h2 class="page-title">扫码登录</h2>
-                <p class="page-description">使用微信扫描二维码登录公众平台后台，获取操作权限</p>
-            </div>
-
-            <div class="login-container">
-                <div class="login-illustration">
-                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <rect x="3" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.5"/>
-                        <rect x="14" y="3" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.5"/>
-                        <rect x="3" y="14" width="7" height="7" rx="1" stroke="currentColor" stroke-width="1.5"/>
-                        <rect x="14" y="14" width="3" height="3" stroke="currentColor" stroke-width="1.5"/>
-                        <rect x="18" y="14" width="3" height="3" stroke="currentColor" stroke-width="1.5"/>
-                        <rect x="14" y="18" width="3" height="3" stroke="currentColor" stroke-width="1.5"/>
-                        <rect x="18" y="18" width="3" height="3" stroke="currentColor" stroke-width="1.5"/>
-                        <rect x="5" y="5" width="3" height="3" fill="currentColor" opacity="0.4"/>
-                        <rect x="16" y="5" width="3" height="3" fill="currentColor" opacity="0.4"/>
-                        <rect x="5" y="16" width="3" height="3" fill="currentColor" opacity="0.4"/>
+            <div class="page-header" style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
+                <div>
+                    <h2 class="page-title">账号池</h2>
+                    <p class="page-description">管理微信公众平台采集账号，支持多账号自动轮换</p>
+                </div>
+                <button class="btn btn-primary" id="btn-add-account" onclick="LoginPage.startLogin()">
+                    <svg viewBox="0 0 24 24" fill="none" width="18" height="18">
+                        <line x1="12" y1="5" x2="12" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        <line x1="5" y1="12" x2="19" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
                     </svg>
-                </div>
-
-                <div id="login-action-area">
-                    <button class="btn btn-primary btn-lg" id="btn-start-login" onclick="LoginPage.startLogin()">
-                        <svg viewBox="0 0 24 24" fill="none" width="20" height="20">
-                            <path d="M15 3H19C20.1 3 21 3.9 21 5V19C21 20.1 20.1 21 19 21H15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                            <polyline points="10,17 15,12 10,7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                            <line x1="15" y1="12" x2="3" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                        </svg>
-                        启动浏览器扫码登录
-                    </button>
-                    <p style="color: var(--text-muted); font-size: 0.85rem; margin-top: 12px;">
-                        浏览器窗口登录成功后会自动保存凭证
-                    </p>
-                </div>
-
-                <div class="login-status-card" id="login-status-card">
-                    <div id="login-status-content">
-                        <!-- 动态内容 -->
-                    </div>
-                </div>
+                    添加账号
+                </button>
             </div>
+
+            <div id="pool-summary" style="margin-bottom: 20px;"></div>
+            <div id="pool-login-status" style="margin-bottom: 20px;"></div>
+            <div id="pool-accounts-grid" class="animate-fade-in"></div>
         `;
     },
 
     async init() {
-        await this.refreshStatus();
+        await this.loadAccounts();
+        this._startEventPolling();
     },
 
     destroy() {
@@ -75,146 +80,200 @@ const LoginPage = {
             clearInterval(this._pollTimer);
             this._pollTimer = null;
         }
-    },
-
-    async refreshStatus() {
-        try {
-            const data = await API.auth.status();
-            this.updateStatusUI(data);
-        } catch (err) {
-            // 静默处理
+        if (this._eventTimer) {
+            clearInterval(this._eventTimer);
+            this._eventTimer = null;
         }
     },
 
-    updateStatusUI(data) {
-        const container = document.getElementById('login-status-content');
-        const actionArea = document.getElementById('login-action-area');
-        if (!container) return;
+    _startEventPolling() {
+        if (this._eventTimer) clearInterval(this._eventTimer);
+        this._eventTimer = setInterval(async () => {
+            try {
+                const data = await API.accountPool.events();
+                if (data.events && data.events.length > 0) {
+                    for (const ev of data.events) {
+                        Toast.warning(`账号【${ev.nickname || '未知'}】${ev.reason}，已被移出账号池`);
+                    }
+                    this.loadAccounts();
+                }
+            } catch (e) { /* silent */ }
+        }, 15000);
+    },
 
-        if (data.logged_in) {
-            const saveTime = this.formatDate(data.save_time);
-            const expiresAt = this.formatDate(data.expires_at);
-            const remaining = this.formatRemaining(data.remaining_seconds);
+    async loadAccounts() {
+        try {
+            const [poolData, summaryData] = await Promise.all([
+                API.accountPool.list(),
+                API.accountPool.summary(),
+            ]);
+            this.renderSummary(summaryData);
+            this.renderGrid(poolData.accounts || []);
+        } catch (err) {
+            const grid = document.getElementById('pool-accounts-grid');
+            if (grid) grid.innerHTML = `<div style="text-align:center; color: var(--text-muted); padding: 40px;">加载账号列表失败</div>`;
+        }
+    },
 
-            container.innerHTML = `
-                ${data.account_info && data.account_info.nickname ? `
-                <div class="wechat-profile-card animate-fade-in" style="display: flex; align-items: center; gap: 16px; margin-bottom: 24px; padding: 16px; background: rgba(7, 193, 96, 0.05); border-radius: 12px; border: 1px solid rgba(7, 193, 96, 0.15); text-align: left;">
-                    ${data.account_info.avatar ? `
-                        <img src="${data.account_info.avatar}" alt="Avatar" style="width: 56px; height: 56px; border-radius: 50%; border: 2px solid white; box-shadow: var(--shadow-sm); object-fit: cover;" onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" />
-                        <div style="display: none; width: 56px; height: 56px; border-radius: 50%; background: #07c160; color: white; align-items: center; justify-content: center; font-size: 1.5rem; font-weight: 700; border: 2px solid white; box-shadow: var(--shadow-sm);">${data.account_info.nickname.charAt(0)}</div>
-                    ` : `
-                        <div style="width: 56px; height: 56px; border-radius: 50%; background: #07c160; color: white; display: flex; align-items: center; justify-content: center; font-size: 1.5rem; font-weight: 700; border: 2px solid white; box-shadow: var(--shadow-sm);">${data.account_info.nickname.charAt(0)}</div>
-                    `}
-                    <div style="flex: 1;">
-                        <h4 style="margin: 0; font-size: 1.15rem; font-weight: 700; color: var(--text-primary);">${data.account_info.nickname}</h4>
-                        <span style="font-size: 0.82rem; color: #07c160; font-weight: 600; background: rgba(7, 193, 96, 0.1); padding: 2px 8px; border-radius: 10px; display: inline-block; margin-top: 4px;">微信公众号平台</span>
-                    </div>
-                </div>
-                ` : ''}
+    renderSummary(summary) {
+        const el = document.getElementById('pool-summary');
+        if (!el) return;
+        const { total = 0, active = 0, cooldown = 0, banned = 0, invalid = 0 } = summary || {};
+        el.innerHTML = `
+            <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+                <span style="font-size: 0.85rem; padding: 4px 12px; border-radius: 20px; background: rgba(7,193,96,0.1); color: #07c160; font-weight: 600;">
+                    可用 ${active}
+                </span>
+                ${cooldown > 0 ? `<span style="font-size: 0.85rem; padding: 4px 12px; border-radius: 20px; background: rgba(255,165,0,0.1); color: var(--warning); font-weight: 600;">
+                    冷却 ${cooldown}
+                </span>` : ''}
+                ${(banned + invalid) > 0 ? `<span style="font-size: 0.85rem; padding: 4px 12px; border-radius: 20px; background: rgba(255,59,48,0.1); color: var(--error); font-weight: 600;">
+                    已踢出 ${banned + invalid}
+                </span>` : ''}
+                <span style="font-size: 0.85rem; padding: 4px 12px; border-radius: 20px; background: var(--bg-tertiary); color: var(--text-muted);">
+                    共 ${total} 个账号
+                </span>
+            </div>
+        `;
+    },
 
-                <div class="login-info-row">
-                    <span class="login-info-label">状态</span>
-                    <span class="badge badge-success">已登录</span>
-                </div>
-                <div class="login-info-row">
-                    <span class="login-info-label">Token</span>
-                    <span class="login-info-value" style="font-family: monospace;">${data.token_preview || '-'}</span>
-                </div>
-                <div class="login-info-row">
-                    <span class="login-info-label">登录时间</span>
-                    <span class="login-info-value">${saveTime}</span>
-                </div>
-                <div class="login-info-row">
-                    <span class="login-info-label">到期时间</span>
-                    <span class="login-info-value">${expiresAt}</span>
-                </div>
-                <div class="login-info-row">
-                    <span class="login-info-label">剩余时间</span>
-                    <span class="login-info-value" style="color: var(--error); font-weight: 600;">${remaining}</span>
-                </div>
-                <div class="login-info-row">
-                    <span class="login-info-label">提示</span>
-                    <span class="login-info-value">${data.message}</span>
-                </div>
-                <div style="margin-top: 16px; display: flex; gap: 8px; justify-content: center;">
-                    <button class="btn btn-secondary" onclick="LoginPage.checkCredentials()">
-                        验证凭证
-                    </button>
-                    <button class="btn btn-secondary" onclick="LoginPage.startLogin()">
-                        重新登录
-                    </button>
-                    <button class="btn btn-danger btn-sm" onclick="LoginPage.logout()">
-                        退出登录
+    renderGrid(accounts) {
+        const grid = document.getElementById('pool-accounts-grid');
+        if (!grid) return;
+
+        if (accounts.length === 0) {
+            grid.innerHTML = `
+                <div class="empty-state" style="text-align: center; padding: 60px 24px;">
+                    <div style="font-size: 3rem; margin-bottom: 16px; opacity: 0.4;">🔐</div>
+                    <h3 style="color: var(--text-primary); margin-bottom: 8px;">账号池为空</h3>
+                    <p style="color: var(--text-muted); margin-bottom: 24px;">点击「添加账号」按钮扫码登录，添加第一个采集账号</p>
+                    <button class="btn btn-primary" onclick="LoginPage.startLogin()">
+                        <svg viewBox="0 0 24 24" fill="none" width="18" height="18">
+                            <line x1="12" y1="5" x2="12" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                            <line x1="5" y1="12" x2="19" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        </svg>
+                        添加账号
                     </button>
                 </div>
             `;
+            return;
+        }
 
-            // 更新全局状态
-            App.updateLoginStatus(true, data.may_expired);
+        grid.innerHTML = `
+            <div style="display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 16px;">
+                ${accounts.map(acc => this._renderCard(acc)).join('')}
+            </div>
+        `;
+    },
 
-        } else {
-            const loginState = data.login_state || {};
-            if (data.expired) {
-                const saveTime = this.formatDate(data.save_time);
-                const expiresAt = this.formatDate(data.expires_at);
+    _renderCard(acc) {
+        const statusColor = this.statusColor(acc.status);
+        const statusText = this.statusLabel(acc.status);
+        const remaining = this.formatRemaining(acc.remaining_seconds);
+        const isKicked = acc.status === 'banned' || acc.status === 'invalid';
+        const isCooldown = acc.status === 'cooldown';
+        const initial = (acc.nickname || '?').charAt(0);
 
-                container.innerHTML = `
-                    <div style="text-align: center;">
-                        <p style="color: var(--warning); font-weight: 600; margin-bottom: 12px;">登录已过期，请重新扫码登录</p>
-                        <div class="login-info-row">
-                            <span class="login-info-label">上次登录</span>
-                            <span class="login-info-value">${saveTime}</span>
-                        </div>
-                        <div class="login-info-row">
-                            <span class="login-info-label">到期时间</span>
-                            <span class="login-info-value">${expiresAt}</span>
-                        </div>
-                        <button class="btn btn-primary" style="margin-top: 16px;" onclick="LoginPage.startLogin()">
-                            重新登录
-                        </button>
-                    </div>
-                `;
-            } else if (loginState.status === 'scanning') {
-                if (!this._pollTimer) {
-                    this.startStatusPolling();
-                }
-                container.innerHTML = `
-                    <div style="text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px 0;">
-                        <div class="spinner" style="margin: 0 auto 16px;"></div>
-                        <p style="color: var(--text-primary); font-weight: 600; margin-bottom: 8px;">${loginState.message}</p>
-                        <div class="progress-bar" style="width: 80%; margin: 8px auto 0;">
-                            <div class="progress-fill" style="width: ${loginState.progress}%"></div>
-                        </div>
-                        <button class="btn btn-secondary btn-sm" style="margin-top: 16px;" onclick="LoginPage.cancelLogin()">
-                            取消登录并重置
-                        </button>
-                    </div>
-                `;
-            } else if (loginState.status === 'failed') {
-                container.innerHTML = `
-                    <div style="text-align: center;">
-                        <p style="color: var(--error); font-weight: 600;">❌ ${loginState.message}</p>
-                        <button class="btn btn-primary" style="margin-top: 12px;" onclick="LoginPage.startLogin()">
-                            重新尝试
-                        </button>
-                    </div>
-                `;
-            } else if (loginState.status === 'success') {
-                container.innerHTML = `
-                    <div style="text-align: center;">
-                        <p style="color: var(--success); font-weight: 600;">✅ ${loginState.message}</p>
-                    </div>
-                `;
-                setTimeout(() => this.refreshStatus(), 500);
-            } else {
-                container.innerHTML = `
-                    <div style="text-align: center; color: var(--text-muted);">
-                        <p>尚未登录，请点击上方按钮开始扫码</p>
-                    </div>
-                `;
-            }
+        let extraInfo = '';
+        if (isCooldown) {
+            extraInfo = `<div style="font-size: 0.8rem; color: var(--warning);">冷却剩余: ${this.formatCooldown(acc.cooldown_until)}</div>`;
+        }
+        if (acc.last_error && isKicked) {
+            extraInfo += `<div style="font-size: 0.8rem; color: var(--error); margin-top: 4px; word-break: break-all;">${this._esc(acc.last_error)}</div>`;
+        }
 
-            App.updateLoginStatus(false);
+        return `
+            <div style="
+                background: var(--bg-card);
+                border: 1px solid ${isKicked ? 'rgba(255,59,48,0.25)' : isCooldown ? 'rgba(255,165,0,0.25)' : 'var(--border-color)'};
+                border-radius: 12px;
+                padding: 20px;
+                transition: box-shadow 0.2s, transform 0.2s;
+                position: relative;
+            " onmouseenter="this.style.boxShadow='var(--shadow-md)';this.style.transform='translateY(-2px)'"
+              onmouseleave="this.style.boxShadow='none';this.style.transform='none'">
+
+                <!-- 状态点 -->
+                <div style="position: absolute; top: 16px; right: 16px; display: flex; align-items: center; gap: 6px;">
+                    <span style="width: 8px; height: 8px; border-radius: 50%; background: ${statusColor}; display: inline-block;
+                        ${acc.status === 'active' ? 'box-shadow: 0 0 6px rgba(7,193,96,0.5);' : ''}
+                    "></span>
+                    <span style="font-size: 0.75rem; color: ${statusColor}; font-weight: 600;">${statusText}</span>
+                </div>
+
+                <!-- 头像 + 昵称 -->
+                <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 16px;">
+                    ${acc.avatar
+                        ? `<img src="${acc.avatar}" alt="" style="width: 44px; height: 44px; border-radius: 50%; border: 2px solid white; box-shadow: var(--shadow-sm); object-fit: cover;"
+                             onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';" />
+                           <div style="display: none; width: 44px; height: 44px; border-radius: 50%; background: #07c160; color: white; align-items: center; justify-content: center; font-size: 1.2rem; font-weight: 700; flex-shrink: 0;">${initial}</div>`
+                        : `<div style="width: 44px; height: 44px; border-radius: 50%; background: #07c160; color: white; display: flex; align-items: center; justify-content: center; font-size: 1.2rem; font-weight: 700; flex-shrink: 0;">${initial}</div>`
+                    }
+                    <div style="flex: 1; min-width: 0;">
+                        <div style="font-weight: 700; color: var(--text-primary); font-size: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${this._esc(acc.nickname)}</div>
+                        <div style="font-size: 0.78rem; color: var(--text-muted); font-family: monospace;">${acc.token_preview || ''}</div>
+                    </div>
+                </div>
+
+                <!-- 信息行 -->
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; font-size: 0.82rem; color: var(--text-secondary); margin-bottom: 12px;">
+                    <div>失败: <strong>${acc.failures}</strong></div>
+                    <div>风控: <strong>${acc.risk_hits}</strong></div>
+                    <div style="grid-column: span 2;">
+                        剩余: <strong style="color: ${acc.remaining_seconds > 86400 ? 'var(--success)' : acc.remaining_seconds > 0 ? 'var(--warning)' : 'var(--error)'};">${remaining}</strong>
+                    </div>
+                </div>
+
+                ${extraInfo}
+
+                <!-- 操作按钮 -->
+                <div style="display: flex; gap: 8px; margin-top: 12px;">
+                    ${isKicked ? `
+                        <button class="btn btn-primary btn-sm" onclick="LoginPage.startLogin()" style="flex: 1; font-size: 0.8rem;">重新登录</button>
+                    ` : ''}
+                    <button class="btn btn-danger btn-sm" onclick="LoginPage.removeAccount('${acc.id}', '${this._esc(acc.nickname)}')" style="font-size: 0.8rem; ${isKicked ? '' : 'margin-left: auto;'}">
+                        删除
+                    </button>
+                </div>
+            </div>
+        `;
+    },
+
+    _esc(s) {
+        if (!s) return '';
+        const div = document.createElement('div');
+        div.textContent = s;
+        return div.innerHTML;
+    },
+
+    async startLogin() {
+        const btn = document.getElementById('btn-add-account');
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<div class="spinner" style="width: 16px; height: 16px; border-width: 2px;"></div> 正在启动...';
+        }
+
+        // 显示扫码状态区域
+        const statusEl = document.getElementById('pool-login-status');
+        if (statusEl) {
+            statusEl.innerHTML = `
+                <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; text-align: center;">
+                    <div class="spinner" style="margin: 0 auto 12px;"></div>
+                    <p style="color: var(--text-primary); font-weight: 600;">正在启动浏览器扫码登录...</p>
+                    <p style="color: var(--text-muted); font-size: 0.85rem;">请在弹出的浏览器窗口中扫码</p>
+                    <button class="btn btn-secondary btn-sm" style="margin-top: 12px;" onclick="LoginPage.cancelLogin()">取消</button>
+                </div>
+            `;
+        }
+
+        try {
+            await API.auth.login();
+            Toast.info('已启动浏览器登录流程，请在弹出的窗口中扫码...');
+            this.startStatusPolling();
+        } catch (err) {
+            Toast.error('启动登录失败: ' + err.message);
+            this._resetAddButton();
+            if (statusEl) statusEl.innerHTML = '';
         }
     },
 
@@ -223,16 +282,69 @@ const LoginPage = {
         this._pollTimer = setInterval(async () => {
             try {
                 const data = await API.auth.status();
-                this.updateStatusUI(data);
-                if (data.logged_in || (data.login_state?.status !== 'scanning' && data.login_state?.status !== 'idle')) {
+                const loginState = data.login_state || {};
+
+                const statusEl = document.getElementById('pool-login-status');
+                if (!statusEl) return;
+
+                if (loginState.status === 'scanning') {
+                    statusEl.innerHTML = `
+                        <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; text-align: center;">
+                            <div class="spinner" style="margin: 0 auto 12px;"></div>
+                            <p style="color: var(--text-primary); font-weight: 600;">${loginState.message}</p>
+                            <div class="progress-bar" style="width: 60%; margin: 12px auto;">
+                                <div class="progress-fill" style="width: ${loginState.progress}%"></div>
+                            </div>
+                            <button class="btn btn-secondary btn-sm" style="margin-top: 12px;" onclick="LoginPage.cancelLogin()">取消登录</button>
+                        </div>
+                    `;
+                } else if (loginState.status === 'success') {
+                    statusEl.innerHTML = `
+                        <div style="background: rgba(7,193,96,0.05); border: 1px solid rgba(7,193,96,0.2); border-radius: 12px; padding: 20px; text-align: center;">
+                            <p style="color: var(--success); font-weight: 600;">✅ ${loginState.message}</p>
+                        </div>
+                    `;
                     clearInterval(this._pollTimer);
                     this._pollTimer = null;
-                    this.resetStartButtons();
+                    this._resetAddButton();
+                    // 刷新账号列表
+                    setTimeout(() => {
+                        this.loadAccounts();
+                        if (statusEl) statusEl.innerHTML = '';
+                        App.checkAuthStatus();
+                    }, 1000);
+                } else if (loginState.status === 'failed') {
+                    statusEl.innerHTML = `
+                        <div style="background: rgba(255,59,48,0.05); border: 1px solid rgba(255,59,48,0.2); border-radius: 12px; padding: 20px; text-align: center;">
+                            <p style="color: var(--error); font-weight: 600;">❌ ${loginState.message}</p>
+                            <button class="btn btn-primary btn-sm" style="margin-top: 12px;" onclick="LoginPage.startLogin()">重新尝试</button>
+                        </div>
+                    `;
+                    clearInterval(this._pollTimer);
+                    this._pollTimer = null;
+                    this._resetAddButton();
+                } else if (loginState.status === 'idle') {
+                    statusEl.innerHTML = '';
+                    clearInterval(this._pollTimer);
+                    this._pollTimer = null;
+                    this._resetAddButton();
                 }
-            } catch (err) {
-                // 静默处理
-            }
+            } catch (err) { /* silent */ }
         }, 3000);
+    },
+
+    _resetAddButton() {
+        const btn = document.getElementById('btn-add-account');
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = `
+                <svg viewBox="0 0 24 24" fill="none" width="18" height="18">
+                    <line x1="12" y1="5" x2="12" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    <line x1="5" y1="12" x2="19" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+                添加账号
+            `;
+        }
     },
 
     async cancelLogin() {
@@ -243,50 +355,25 @@ const LoginPage = {
                 clearInterval(this._pollTimer);
                 this._pollTimer = null;
             }
-            await this.refreshStatus();
+            this._resetAddButton();
+            const statusEl = document.getElementById('pool-login-status');
+            if (statusEl) statusEl.innerHTML = '';
         } catch (err) {
             Toast.error('取消失败: ' + err.message);
         }
     },
 
-    resetStartButtons() {
-        const btn = document.getElementById('btn-start-login');
-        if (btn) {
-            btn.disabled = false;
-            btn.innerHTML = `
-                <svg viewBox="0 0 24 24" fill="none" width="20" height="20">
-                    <path d="M15 3H19C20.1 3 21 3.9 21 5V19C21 20.1 20.1 21 19 21H15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    <polyline points="10,17 15,12 10,7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                    <line x1="15" y1="12" x2="3" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                </svg>
-                启动浏览器扫码登录
-            `;
-        }
-    },
-
-    setStartButtonsDisabled(disabled) {
-        const btn = document.getElementById('btn-start-login');
-        if (btn) btn.disabled = disabled;
-    },
-
-    async startLogin() {
-        const btn = document.getElementById('btn-start-login');
-        this.setStartButtonsDisabled(true);
-        if (btn) {
-            btn.innerHTML = '<div class="spinner" style="width: 18px; height: 18px; border-width: 2px;"></div> 正在启动...';
-        }
-
-        try {
-            await API.auth.login();
-            Toast.info('已启动浏览器登录流程，请在弹出的窗口中扫码...');
-
-            // 开始轮询状态
-            this.startStatusPolling();
-
-        } catch (err) {
-            Toast.error('启动登录失败: ' + err.message);
-            this.resetStartButtons();
-        }
+    async removeAccount(id, nickname) {
+        Modal.confirm('删除账号', `确定要从账号池中删除「${nickname}」吗？`, async () => {
+            try {
+                await API.accountPool.remove(id);
+                Toast.success('已删除');
+                this.loadAccounts();
+                App.checkAuthStatus();
+            } catch (err) {
+                Toast.error('删除失败: ' + err.message);
+            }
+        });
     },
 
     async checkCredentials() {
@@ -308,7 +395,7 @@ const LoginPage = {
             try {
                 await API.auth.logout();
                 Toast.success('已退出登录');
-                await LoginPage.refreshStatus();
+                await LoginPage.loadAccounts();
             } catch (err) {
                 Toast.error('退出失败');
             }

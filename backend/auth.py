@@ -15,6 +15,7 @@ from backend.config import (
     get_proxy_config, get_proxy_url
 )
 from backend.runtime import launch_chromium
+from backend.account_pool import account_pool, LOGIN_VALID_SECONDS as POOL_LOGIN_VALID_SECONDS
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
@@ -112,61 +113,55 @@ def _fetch_wechat_account_info(token: str, cookie_str: str) -> dict | None:
 
 @auth_bp.route("/status", methods=["GET"])
 def get_status():
-    """获取登录状态"""
-    config = load_json(CONFIG_FILE)
-    if not config:
+    """获取登录状态（聚合账号池中第一个 active 账号）"""
+    accounts = account_pool.list_accounts()
+    # 找第一个 active 账号
+    active_acc = None
+    for acc in accounts:
+        if acc["status"] == "active" and not acc.get("expired"):
+            active_acc = acc
+            break
+
+    if not active_acc:
+        # 无可用账号，检查是否有任何账号（包括过期/被踢出的）
+        if accounts:
+            last_acc = accounts[0]
+            return jsonify({
+                "logged_in": False,
+                "login_state": _login_state,
+                "token_preview": last_acc.get("token_preview", ""),
+                "save_time": last_acc.get("save_time", 0),
+                "may_expired": True,
+                **_credential_expiry(last_acc.get("save_time", 0)),
+                "message": "登录已过期或账号已被踢出，请重新登录",
+                "account_info": {
+                    "nickname": last_acc.get("nickname", ""),
+                    "avatar": last_acc.get("avatar", ""),
+                },
+                "pool_summary": account_pool.get_summary(),
+            })
         return jsonify({
             "logged_in": False,
             "login_state": _login_state,
-            "message": "未登录，请先扫码登录"
+            "message": "未登录，请先在账号池页面添加账号"
         })
 
-    token = config.get("token", "")
-    cookie_str = config.get("cookie_str", "")
-    save_time = config.get("save_time", 0)
-
-    if not token or not cookie_str:
-        return jsonify({
-            "logged_in": False,
-            "login_state": _login_state,
-            "message": "凭证不完整，请重新登录"
-        })
-
+    save_time = active_acc.get("save_time", 0)
     expiry = _credential_expiry(save_time)
-    if expiry["expired"]:
-        return jsonify({
-            "logged_in": False,
-            "login_state": _login_state,
-            "token_preview": token[:8] + "...",
-            "save_time": save_time,
-            "may_expired": True,
-            **expiry,
-            "message": "登录已过期，请重新扫码登录"
-        })
-
-    account_info = config.get("account_info", {})
-    if not account_info.get("nickname"):
-        fetched_info = _fetch_wechat_account_info(token, cookie_str)
-        if fetched_info:
-            account_info = fetched_info
-        else:
-            # 获取失败时保存默认占位名称，防止每次轮询接口都同步请求微信主页导致挂起/超时
-            account_info = {
-                "nickname": "公众号未命名",
-                "avatar": ""
-            }
-        config["account_info"] = account_info
-        save_json(CONFIG_FILE, config)
 
     return jsonify({
         "logged_in": True,
         "login_state": _login_state,
-        "token_preview": token[:8] + "...",
+        "token_preview": active_acc.get("token_preview", ""),
         "save_time": save_time,
         "may_expired": False,
         **expiry,
         "message": "登录有效",
-        "account_info": account_info
+        "account_info": {
+            "nickname": active_acc.get("nickname", ""),
+            "avatar": active_acc.get("avatar", ""),
+        },
+        "pool_summary": account_pool.get_summary(),
     })
 
 
@@ -283,6 +278,16 @@ def _do_login():
             DATA_DIR.mkdir(parents=True, exist_ok=True)
             save_json(CONFIG_FILE, config)
 
+            # 写入账号池
+            account_pool.add_or_update({
+                "token": token,
+                "cookie_str": cookie_str,
+                "cookies": cookies,
+                "nickname": "公众号未命名",
+                "avatar": "",
+                "save_time": time.time(),
+            })
+
             # token/cookie 已经可用，先让前端结束等待；昵称头像只是展示信息，后续短超时补充。
             _set_login_state("success", f"登录成功！token = {token[:12]}...", 100)
 
@@ -307,6 +312,15 @@ def _do_login():
                         "avatar": avatar
                     }
                     save_json(CONFIG_FILE, config)
+                    # 同步更新账号池中的昵称/头像
+                    account_pool.add_or_update({
+                        "token": token,
+                        "cookie_str": cookie_str,
+                        "cookies": cookies,
+                        "nickname": nickname or "公众号未命名",
+                        "avatar": avatar,
+                        "save_time": config["save_time"],
+                    })
             except Exception:
                 pass
 
@@ -360,17 +374,20 @@ def logout():
 
 @auth_bp.route("/check-credentials", methods=["GET"])
 def check_credentials():
-    """验证凭证是否有效（通过调一次 API 测试）"""
-    config = load_json(CONFIG_FILE)
-    if not config or not config.get("token"):
-        return jsonify({"valid": False, "message": "无凭证"})
+    """验证凭证是否有效（通过账号池中第一个 active 账号调一次 API 测试）"""
+    from backend.account_pool import borrow_session
+
+    try:
+        account_id, token, cookie_str = borrow_session()
+    except RuntimeError:
+        return jsonify({"valid": False, "message": "无可用账号"})
 
     proxy_url = None
     try:
         import requests as req
         from backend.config import DEFAULT_HEADERS, BASE_URL, get_proxies_dict, report_proxy_status
 
-        headers = {**DEFAULT_HEADERS, "Cookie": config["cookie_str"]}
+        headers = {**DEFAULT_HEADERS, "Cookie": cookie_str}
         proxies = get_proxies_dict()
         if proxies:
             proxy_url = proxies.get("http")
@@ -379,7 +396,7 @@ def check_credentials():
             f"{BASE_URL}/cgi-bin/searchbiz",
             params={
                 "action": "search_biz",
-                "token": config["token"],
+                "token": token,
                 "lang": "zh_CN",
                 "f": "json",
                 "ajax": "1",
@@ -394,11 +411,14 @@ def check_credentials():
         
         if resp.status_code != 200:
             report_proxy_status(proxy_url, success=False)
+            account_pool.report(account_id, http_ok=False, error=f"HTTP {resp.status_code}")
             return jsonify({"valid": False, "message": f"HTTP {resp.status_code}"})
 
         report_proxy_status(proxy_url, success=True)
         data = resp.json()
         ret = data.get("base_resp", {}).get("ret", -1)
+
+        account_pool.report(account_id, ret=ret)
 
         if ret == 0:
             return jsonify({"valid": True, "message": "凭证有效"})

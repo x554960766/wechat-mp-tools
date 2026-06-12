@@ -17,6 +17,7 @@ from backend.config import (
     DOWNLOAD_HISTORY_FILE,
     load_json, save_json, get_settings, get_proxies_dict, report_proxy_status
 )
+from backend.account_pool import borrow_session, account_pool
 
 articles_bp = Blueprint("articles", __name__, url_prefix="/api/articles")
 
@@ -26,59 +27,86 @@ _download_lock = threading.Lock()
 
 
 def _get_session():
-    """获取凭证"""
-    config = load_json(CONFIG_FILE)
-    if not config or not config.get("token"):
-        raise RuntimeError("未登录，请先扫码登录")
-    return config["token"], config["cookie_str"]
+    """获取凭证（通过账号池）"""
+    account_id, token, cookie_str = borrow_session()
+    return token, cookie_str
 
 
 def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "") -> tuple:
-    """Fetch one WeChat publish page and return (articles, total)."""
-    token, cookie_str = _get_session()
-    headers = {**DEFAULT_HEADERS, "Cookie": cookie_str}
-    proxies = get_proxies_dict()
-    proxy_url = proxies.get("http") if proxies else None
-    is_searching = bool(keyword)
-    params = {
-        "sub": "search" if is_searching else "list",
-        "search_field": "7" if is_searching else "null",
-        "begin": str(begin),
-        "count": str(count),
-        "query": keyword,
-        "fakeid": fakeid,
-        "type": "101_1",
-        "free_publish_type": "1",
-        "sub_action": "list_ex",
-        "token": token,
-        "lang": "zh_CN",
-        "f": "json",
-        "ajax": "1",
-    }
+    """Fetch one WeChat publish page and return (articles, total).
+    Automatically switches accounts on rate-limiting/auth-expiry."""
+    max_switch = 3
+    last_exc = None
+    for _ in range(max_switch):
+        try:
+            account_id, token, cookie_str = borrow_session()
+        except RuntimeError as e:
+            raise RuntimeError(str(e))
 
-    resp = req.get(
-        f"{BASE_URL}/cgi-bin/appmsgpublish",
-        params=params,
-        headers=headers,
-        proxies=proxies,
-        timeout=30,
-    )
+        headers = {**DEFAULT_HEADERS, "Cookie": cookie_str}
+        proxies = get_proxies_dict()
+        proxy_url = proxies.get("http") if proxies else None
+        is_searching = bool(keyword)
+        params = {
+            "sub": "search" if is_searching else "list",
+            "search_field": "7" if is_searching else "null",
+            "begin": str(begin),
+            "count": str(count),
+            "query": keyword,
+            "fakeid": fakeid,
+            "type": "101_1",
+            "free_publish_type": "1",
+            "sub_action": "list_ex",
+            "token": token,
+            "lang": "zh_CN",
+            "f": "json",
+            "ajax": "1",
+        }
 
-    if resp.status_code != 200:
-        report_proxy_status(proxy_url, success=False)
-        raise RuntimeError(f"HTTP {resp.status_code}")
+        try:
+            resp = req.get(
+                f"{BASE_URL}/cgi-bin/appmsgpublish",
+                params=params,
+                headers=headers,
+                proxies=proxies,
+                timeout=30,
+            )
+        except req.RequestException as e:
+            report_proxy_status(proxy_url, success=False)
+            account_pool.report(account_id, http_ok=False, error=str(e))
+            last_exc = e
+            continue
 
-    report_proxy_status(proxy_url, success=True)
-    data = resp.json()
-    base_resp = data.get("base_resp", {})
-    ret = base_resp.get("ret", 0)
-    if ret == 200003:
-        raise PermissionError("登录已过期，请重新扫码登录")
-    if ret != 0:
-        err_msg = base_resp.get("err_msg", "未知错误")
-        raise RuntimeError(f"API错误 (ret={ret}): {err_msg}")
+        if resp.status_code != 200:
+            report_proxy_status(proxy_url, success=False)
+            account_pool.report(account_id, http_ok=False, error=f"HTTP {resp.status_code}")
+            last_exc = RuntimeError(f"HTTP {resp.status_code}")
+            continue
 
-    return _parse_publish_response(data)
+        report_proxy_status(proxy_url, success=True)
+        data = resp.json()
+        base_resp = data.get("base_resp", {})
+        ret = base_resp.get("ret", 0)
+
+        # 上报账号池
+        account_pool.report(account_id, ret=ret)
+
+        if ret == 200003:
+            last_exc = PermissionError("登录已过期，请重新扫码登录")
+            continue  # 换账号重试
+        if ret == 200013:
+            last_exc = RuntimeError("触发频率控制，正在切换账号重试...")
+            continue  # 换账号重试
+        if ret != 0:
+            err_msg = base_resp.get("err_msg", "未知错误")
+            raise RuntimeError(f"API错误 (ret={ret}): {err_msg}")
+
+        return _parse_publish_response(data)
+
+    # 所有重试用完
+    if isinstance(last_exc, PermissionError):
+        raise last_exc
+    raise last_exc or RuntimeError("账号池所有账号均不可用")
 
 
 @articles_bp.route("/list/<fakeid>", methods=["GET"])
@@ -111,7 +139,7 @@ def get_articles_appmsg(fakeid):
     count = request.args.get("count", 10, type=int)
 
     try:
-        token, cookie_str = _get_session()
+        account_id, token, cookie_str = borrow_session()
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 401
 
@@ -143,11 +171,15 @@ def get_articles_appmsg(fakeid):
 
         if resp.status_code != 200:
             report_proxy_status(proxy_url, success=False)
+            account_pool.report(account_id, http_ok=False, error=f"HTTP {resp.status_code}")
             return jsonify({"error": f"HTTP {resp.status_code}"}), 500
 
         report_proxy_status(proxy_url, success=True)
         data = resp.json()
         ret = data.get("base_resp", {}).get("ret", 0)
+
+        # 上报账号池
+        account_pool.report(account_id, ret=ret)
 
         if ret == 200003:
             return jsonify({"error": "登录已过期"}), 401
@@ -176,6 +208,7 @@ def get_articles_appmsg(fakeid):
 
     except req.RequestException as e:
         report_proxy_status(proxy_url, success=False)
+        account_pool.report(account_id, http_ok=False, error=str(e))
         return jsonify({"error": f"网络请求失败: {str(e)}"}), 500
 
 
