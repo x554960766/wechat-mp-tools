@@ -27,6 +27,7 @@ from backend.auth import auth_bp
 from backend.accounts import accounts_bp
 from backend.articles import articles_bp
 from backend.proxy import proxy_bp
+from backend.account_pool_api import account_pool_bp
 from backend.douyin import douyin_bp
 from backend.douyin_login import douyin_login_bp
 from backend.douyin_auth import douyin_auth_bp
@@ -48,12 +49,17 @@ app.register_blueprint(auth_bp)
 app.register_blueprint(accounts_bp)
 app.register_blueprint(articles_bp)
 app.register_blueprint(proxy_bp)
+app.register_blueprint(account_pool_bp)
 app.register_blueprint(douyin_bp)
 app.register_blueprint(douyin_login_bp)
 app.register_blueprint(douyin_auth_bp)
 app.register_blueprint(channels_bp)
 app.register_blueprint(transcode_bp)
 
+
+# 账号池旧数据迁移
+from backend.account_pool import migrate_legacy_config
+migrate_legacy_config()
 
 # 启动 RSS 自动抓取调度器
 from backend.rss_scheduler import rss_scheduler

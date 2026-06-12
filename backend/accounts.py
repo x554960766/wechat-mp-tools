@@ -11,17 +11,14 @@ from backend.config import (
     ACCOUNTS_FILE, CONFIG_FILE, BASE_URL, DEFAULT_HEADERS,
     load_json, save_json, get_proxies_dict, report_proxy_status
 )
+from backend.account_pool import borrow_session, account_pool
 
 accounts_bp = Blueprint("accounts", __name__, url_prefix="/api/accounts")
 
 
 def _get_session():
-    """创建带凭证的 requests 会话"""
-    config = load_json(CONFIG_FILE)
-    if not config or not config.get("token"):
-        raise RuntimeError("未登录")
-    token = config["token"]
-    cookie_str = config["cookie_str"]
+    """获取凭证（通过账号池）"""
+    account_id, token, cookie_str = borrow_session()
     return token, cookie_str
 
 
@@ -51,7 +48,7 @@ def search_accounts():
         return jsonify({"error": "请输入搜索关键字"}), 400
 
     try:
-        token, cookie_str = _get_session()
+        account_id, token, cookie_str = borrow_session()
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 401
 
@@ -81,11 +78,15 @@ def search_accounts():
 
         if resp.status_code != 200:
             report_proxy_status(proxy_url, success=False)
+            account_pool.report(account_id, http_ok=False, error=f"HTTP {resp.status_code}")
             return jsonify({"error": f"HTTP {resp.status_code}"}), 500
 
         report_proxy_status(proxy_url, success=True)
         resp_data = resp.json()
         ret = resp_data.get("base_resp", {}).get("ret", -1)
+
+        # 上报账号池
+        account_pool.report(account_id, ret=ret)
 
         if ret == 200003:
             return jsonify({"error": "登录已过期，请重新扫码登录"}), 401
@@ -108,6 +109,7 @@ def search_accounts():
 
     except req.RequestException as e:
         report_proxy_status(proxy_url, success=False)
+        account_pool.report(account_id, http_ok=False, error=str(e))
         return jsonify({"error": f"网络请求失败: {str(e)}"}), 500
 
 

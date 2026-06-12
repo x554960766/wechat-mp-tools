@@ -65,6 +65,16 @@ const App = {
                     Router.refreshCurrent();
                 }
             }
+
+            // 账号池踢出事件轮询（全局提示）
+            try {
+                const evData = await API.accountPool.events();
+                if (evData.events && evData.events.length > 0) {
+                    for (const ev of evData.events) {
+                        Toast.warning(`账号【${ev.nickname || '未知'}】${ev.reason}，已被移出账号池`);
+                    }
+                }
+            } catch (e) { /* silent */ }
         } catch (err) {
             console.error('Failed to fetch auth status:', err);
             this.updateLoginStatus(false, false, false);

@@ -69,6 +69,14 @@ const API = {
         checkCredentials() { return API.get('/api/auth/check-credentials', { showError: false }); },
     },
 
+    // ── Account Pool API ─────────────────────────────
+    accountPool: {
+        list()         { return API.get('/api/account-pool'); },
+        summary()      { return API.get('/api/account-pool/summary', { showError: false }); },
+        remove(id)     { return API.delete(`/api/account-pool/${id}`); },
+        events()       { return API.get('/api/account-pool/events', { showError: false }); },
+    },
+
     // ── Accounts API ─────────────────────────────────
     accounts: {
         list() { return API.get('/api/accounts'); },
