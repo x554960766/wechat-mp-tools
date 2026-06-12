@@ -386,8 +386,8 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         resp.encoding = "utf-8"
         raw_html = resp.text
 
-        # 检测是否为微信屏蔽、删除或出错页面（贴图画廊类型可能不含 js_content，但含有 picture_page_info_list）
-        has_js_content = 'id="js_content"' in raw_html or 'picture_page_info_list' in raw_html
+        # 检测是否为微信屏蔽、删除或出错页面（贴图画廊类型可能不含 js_content/js_article，但含有 picture_page_info_list）
+        has_js_content = 'id="js_content"' in raw_html or 'id="js_article"' in raw_html or 'picture_page_info_list' in raw_html
 
         # 提取标题辅助判断
         title_tag_match = re.search(r'<title>([^<]*)</title>', raw_html, re.I)
@@ -413,6 +413,14 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
             elif "系统出错" in raw_html:
                 is_error = True
                 error_msg = "系统出错"
+                is_permanent = False
+            elif 'id="app"' in raw_html:
+                is_error = True
+                error_msg = "隐私保护，仅内部分享可见"
+                is_permanent = True
+            else:
+                is_error = True
+                error_msg = "未知页面"
                 is_permanent = False
 
         if not is_error and any(kw in page_title_tag for kw in ["该内容暂时无法查看", "系统出错"]):
