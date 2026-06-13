@@ -9,8 +9,7 @@ from playwright.sync_api import sync_playwright
 
 from backend.config import get_settings, save_settings
 from backend.runtime import launch_chromium
-# [暂时禁用] 真实登录校验依赖（签名接口被风控阻挡，先关闭）
-# from backend.xiaohongshu import check_xhs_login
+from backend.xiaohongshu import check_xhs_login, XhsClient
 
 xhs_login_bp = Blueprint("xhs_login", __name__, url_prefix="/api/xhs-auth")
 
@@ -49,10 +48,10 @@ def _do_login():
             
             context = browser.new_context(
                 viewport={'width': 1280, 'height': 800},
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                user_agent=XhsClient.USER_AGENT
             )
             
-            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined}); Object.defineProperty(navigator, 'platform', {get: () => 'Win32'})")
             
             page = context.new_page()
             _set_login_state("scanning", "正在打开小红书主页，请扫码登录...", 30)
@@ -61,44 +60,43 @@ def _do_login():
             
             _set_login_state("scanning", "请在弹出的浏览器中完成扫码或验证码登录", 50)
 
-            # ── [暂时禁用] 真实登录校验（签名接口被风控阻挡，先关闭，仅获取 Cookie）──────
-            # # 记录初始（游客）web_session，登录成功后该值会变化；变化后用 /user/me 网络确认是否真登录。
-            # # 不能只看 web_session 是否存在——小红书对游客也下发 web_session。
-            # def _ws(cs):
-            #     return next((c['value'] for c in cs if c['name'] == 'web_session'), None)
-            # initial_ws = _ws(context.cookies())
-            #
-            # login_success = False
-            # cookie_str = ""
-            # for _ in range(80):  # 80 * 3 = 240 秒
-            #     if not browser.is_connected():
-            #         break
-            #
-            #     cookies = context.cookies()
-            #     ws = _ws(cookies)
-            #     if ws and ws != initial_ws:
-            #         # web_session 发生变化（游客 token 不会无故改变）→ 视为已登录。
-            #         # 再做一次网络确认，仅当明确判定为「游客」(False) 时才继续等待；
-            #         # 签名无法验证(None)时也接受，避免因 xhshow 签名不被认可而永远超时。
-            #         cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
-            #         if check_xhs_login(cookie_str).get("logged_in") is not False:
-            #             login_success = True
-            #             break
-            #     time.sleep(3)
-            # ──────────────────────────────────────────────────────────────────────
+            # 记录初始（游客）web_session，登录成功后该值会变化；变化后用 /user/me 网络确认是否真登录。
+            # 不能只看 web_session 是否存在——小红书对游客也下发 web_session。
+            def _ws(cs):
+                return next((c['value'] for c in cs if c['name'] == 'web_session'), None)
+            initial_ws = _ws(context.cookies())
 
-            # 仅获取 Cookie：检测到 web_session 即认为浏览器已就绪并保存（不区分游客/真登录）
             login_success = False
             cookie_str = ""
-            for _ in range(120):  # 120 * 2 = 240 秒
+            for _ in range(80):  # 80 * 3 = 240 秒
                 if not browser.is_connected():
                     break
+
+                current_url = page.url
                 cookies = context.cookies()
-                if any(c['name'] == 'web_session' for c in cookies):
-                    cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
-                    login_success = True
-                    break
-                time.sleep(2)
+                ws = _ws(cookies)
+                # Wait for the redirect to settle before extracting cookies
+                if ("explore" in current_url or "user/profile" in current_url) or (ws and ws != initial_ws):
+                    if "explore" in current_url or "user/profile" in current_url:
+                        time.sleep(2)
+                        cookies = context.cookies()
+                    # Deduplicate cookies by name
+                    cookie_dict = {}
+                    for c in cookies:
+                        cookie_dict[c['name']] = c['value']
+                    cookie_str = "; ".join([f"{k}={v}" for k, v in cookie_dict.items()])
+                    
+                    login_res = check_xhs_login(cookie_str)
+                    if login_res.get("logged_in") is True:
+                        login_success = True
+                        break
+                    elif login_res.get("logged_in") is None:
+                        err_msg = str(login_res.get("error", ""))
+                        if "登录已过期" not in err_msg and "异常" not in err_msg:
+                            if "login" not in current_url and "captcha" not in current_url:
+                                login_success = True
+                                break
+                time.sleep(3)
 
             if login_success:
                 _set_login_state("scanning", "登录成功，正在提取 Cookie...", 90)
@@ -133,20 +131,15 @@ def get_status():
     cookie = settings.get("xhs_cookie", "").strip()
     cookie_set = bool(cookie)
 
-    # ── [暂时禁用] 真实登录网络校验（签名接口被风控阻挡，先关闭）────────────────
-    # # 扫码进行中时不做网络校验，避免与登录线程重复请求 /user/me（前端此时只读 login_state）。
-    # if _xhs_login_state["status"] == "scanning":
-    #     return jsonify({"cookie_set": cookie_set, "logged_in": False, "guest": None, "login_state": _xhs_login_state})
-    # logged_in = False
-    # guest = True
-    # if cookie_set:
-    #     result = check_xhs_login(cookie)
-    #     logged_in = result.get("logged_in") is True
-    #     guest = result.get("guest") if result.get("guest") is not None else (not logged_in)
-    # ──────────────────────────────────────────────────────────────────────
-
-    # 仅按 Cookie 是否含 web_session 判断（不做网络校验，不区分游客/真登录）
-    logged_in = "web_session" in cookie
+    # 扫码进行中时不做网络校验，避免与登录线程重复请求 /user/me（前端此时只读 login_state）。
+    if _xhs_login_state["status"] == "scanning":
+        return jsonify({"cookie_set": cookie_set, "logged_in": False, "guest": None, "login_state": _xhs_login_state})
+    logged_in = False
+    guest = True
+    if cookie_set:
+        result = check_xhs_login(cookie)
+        logged_in = result.get("logged_in") is True
+        guest = result.get("guest") if result.get("guest") is not None else (not logged_in)
 
     return jsonify({
         "cookie_set": cookie_set,
@@ -170,21 +163,22 @@ def save_cookie_manually():
     if not cookie:
         return jsonify({"error": "Cookie 不能为空"}), 400
         
+    # Deduplicate manual cookie
+    cookie_dict = {}
+    for part in cookie.split(";"):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            cookie_dict[k.strip()] = v.strip()
+    cleaned_cookie = "; ".join([f"{k}={v}" for k, v in cookie_dict.items()])
+
     settings = get_settings()
-    settings["xhs_cookie"] = cookie
+    settings["xhs_cookie"] = cleaned_cookie
     save_settings(settings)
 
-    # ── [暂时禁用] 真实登录网络校验（签名接口被风控阻挡，先关闭）────────────────
-    # warning = None
-    # result = check_xhs_login(cookie)
-    # if result.get("logged_in") is False:
-    #     warning = "这是游客 Cookie（未登录），无法获取博主笔记列表，视频可能仅低清。请改用扫码登录或粘贴登录后的 Cookie。"
-    # ──────────────────────────────────────────────────────────────────────
-
-    # 仅按 web_session 是否存在给提示（不做网络校验）
     warning = None
-    if "web_session" not in cookie:
-        warning = "未检测到 web_session 字段，可能为游客 Cookie，下载视频可能仅低清。"
+    result = check_xhs_login(cleaned_cookie)
+    if result.get("logged_in") is False:
+        warning = "这是游客 Cookie（未登录），无法获取博主笔记列表，视频可能仅低清。请改用扫码登录或粘贴登录后的 Cookie。"
 
     return jsonify({
         "message": "Cookie 保存成功",

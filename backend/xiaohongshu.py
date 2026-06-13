@@ -10,6 +10,8 @@ import yaml
 import shutil
 import threading
 import requests
+import httpx
+import math
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlparse, quote
@@ -39,6 +41,12 @@ _download_tasks = {}
 _download_lock = threading.Lock()
 
 # ── 工具函数 ──────────────────────────────────────────────
+def lognormal_sleep(avg_delay: float = 6.0, sigma: float = 0.6):
+    """对数正态分布随机等待时间，模拟人类在浏览器中的浏览/阅读停留行为，比均匀随机更自然以规避频控"""
+    mu = math.log(avg_delay) - (sigma**2 / 2)
+    wait_time = max(0.5, random.lognormvariate(mu, sigma))
+    time.sleep(wait_time)
+
 def clean_filename(filename: str) -> str:
     """清理文件名，移除不支持的字符"""
     filename = re.sub(r'[\\/:*?"<>|\n\r\t]', "", filename)
@@ -137,7 +145,7 @@ img,video{{width:100%;border-radius:8px;margin:8px 0;display:block;}}
 
 # ── 小红书 API 客户端 ─────────────────────────────────────
 class XhsClient:
-    USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     
     BASE_HEADERS = {
         "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -153,7 +161,7 @@ class XhsClient:
             headers["cookie"] = cookie.strip()
         return headers
         
-    def _request(self, url: str, method: str = "GET", retries: int = None, **kwargs) -> requests.Response:
+    def _request(self, url: str, method: str = "GET", retries: int = None, **kwargs) -> httpx.Response:
         if retries is None:
             settings = get_settings()
             retries = settings.get("max_retries", 3)
@@ -163,16 +171,20 @@ class XhsClient:
             headers.update(kwargs["headers"])
         kwargs["headers"] = headers
         
+        if "allow_redirects" in kwargs:
+            kwargs["follow_redirects"] = kwargs.pop("allow_redirects")
+            
         last_err = None
         for attempt in range(retries):
             # Anti-scraping delay
-            time.sleep(random.uniform(1.0, 2.5))
+            lognormal_sleep(avg_delay=3.5)
             
             proxies = get_proxies_dict()
             proxy_url = proxies.get("http") if proxies else None
             
             try:
-                resp = requests.request(method, url, proxies=proxies, timeout=20, **kwargs)
+                with httpx.Client(http2=True, proxy=proxy_url, timeout=20, trust_env=False) as client:
+                    resp = client.request(method, url, **kwargs)
                 
                 if proxy_url:
                     report_proxy_status(proxy_url, success=True)
@@ -198,10 +210,11 @@ class XhsClient:
         proxies = get_proxies_dict()
         proxy_url = proxies.get("http") if proxies else None
         try:
-            resp = requests.get(url, headers=headers, proxies=proxies, timeout=15, allow_redirects=True)
+            with httpx.Client(http2=True, proxy=proxy_url, timeout=15, trust_env=False) as client:
+                resp = client.get(url, headers=headers, follow_redirects=True)
             if proxy_url:
                 report_proxy_status(proxy_url, success=True)
-            return resp.url
+            return str(resp.url)
         except Exception as e:
             if proxy_url:
                 report_proxy_status(proxy_url, success=False)
@@ -492,7 +505,7 @@ class XhsClient:
             "cover": cover
         }
 
-    def get_user_posted(self, user_id: str, xsec_token: str = "", cursor: str = "") -> tuple:
+    def get_user_posted(self, user_id: str, xsec_token: str = "", cursor: str = "", xsec_source: str = "pc_feed") -> tuple:
         """用 xhshow 签名调用 user_posted API，返回 (notes_list, has_more, next_cursor)。
         签名失败 / 风控 / 空数据时抛异常，由调用方降级到 SSR 解析。"""
         if Xhshow is None:
@@ -503,6 +516,10 @@ class XhsClient:
         if not user_id:
             raise ValueError("缺少 user_id")
 
+        # 确保 xsec_token 被 URL 解码，防止双重 URL 编码导致签名/Token失效
+        from urllib.parse import unquote
+        xsec_token = unquote(xsec_token)
+
         uri = "/api/sns/web/v1/user_posted"
         params = {
             "num": "30",
@@ -510,25 +527,38 @@ class XhsClient:
             "user_id": user_id,
             "image_formats": "jpg,webp,avif",
             "xsec_token": xsec_token,
-            "xsec_source": "pc_feed",
+            "xsec_source": xsec_source,
         }
         # 签名头按 xhshow 对 GET 的序列化规则（quote(value, safe=",")）计算，
         # 发送的查询串必须与签名时完全一致，否则 406。
-        headers = Xhshow().sign_headers_get(
+        # 统一 User-Agent，防止签名与请求头不一致触发风控。
+        from xhshow.config.config import CryptoConfig
+        config = CryptoConfig().with_overrides(PUBLIC_USERAGENT=self.USER_AGENT)
+        headers = Xhshow(config).sign_headers_get(
             uri=uri, cookies=cookie, params=params, sign_format="xyw", user_id=user_id
         )
         headers["cookie"] = cookie
         headers["user-agent"] = self.USER_AGENT
-        headers["referer"] = "https://www.xiaohongshu.com/"
+        headers["referer"] = f"https://www.xiaohongshu.com/user/profile/{user_id}"
+        headers["accept"] = "application/json, text/plain, */*"
+        headers["accept-language"] = "zh-CN,zh;q=0.9,en;q=0.8"
+        headers["sec-ch-ua"] = '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"'
+        headers["sec-ch-ua-mobile"] = "?0"
+        headers["sec-ch-ua-platform"] = '"Windows"'
+        headers["origin"] = "https://www.xiaohongshu.com"
+        headers["sec-fetch-dest"] = "empty"
+        headers["sec-fetch-mode"] = "cors"
+        headers["sec-fetch-site"] = "same-site"
 
         query = "&".join(f"{k}={quote(str(v), safe=',')}" for k, v in params.items())
         full_url = "https://edith.xiaohongshu.com" + uri + "?" + query
 
         proxies = get_proxies_dict()
         proxy_url = proxies.get("http") if proxies else None
-        time.sleep(random.uniform(1.0, 2.5))
+        lognormal_sleep(avg_delay=4.5)
         try:
-            resp = requests.get(full_url, headers=headers, proxies=proxies, timeout=20)
+            with httpx.Client(http2=True, proxy=proxy_url, timeout=20, trust_env=False) as client:
+                resp = client.get(full_url, headers=headers)
             if proxy_url:
                 report_proxy_status(proxy_url, success=True)
         except Exception as e:
@@ -639,13 +669,17 @@ class XhsClient:
             "url": url
         }
 
+        from urllib.parse import unquote
         token_match = re.search(r"xsec_token=([^&]+)", url)
-        xsec_token = token_match.group(1) if token_match else ""
+        xsec_token = unquote(token_match.group(1)) if token_match else ""
+
+        source_match = re.search(r"xsec_source=([^&]+)", url)
+        xsec_source = source_match.group(1) if source_match else "pc_feed"
 
         # 优先用签名接口（带 note_id、约 30 条）；失败时降级 SSR（无 note_id，仅供浏览）。
         result = {"user": user_obj}
         try:
-            notes_list, _has_more, _cursor = self.get_user_posted(user_id, xsec_token)
+            notes_list, _has_more, _cursor = self.get_user_posted(user_id, xsec_token, xsec_source=xsec_source)
             result["notes"] = notes_list
         except Exception as e:
             result["notes"] = self._parse_ssr_notes(state)
@@ -699,12 +733,26 @@ def check_xhs_login(cookie: str) -> dict:
         return {"logged_in": None, "guest": None, "user_id": "", "error": "未安装 xhshow"}
     uri = "/api/sns/web/v2/user/me"
     try:
-        headers = Xhshow().sign_headers_get(uri=uri, cookies=cookie, params={}, sign_format="xyw")
+        # 统一 User-Agent，防止签名与请求头不一致触发风控。
+        from xhshow.config.config import CryptoConfig
+        config = CryptoConfig().with_overrides(PUBLIC_USERAGENT=XhsClient.USER_AGENT)
+        headers = Xhshow(config).sign_headers_get(uri=uri, cookies=cookie, params={}, sign_format="xyw")
         headers["cookie"] = cookie
         headers["user-agent"] = XhsClient.USER_AGENT
         headers["referer"] = "https://www.xiaohongshu.com/"
+        headers["accept"] = "application/json, text/plain, */*"
+        headers["accept-language"] = "zh-CN,zh;q=0.9,en;q=0.8"
+        headers["sec-ch-ua"] = '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"'
+        headers["sec-ch-ua-mobile"] = "?0"
+        headers["sec-ch-ua-platform"] = '"Windows"'
+        headers["origin"] = "https://www.xiaohongshu.com"
+        headers["sec-fetch-dest"] = "empty"
+        headers["sec-fetch-mode"] = "cors"
+        headers["sec-fetch-site"] = "same-site"
         proxies = get_proxies_dict()
-        resp = requests.get("https://edith.xiaohongshu.com" + uri, headers=headers, proxies=proxies, timeout=15)
+        proxy_url = proxies.get("http") if proxies else None
+        with httpx.Client(http2=True, proxy=proxy_url, timeout=15, trust_env=False) as client:
+            resp = client.get("https://edith.xiaohongshu.com" + uri, headers=headers)
         body = resp.json()
         inner = body.get("data") or {}
         if body.get("success") and "guest" in inner:
@@ -884,7 +932,7 @@ def _do_xhs_download_thread(task_id: str, urls: list, account_name: str):
             save_json(XHS_HISTORY_FILE, history)
             
         if idx < len(urls) - 1:
-            time.sleep(random.uniform(1.5, 3.0))
+            lognormal_sleep(avg_delay=5.0)
             
     with _download_lock:
         task = _download_tasks.get(task_id)

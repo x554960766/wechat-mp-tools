@@ -77,7 +77,7 @@ https://www.xiaohongshu.com/explore/65f1a2b3...
                     
                     <div style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
                         <div style="width: 100px; height: 130px; background: var(--bg-tertiary); border-radius: 8px; overflow: hidden; flex-shrink: 0; position: relative;">
-                            <img src="${res.cover}" style="width:100%; height:100%; object-fit: cover;" onerror="this.src='/img/default-cover.png'" />
+                            <img src="${res.cover}" style="width:100%; height:100%; object-fit: cover;" onerror="this.onerror=null; this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\' viewBox=\'0 0 100 100\'><rect width=\'100%\' height=\'100%\' fill=\'%23eee\'/><text x=\'50%\' y=\'50%\' font-size=\'12\' text-anchor=\'middle\' alignment-baseline=\'middle\' fill=\'%23999\'>暂无封面</text></svg>'" />
                             <span style="position: absolute; top: 4px; left: 4px; background: rgba(0,0,0,0.6); color: white; padding: 1px 4px; border-radius: 3px; font-size: 0.65rem;">${icon} ${res.type}</span>
                         </div>
                         <div style="flex: 1; min-width: 200px;">

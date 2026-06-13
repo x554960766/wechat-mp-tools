@@ -163,7 +163,7 @@ const XhsNotesPage = {
                   onmouseleave="this.style.transform='none'; this.style.boxShadow='none';">
 
                     <div style="width: 100%; padding-top: 130%; background: var(--bg-tertiary); position: relative; overflow: hidden;">
-                        <img src="${note.cover}" style="position: absolute; top:0; left:0; width:100%; height:100%; object-fit: cover;" onerror="this.src='/img/default-cover.png'" />
+                        <img src="${note.cover}" style="position: absolute; top:0; left:0; width:100%; height:100%; object-fit: cover;" onerror="this.onerror=null; this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\' viewBox=\'0 0 100 100\'><rect width=\'100%\' height=\'100%\' fill=\'%23eee\'/><text x=\'50%\' y=\'50%\' font-size=\'12\' text-anchor=\'middle\' alignment-baseline=\'middle\' fill=\'%23999\'>暂无封面</text></svg>'" />
                         <span style="position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.6); color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">
                             ${icon} ${typeLabel}
                         </span>

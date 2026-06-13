@@ -38,9 +38,8 @@ const Router = {
             
             // 小红书页面
             'xhs_login': typeof XhsLoginPage !== 'undefined' ? XhsLoginPage : null,
-            // [暂时停用] 博主管理 / 笔记下载（依赖真实登录的签名接口，被风控阻挡）
-            // 'xhs_accounts': typeof XhsAccountsPage !== 'undefined' ? XhsAccountsPage : null,
-            // 'xhs_notes': typeof XhsNotesPage !== 'undefined' ? XhsNotesPage : null,
+            'xhs_accounts': typeof XhsAccountsPage !== 'undefined' ? XhsAccountsPage : null,
+            'xhs_notes': typeof XhsNotesPage !== 'undefined' ? XhsNotesPage : null,
             'xhs_download': typeof XhsDownloadPage !== 'undefined' ? XhsDownloadPage : null,
             'xhs_history': typeof XhsHistoryPage !== 'undefined' ? XhsHistoryPage : null,
         };
