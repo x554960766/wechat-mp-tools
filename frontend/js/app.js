@@ -48,6 +48,14 @@ const App = {
                 dyData = { logged_in: false };
             }
             
+            // 小红书登录状态
+            let xhsData = { logged_in: false };
+            try {
+                xhsData = await API.xhs.auth.status();
+            } catch (e) {
+                // ignore
+            }
+            
             const prevLoggedIn = this.isDouyinLoggedIn;
             this.isDouyinLoggedIn = !!dyData.logged_in;
             this.douyinAccountInfo = dyData.account_info || null;
@@ -55,7 +63,8 @@ const App = {
             this.updateLoginStatus(
                 wechatData.logged_in, 
                 wechatData.expired || wechatData.may_expired,
-                this.isDouyinLoggedIn
+                this.isDouyinLoggedIn,
+                !!xhsData.logged_in
             );
 
             if (this.isDouyinLoggedIn && !prevLoggedIn) {
@@ -100,13 +109,16 @@ const App = {
         }
     },
 
-    updateLoginStatus(loggedIn, mayExpired = false, dyLoggedIn = false) {
+    updateLoginStatus(loggedIn, mayExpired = false, dyLoggedIn = false, xhsLoggedIn = false) {
         const wechatDot = document.getElementById('login-status-dot');
         const wechatIndicator = document.getElementById('status-indicator');
         const wechatText = document.getElementById('status-text');
 
         const dyIndicator = document.getElementById('dy-status-indicator');
         const dyText = document.getElementById('dy-status-text');
+
+        const xhsIndicator = document.getElementById('xhs-status-indicator');
+        const xhsText = document.getElementById('xhs-status-text');
 
         // 更新微信状态显示
         if (loggedIn) {
@@ -133,6 +145,15 @@ const App = {
             if (dyIndicator) dyIndicator.className = 'status-dot warning';
             if (dyText) dyText.textContent = '需要登录 Cookie';
         }
+
+        // 更新小红书状态显示
+        if (xhsLoggedIn) {
+            if (xhsIndicator) xhsIndicator.className = 'status-dot online';
+            if (xhsText) xhsText.textContent = 'Cookie 已配置';
+        } else {
+            if (xhsIndicator) xhsIndicator.className = 'status-dot warning';
+            if (xhsText) xhsText.textContent = '需要登录 Cookie';
+        }
     },
 
     initSidebarAccordion() {
@@ -148,7 +169,7 @@ const App = {
     },
 
     toggleNavGroup(targetGroup) {
-        const groups = ['wechat', 'wechat_channels', 'douyin', 'common'];
+        const groups = ['wechat', 'wechat_channels', 'douyin', 'xiaohongshu', 'common'];
         groups.forEach(g => {
             const itemsEl = document.getElementById(`items-${g}`);
             const titleEl = document.querySelector(`.nav-group-title[data-group="${g}"]`);

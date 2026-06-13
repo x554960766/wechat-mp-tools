@@ -224,5 +224,31 @@ const API = {
                 throw err;
             }
         }
+    },
+
+    // ── XiaoHongShu API ──────────────────────────────
+    xhs: {
+        auth: {
+            status()        { return API.get('/api/xhs-auth/status', { showError: false }); },
+            login()         { return API.post('/api/xhs-auth/login'); },
+            saveCookie(c)   { return API.post('/api/xhs-auth/save-cookie', { cookie: c }); },
+            logout()        { return API.post('/api/xhs-auth/logout'); },
+        },
+        parse(url)                  { return API.post('/api/xhs/parse', { url }); },
+        download(urls)              { return API.post('/api/xhs/download', { urls }); },
+        listAccounts()              { return API.get('/api/xhs/accounts'); },
+        parseUser(url)              { return API.post('/api/xhs/accounts/parse', { url }); },
+        addAccount(user)            { return API.post('/api/xhs/accounts', user); },
+        removeAccount(userId)       { return API.delete(`/api/xhs/accounts/${userId}`); },
+        listNotes(userId)           { return API.get(`/api/xhs/accounts/${userId}/notes`); },
+        downloadNotes(notes, name)  { return API.post('/api/xhs/download-notes', { notes, account_name: name }); },
+        downloadStatus(taskId)      { return API.get(`/api/xhs/download-status/${taskId}`, { showError: false }); },
+        cancelDownload(taskId)      { return API.post(`/api/xhs/download-cancel/${taskId}`); },
+        getHistory(limit = 100)     { return API.get(`/api/xhs/history?limit=${limit}`); },
+        clearHistory()              { return API.delete('/api/xhs/history'); },
+        deleteHistory(index)        { return API.delete(`/api/xhs/history/${index}`); },
+        openFolder(account = '')    { return API.post('/api/xhs/open-folder', { account }); },
+        openFile(path)              { return API.post('/api/xhs/open-file', { path }); },
+        openParent(path)            { return API.post('/api/xhs/open-parent', { path }); },
     }
 };
