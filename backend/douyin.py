@@ -751,6 +751,165 @@ def _run_profile_download_task(sec_uid: str, max_pages: int, target_dir: Path):
         _set_task_state(status="failed")
 
 
+def _run_liked_download_task(sec_uid: str, max_pages: int, target_dir: Path):
+    """后台线程：使用 API 获取用户所有点赞作品并下载"""
+    _add_log(f"正在准备抓取点赞资源，目标 sec_uid: {sec_uid[:20] if sec_uid else '当前登录用户'}...")
+
+    client = DouyinClient()
+
+    try:
+        # 优化：如果是空，先获取一次自己的 sec_uid
+        if not sec_uid:
+            _add_log("未提供 sec_uid，正在获取登录用户自己的 sec_uid...")
+            sec_uid = client.get_self_sec_uid()
+            if not sec_uid:
+                raise Exception("未登录或获取个人信息失败，请先扫码登录获取 Cookie")
+            _add_log(f"成功获取当前登录用户 sec_uid: {sec_uid[:20]}...")
+
+        # 第一步：收集所有作品列表
+        _add_log("正在通过 API 获取用户点赞作品列表...")
+        all_items = []
+        cursor = 0
+        page = 0
+
+        while page < max_pages:
+            # 检查是否取消
+            if _task_cancel_event.is_set():
+                _add_log("⚠️ 用户取消了任务")
+                _set_task_state(status="cancelled")
+                return
+
+            page += 1
+            _add_log(f"正在获取第 {page} 页点赞数据 (cursor={cursor})...")
+
+            try:
+                res = client.get_liked_videos(sec_uid, cursor)
+                if res.get("status_code") != 0:
+                    msg = res.get("status_msg", "未知错误")
+                    raise Exception(f"获取失败: {msg}")
+                aweme_list = res.get("aweme_list") or []
+                next_cursor = res.get("max_cursor", 0)
+                has_more = res.get("has_more", 0)
+                if isinstance(has_more, bool):
+                    has_more_bool = has_more
+                else:
+                    has_more_bool = int(has_more) == 1
+            except Exception as e:
+                _add_log(f"⚠️ 获取第 {page} 页点赞数据失败: {str(e)}，尝试继续...")
+                break
+
+            if not aweme_list:
+                _add_log(f"第 {page} 页返回空数据，已到达最后一页")
+                break
+
+            all_items.extend(aweme_list)
+            _add_log(f"第 {page} 页获取到 {len(aweme_list)} 个作品，累计 {len(all_items)} 个")
+
+            if not has_more_bool:
+                _add_log("已获取全部点赞作品数据")
+                break
+
+            cursor = next_cursor
+            # 随机延迟避免风控
+            delay = random.uniform(1.5, 4.0)
+            _add_log(f"休眠 {delay:.1f} 秒规避频率风控...")
+            time.sleep(delay)
+
+        if not all_items:
+            _set_task_state(status="failed")
+            _add_log("❌ 未能获取到任何点赞作品数据，请确认登录状态或链接")
+            return
+
+        _add_log(f"🚀 点赞作品列表获取完成！共 {len(all_items)} 个作品待处理")
+        _reset_task_state(total=len(all_items))
+
+        # 第二步：逐个下载
+        downloaded = 0
+        failed = 0
+
+        for idx, item in enumerate(all_items, 1):
+            # 检查是否取消
+            if _task_cancel_event.is_set():
+                _add_log("⚠️ 用户取消了任务")
+                _set_task_state(status="cancelled")
+                return
+
+            _set_task_state(current_index=idx)
+
+            try:
+                media_info = DouyinClient.parse_media_info(item)
+                if not media_info["urls"]:
+                    _add_log(f"⚠️ 第 {idx} 项无可用资源链接，跳过")
+                    failed += 1
+                    _set_task_state(failed_count=failed)
+                    continue
+
+                _add_log(f"[{idx}/{len(all_items)}] 正在下载: {media_info['title'][:30]}...")
+                result = download_media(media_info, target_dir)
+                downloaded += 1
+                _set_task_state(downloaded_count=downloaded, current_title=result["title"])
+            except Exception as e:
+                failed += 1
+                _set_task_state(failed_count=failed)
+                _add_log(f"❌ 第 {idx} 项下载失败: {str(e)}")
+
+            # 每个作品之间的间隔
+            if idx < len(all_items):
+                delay = random.uniform(1.0, 3.0)
+                time.sleep(delay)
+
+        _add_log(f"🎉 批量下载点赞任务结束! 成功: {downloaded}，失败: {failed}")
+        _set_task_state(status="completed")
+
+    except Exception as outer_err:
+        _add_log(f"💥 批量下载点赞任务发生错误: {str(outer_err)}")
+        _set_task_state(status="failed")
+
+
+def _run_batch_items_download_task(items: list, target_dir: Path):
+    """后台线程：下载指定的作品列表"""
+    _add_log(f"正在准备批量下载选中的 {len(items)} 个作品...")
+    _reset_task_state(total=len(items))
+
+    downloaded = 0
+    failed = 0
+
+    for idx, item in enumerate(items, 1):
+        # 检查是否取消
+        if _task_cancel_event.is_set():
+            _add_log("⚠️ 用户取消了任务")
+            _set_task_state(status="cancelled")
+            return
+
+        _set_task_state(current_index=idx)
+
+        try:
+            media_info = DouyinClient.parse_media_info(item)
+            if not media_info["urls"]:
+                _add_log(f"⚠️ 第 {idx} 项无可用资源链接，跳过")
+                failed += 1
+                _set_task_state(failed_count=failed)
+                continue
+
+            _add_log(f"[{idx}/{len(items)}] 正在下载: {media_info['title'][:30]}...")
+            result = download_media(media_info, target_dir)
+            downloaded += 1
+            _set_task_state(downloaded_count=downloaded, current_title=result["title"])
+        except Exception as e:
+            failed += 1
+            _set_task_state(failed_count=failed)
+            _add_log(f"❌ 第 {idx} 项下载失败: {str(e)}")
+
+        # 每个作品之间的间隔
+        if idx < len(items):
+            delay = random.uniform(1.0, 3.0)
+            time.sleep(delay)
+
+    _add_log(f"🎉 批量下载任务结束! 成功: {downloaded}，失败: {failed}")
+    _set_task_state(status="completed")
+
+
+
 # ── Blueprint API 路由 ────────────────────────────────────
 
 @douyin_bp.route("/download-single", methods=["POST"])
@@ -836,6 +995,63 @@ def download_profile():
     return jsonify({
         "message": "已在后台启动主页批量解析下载任务",
         "sec_uid": sec_uid
+    })
+
+
+@douyin_bp.route("/download-liked", methods=["POST"])
+def download_liked():
+    """批量下载抖音点赞视频"""
+    if _task_state["status"] == "running":
+        return jsonify({"error": "当前已有正在运行的批量下载任务，请等待完成"}), 400
+
+    data = request.get_json() or {}
+    sec_uid = data.get("sec_uid", "").strip()
+    max_pages = int(data.get("max_pages", 10))
+
+    ensure_douyin_dirs()
+
+    # 启动异步后台批量下载任务
+    _set_task_state(status="running")
+    _task_cancel_event.clear()  # 清除取消标志
+    thread = threading.Thread(
+        target=_run_liked_download_task,
+        args=(sec_uid, max_pages, DOUYIN_DIR),
+        daemon=True
+    )
+    thread.start()
+
+    return jsonify({
+        "message": "已在后台启动点赞视频批量解析下载任务",
+        "sec_uid": sec_uid
+    })
+
+
+@douyin_bp.route("/download-batch", methods=["POST"])
+def download_batch():
+    """批量下载选中的抖音视频"""
+    if _task_state["status"] == "running":
+        return jsonify({"error": "当前已有正在运行的批量下载任务，请等待完成"}), 400
+
+    data = request.get_json() or {}
+    items = data.get("items", [])
+
+    if not items:
+        return jsonify({"error": "没有选中任何视频"}), 400
+
+    ensure_douyin_dirs()
+
+    _set_task_state(status="running")
+    _task_cancel_event.clear()
+    thread = threading.Thread(
+        target=_run_batch_items_download_task,
+        args=(items, DOUYIN_DIR),
+        daemon=True
+    )
+    thread.start()
+
+    return jsonify({
+        "message": "已在后台启动批量下载任务",
+        "count": len(items)
     })
 
 

@@ -3,22 +3,17 @@ const DyRecommendPage = {
     cursor: 0,
     loading: false,
     hasMore: true,
+    isSelectMode: false,
 
     render() {
         return `
             <div class="page-header">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div style="display: flex; justify-content: space-between; align-items: center; width: 100%; flex-wrap: wrap; gap: 16px;">
                     <div>
                         <h2 class="page-title">推荐视频</h2>
                         <p class="page-description">浏览抖音推荐流内容</p>
                     </div>
-                    <button class="btn btn-primary" onclick="DyRecommendPage.refresh()" id="dy-recommend-refresh">
-                        <svg viewBox="0 0 24 24" fill="none" style="width: 16px; height: 16px; margin-right: 6px;">
-                            <polyline points="23 4 23 10 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-                        </svg>
-                        刷新
-                    </button>
+                    <div id="dy-recommend-header-actions" style="display: flex; gap: 8px; align-items: center;"></div>
                 </div>
             </div>
 
@@ -51,6 +46,7 @@ const DyRecommendPage = {
         this.videos = [];
         this.cursor = 0;
         this.hasMore = true;
+        this.isSelectMode = false;
         await this.loadFeed();
     },
 
@@ -143,6 +139,8 @@ const DyRecommendPage = {
         grid.innerHTML = this.videos.map(video => this.renderVideoCard(video)).join('');
 
         loadmore.style.display = this.hasMore ? 'block' : 'none';
+        this.updateHeaderActions();
+        this.updateDownloadButton();
     },
 
     renderVideoCard(video) {
@@ -155,9 +153,10 @@ const DyRecommendPage = {
         const awemeId = video.aweme_id;
 
         return `
-            <div class="video-card" style="border-radius: 12px; overflow: hidden; background: var(--bg-secondary); transition: transform 0.3s, box-shadow 0.3s; cursor: pointer;" onmouseenter="this.style.transform='translateY(-4px)'; this.style.boxShadow='0 8px 24px rgba(0,0,0,0.15)';" onmouseleave="this.style.transform=''; this.style.boxShadow='';" onclick="if(event.target.tagName !== 'BUTTON') window.open('https://www.douyin.com/video/${awemeId}', '_blank')">
+            <div class="video-card" style="border-radius: 12px; overflow: hidden; background: var(--bg-secondary); transition: transform 0.3s, box-shadow 0.3s; cursor: pointer;" onmouseenter="this.style.transform='translateY(-4px)'; this.style.boxShadow='0 8px 24px rgba(0,0,0,0.15)';" onmouseleave="this.style.transform=''; this.style.boxShadow='';" onclick="DyRecommendPage.handleCardClick(event, '${awemeId}')">
                 <div style="position: relative; padding-top: 56.25%; background: var(--bg-body);">
                     <img src="${cover}" alt="${title}" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover;" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22400%22 height=%22300%22%3E%3Crect fill=%22%23f0f0f0%22 width=%22400%22 height=%22300%22/%3E%3C/svg%3E'">
+                    <input type="checkbox" id="dy-recommend-check-${awemeId}" class="dy-recommend-checkbox" style="position: absolute; top: 8px; left: 8px; width: 18px; height: 18px; cursor: pointer; z-index: 5; display: ${this.isSelectMode ? 'block' : 'none'};" onclick="event.stopPropagation(); DyRecommendPage.updateDownloadButton();" />
                     <div style="position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.6); color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem;">
                         ${this.formatDuration(video.video?.duration || 0)}
                     </div>
@@ -179,16 +178,22 @@ const DyRecommendPage = {
     },
 
     async downloadVideo(awemeId) {
+        const videoObj = this.videos.find(v => v.aweme_id === awemeId);
+        if (!videoObj) {
+            Toast.show('找不到该视频的数据', 'error');
+            return;
+        }
         try {
-            Toast.show('开始下载...', 'info');
-            const res = await fetch('/api/douyin/download-single', {
+            Toast.show('已加入下载队列...', 'info');
+            const res = await fetch('/api/douyin/download-batch', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ url: awemeId })
+                body: JSON.stringify({ items: [videoObj] })
             });
             const data = await res.json();
             if (data.error) throw new Error(data.error);
-            Toast.show('下载完成！', 'success');
+            Toast.show('下载已在后台启动！', 'success');
+            Router.navigate('dy_parse');
         } catch (err) {
             Toast.show(err.message, 'error');
         }
@@ -216,10 +221,182 @@ const DyRecommendPage = {
         return num.toString();
     },
 
-    formatDuration(seconds) {
+    formatDuration(ms) {
+        let seconds = Math.floor((ms || 0) / 1000);
+        const hrs = Math.floor(seconds / 3600);
+        seconds = seconds % 3600;
         const mins = Math.floor(seconds / 60);
         const secs = seconds % 60;
-        return `${mins}:${secs.toString().padStart(2, '0')}`;
+
+        if (hrs > 0) {
+            return `${hrs}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+        }
+        return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    },
+
+    handleCardClick(event, awemeId) {
+        if (event.target.tagName === 'BUTTON' || event.target.tagName === 'INPUT') return;
+        if (this.isSelectMode) {
+            this.toggleSelection(awemeId);
+        } else {
+            window.open(`https://www.douyin.com/video/${awemeId}`, '_blank');
+        }
+    },
+
+    enterSelectMode() {
+        this.isSelectMode = true;
+        document.querySelectorAll('.dy-recommend-checkbox').forEach(cb => cb.style.display = 'block');
+        this.updateHeaderActions();
+        this.updateDownloadButton();
+    },
+
+    exitSelectMode() {
+        this.isSelectMode = false;
+        document.querySelectorAll('.dy-recommend-checkbox').forEach(cb => {
+            cb.checked = false;
+            cb.style.display = 'none';
+        });
+        this.updateHeaderActions();
+    },
+
+    updateHeaderActions() {
+        const container = document.getElementById('dy-recommend-header-actions');
+        if (!container) return;
+
+        if (this.isSelectMode) {
+            container.innerHTML = `
+                <button class="btn btn-secondary btn-sm" id="dy-recommend-select-all-btn" onclick="DyRecommendPage.toggleSelectAll()" style="padding: 6px 12px; font-size: 0.85rem;">全选</button>
+                <button class="btn btn-primary" onclick="DyRecommendPage.downloadSelected()" id="dy-recommend-download-btn" disabled>
+                    <svg viewBox="0 0 24 24" fill="none" style="width: 16px; height: 16px; margin-right: 6px; display: inline-block; vertical-align: text-bottom;">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    开始下载 (0)
+                </button>
+                <button class="btn btn-secondary" onclick="DyRecommendPage.exitSelectMode()">
+                    取消批量下载
+                </button>
+            `;
+        } else {
+            container.innerHTML = `
+                <button class="btn btn-primary" onclick="DyRecommendPage.enterSelectMode()">
+                    <svg viewBox="0 0 24 24" fill="none" style="width: 16px; height: 16px; margin-right: 6px; display: inline-block; vertical-align: text-bottom;">
+                        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    批量下载
+                </button>
+                <button class="btn btn-secondary" onclick="DyRecommendPage.refresh()" id="dy-recommend-refresh">
+                    <svg viewBox="0 0 24 24" fill="none" style="width: 16px; height: 16px; margin-right: 6px;">
+                        <polyline points="23 4 23 10 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                    刷新
+                </button>
+            `;
+        }
+    },
+
+    toggleSelectAll() {
+        const checkboxes = document.querySelectorAll('.dy-recommend-checkbox');
+        const selected = this.getSelectedVideos();
+        const shouldSelectAll = selected.length < checkboxes.length;
+
+        checkboxes.forEach(cb => cb.checked = shouldSelectAll);
+        this.updateDownloadButton();
+    },
+
+    toggleSelection(awemeId) {
+        const checkbox = document.getElementById(`dy-recommend-check-${awemeId}`);
+        if (checkbox) {
+            checkbox.checked = !checkbox.checked;
+            this.updateDownloadButton();
+        }
+    },
+
+    selectAll() {
+        document.querySelectorAll('.dy-recommend-checkbox').forEach(cb => cb.checked = true);
+        this.updateDownloadButton();
+    },
+
+    deselectAll() {
+        document.querySelectorAll('.dy-recommend-checkbox').forEach(cb => cb.checked = false);
+        this.updateDownloadButton();
+    },
+
+    updateDownloadButton() {
+        const downloadBtn = document.getElementById('dy-recommend-download-btn');
+        if (!downloadBtn) return;
+        const selected = this.getSelectedVideos();
+        downloadBtn.disabled = selected.length === 0;
+
+        downloadBtn.innerHTML = `
+            <svg viewBox="0 0 24 24" fill="none" style="width: 16px; height: 16px; margin-right: 6px; display: inline-block; vertical-align: text-bottom;">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                <line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            开始下载 (${selected.length})
+        `;
+
+        const selectAllBtn = document.getElementById('dy-recommend-select-all-btn');
+        if (selectAllBtn) {
+            const checkboxes = document.querySelectorAll('.dy-recommend-checkbox');
+            if (checkboxes.length > 0 && selected.length === checkboxes.length) {
+                selectAllBtn.textContent = '取消全选';
+            } else {
+                selectAllBtn.textContent = '全选';
+            }
+        }
+    },
+
+    getSelectedVideos() {
+        const selected = [];
+        document.querySelectorAll('.dy-recommend-checkbox').forEach(cb => {
+            if (cb.checked) {
+                const awemeId = cb.id.replace('dy-recommend-check-', '');
+                const videoObj = this.videos.find(v => v.aweme_id === awemeId);
+                if (videoObj) {
+                    selected.push(videoObj);
+                }
+            }
+        });
+        return selected;
+    },
+
+    async downloadSelected() {
+        const selected = this.getSelectedVideos();
+        if (selected.length === 0) return;
+
+        const btn = document.getElementById('dy-recommend-download-btn');
+        let originalHTML = '';
+        if (btn) {
+            btn.disabled = true;
+            originalHTML = btn.innerHTML;
+            btn.textContent = '正在启动...';
+        }
+
+        try {
+            const res = await fetch('/api/douyin/download-batch', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ items: selected })
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+
+            Toast.show('批量下载已启动！', 'success');
+            this.exitSelectMode();
+            Router.navigate('dy_parse'); // 跳转到下载进度页面
+        } catch (err) {
+            Toast.show(err.message, 'error');
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = originalHTML;
+            }
+        }
     },
 
     destroy() {
