@@ -233,16 +233,22 @@ const DyUserPage = {
     },
 
     async downloadVideo(awemeId) {
+        const videoObj = this.videos.find(v => v.aweme_id === awemeId);
+        if (!videoObj) {
+            Toast.show('找不到该视频的数据', 'error');
+            return;
+        }
         try {
-            Toast.show('开始下载...', 'info');
-            const res = await fetch('/api/douyin/download-single', {
+            Toast.show('已加入下载队列...', 'info');
+            const res = await fetch('/api/douyin/download-batch', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ url: awemeId })
+                body: JSON.stringify({ items: [videoObj] })
             });
             const data = await res.json();
             if (data.error) throw new Error(data.error);
-            Toast.show('下载完成！', 'success');
+            Toast.show('下载已在后台启动！', 'success');
+            Router.navigate('dy_parse');
         } catch (err) {
             Toast.show(err.message, 'error');
         }

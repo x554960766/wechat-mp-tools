@@ -57,7 +57,18 @@ const DyParsePage = {
             </div>
         `;
     },
-    async init() {},
+    async init() {
+        // 检查是否有正在运行的下载任务，如果有则自动启动进度轮询
+        try {
+            const res = await fetch('/api/douyin/progress');
+            const data = await res.json();
+            if (data && data.status === 'running') {
+                this.startProgressPolling();
+            }
+        } catch (e) {
+            console.error('检查下载进度失败:', e);
+        }
+    },
     toggleType() {
         const isProfile = document.querySelector('input[name="dy-parse-type"]:checked').value === 'profile';
         document.getElementById('dy-profile-options').style.display = isProfile ? 'block' : 'none';
