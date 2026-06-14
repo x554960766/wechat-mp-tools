@@ -33,7 +33,7 @@
 ### 📕 小红书
 - **博主采集与笔记列表下载**：支持扫码登录自动获取/更新 Cookie 并记录博主。配合纯算签名算法与 **HTTP/2 协议**，稳定抓取博主已发布的完整笔记列表，支持一键批量勾选下载。
 - **单篇笔记解析**：支持粘贴笔记链接（含短链和分享文本）解析并无水印下载图片、视频及 Live 实况图，同步导出文案文本与离线网页。
-- **Cookie 去重与防失效**：自动合并去重重复的 WAF 认证 Cookie（如 `acw_tc`），防止因 WAF 干扰引发会话失效。
+- **Cookie 去重与防失效**：自动合并去重重复 WAF 认证 Cookie，防止因 WAF 干扰引发会话失效。
 - **对数正态防风控延迟**：内置对数正态随机等待时长（`lognormal_sleep`），高度模拟人类阅读行为模式，能有效降低触发频控及 HTTP 461/406 拦截的概率。
 
 ### 🎬 视频转码
@@ -41,61 +41,6 @@
 - 支持 MP4、MKV、MOV、WebM 和 MP3 音频提取。
 - 支持 H.264/H.265 编码，内置硬件加速（VideoToolbox/NVENC/QSV）及三阶段智能体积压缩兜底逻辑。
 - **环境自愈**：启动时自动将 Homebrew 及项目内置的 `ffmpeg` 路径添加至 `PATH`，若缺少环境则自动在前端隐藏相关菜单与按钮。
-
----
-
-## 源码运行
-
-推荐 Python 3.10 / 3.11 / 3.12。
-
-```bash
-git clone https://github.com/x554960766/wechat-mp-tools.git
-cd wechat-mp-tools
-
-python3 -m venv .venv
-source .venv/bin/activate
-
-pip install -r requirements.txt
-python3 -m playwright install chromium --no-shell
-```
-
-- **启动 Web 浏览器模式**：
-  ```bash
-  python3 app.py
-  ```
-  默认地址是 [http://localhost:5200](http://localhost:5200)。
-- **启动桌面窗口模式**：
-  ```bash
-  python3 main.py
-  ```
-
----
-
-## CLI 脚本
-
-如果只需要公众号文章相关的轻量脚本，可以直接运行根目录下的 CLI：
-
-| 脚本 | 作用 |
-| :--- | :--- |
-| `wechat_mp_login.py` | 扫码登录并保存公众号后台凭证到 `data/wechat_mp_config.json` |
-| `wechat_mp_article_fetcher.py` | 获取文章列表，并输出 JSON/Markdown |
-| `wechat_mp_batch_downloader.py` | 批量下载文章离线正文 |
-
----
-
-## 打包
-
-项目已集成 PyInstaller，详细说明见 [BUILD.md](BUILD.md)。
-
-- **本地打包 Full 版**（内置浏览器）：
-  ```bash
-  PLAYWRIGHT_BROWSERS_PATH=ms-playwright python3 -m playwright install chromium --no-shell
-  pyinstaller wechat_mp_tools.spec
-  ```
-- **本地打包 Lite 版**（依赖系统 Chrome/Edge）：
-  ```bash
-  WECHAT_MP_TOOLS_BUNDLE_BROWSER=0 pyinstaller wechat_mp_tools.spec
-  ```
 
 ---
 
@@ -109,17 +54,11 @@ python3 -m playwright install chromium --no-shell
 
 ## 常见问题
 
-### 1. Playwright 提示找不到浏览器？
-在终端运行：
-```bash
-python3 -m playwright install chromium --no-shell
-```
+### 1. macOS 运行客户端提示损坏或无法打开？
+由于未进行苹果官方开发者签名，首次打开时请在 Finder 中**右键**点击 `WeChat MP Tools.app` 选择“打开”，在弹出的安全对话框中确认即可。
 
-### 2. macOS 运行打包应用提示损坏或无法打开？
-由于未进行开发者签名，首次打开时请在 Finder 中**右键**点击 `WeChat MP Tools.app` 选择“打开”，在弹出的对话框中确认即可。
-
-### 3. Windows 打开无反应？
-请查看 `WeChat MP Tools\wechat_mp_tools.log`，部分精简版系统需要手动安装 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)。
+### 2. Windows 运行客户端无反应？
+请查看 `WeChat MP Tools\wechat_mp_tools.log`，部分精简版或旧版 Windows 系统需要手动安装 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)。
 
 ---
 
@@ -128,4 +67,3 @@ python3 -m playwright install chromium --no-shell
 1. 本项目所有功能仅用于个人学习、研究与本地备份，请勿用于任何商业用途或非法牟利。
 2. 使用本工具下载资源时需遵守平台的用户服务协议及相关法律法规。用户因滥用本工具造成的账号风控、限制或法律纠纷，由用户本人承担，与本项目作者无关。
 3. 本项目为开源软件，不提供任何形式的担保或售后承诺。
-
