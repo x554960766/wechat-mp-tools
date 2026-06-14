@@ -241,6 +241,7 @@ const API = {
         addAccount(user)            { return API.post('/api/xhs/accounts', user); },
         removeAccount(userId)       { return API.delete(`/api/xhs/accounts/${userId}`); },
         listNotes(userId)           { return API.get(`/api/xhs/accounts/${userId}/notes`); },
+        loadMoreNotes(userId, skipPages) { return API.post(`/api/xhs/accounts/${userId}/notes/more`, { skip_pages: skipPages }); },
         downloadNotes(notes, name)  { return API.post('/api/xhs/download-notes', { notes, account_name: name }); },
         downloadStatus(taskId)      { return API.get(`/api/xhs/download-status/${taskId}`, { showError: false }); },
         cancelDownload(taskId)      { return API.post(`/api/xhs/download-cancel/${taskId}`); },

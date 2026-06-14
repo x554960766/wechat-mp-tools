@@ -12,6 +12,7 @@ import threading
 import requests
 import httpx
 import math
+from curl_cffi import requests as curl_requests
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlparse, quote
@@ -149,7 +150,16 @@ class XhsClient:
     
     BASE_HEADERS = {
         "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+        "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
         "referer": "https://www.xiaohongshu.com/explore",
+        "sec-ch-ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "sec-ch-ua-mobile": "?0",
+        "sec-ch-ua-platform": '"Windows"',
+        "sec-fetch-dest": "document",
+        "sec-fetch-mode": "navigate",
+        "sec-fetch-site": "same-origin",
+        "sec-fetch-user": "?1",
+        "upgrade-insecure-requests": "1",
         "user-agent": USER_AGENT,
     }
     
@@ -161,44 +171,44 @@ class XhsClient:
             headers["cookie"] = cookie.strip()
         return headers
         
-    def _request(self, url: str, method: str = "GET", retries: int = None, **kwargs) -> httpx.Response:
+    def _request(self, url: str, method: str = "GET", retries: int = None, **kwargs) -> curl_requests.Response:
         if retries is None:
             settings = get_settings()
             retries = settings.get("max_retries", 3)
-            
+
         headers = self.get_headers()
         if "headers" in kwargs:
             headers.update(kwargs["headers"])
         kwargs["headers"] = headers
-        
-        if "allow_redirects" in kwargs:
-            kwargs["follow_redirects"] = kwargs.pop("allow_redirects")
-            
+
+        kwargs.pop("allow_redirects", None)
+
         last_err = None
         for attempt in range(retries):
-            # Anti-scraping delay
             lognormal_sleep(avg_delay=3.5)
-            
+
             proxies = get_proxies_dict()
             proxy_url = proxies.get("http") if proxies else None
-            
+
             try:
-                with httpx.Client(http2=True, proxy=proxy_url, timeout=20, trust_env=False) as client:
-                    resp = client.request(method, url, **kwargs)
-                
+                resp = curl_requests.request(
+                    method, url, impersonate="chrome124",
+                    proxy=proxy_url, timeout=20, **kwargs
+                )
+
                 if proxy_url:
                     report_proxy_status(proxy_url, success=True)
-                    
+
                 if resp.status_code in (461, 406):
                     raise ValueError("触发小红书风控限制（461/406），请在登录页更新 Cookie 或稍后再试。")
-                    
+
                 return resp
             except Exception as e:
                 if proxy_url:
                     report_proxy_status(proxy_url, success=False)
                 last_err = e
                 print(f"Request failed (attempt {attempt + 1}/{retries}) for {url}: {e}")
-                
+
         if last_err:
             raise last_err
         raise RuntimeError(f"请求 {url} 失败且未捕获到具体异常")
@@ -210,8 +220,10 @@ class XhsClient:
         proxies = get_proxies_dict()
         proxy_url = proxies.get("http") if proxies else None
         try:
-            with httpx.Client(http2=True, proxy=proxy_url, timeout=15, trust_env=False) as client:
-                resp = client.get(url, headers=headers, follow_redirects=True)
+            resp = curl_requests.get(
+                url, headers=headers, impersonate="chrome124",
+                proxy=proxy_url, timeout=15, allow_redirects=True
+            )
             if proxy_url:
                 report_proxy_status(proxy_url, success=True)
             return str(resp.url)
@@ -557,8 +569,10 @@ class XhsClient:
         proxy_url = proxies.get("http") if proxies else None
         lognormal_sleep(avg_delay=4.5)
         try:
-            with httpx.Client(http2=True, proxy=proxy_url, timeout=20, trust_env=False) as client:
-                resp = client.get(full_url, headers=headers)
+            resp = curl_requests.get(
+                full_url, headers=headers, impersonate="chrome124",
+                proxy=proxy_url, timeout=20
+            )
             if proxy_url:
                 report_proxy_status(proxy_url, success=True)
         except Exception as e:
@@ -598,6 +612,107 @@ class XhsClient:
                 "liked": self.format_count(interact.get("liked_count", "0")),
             })
         return notes_list, bool(data.get("has_more")), data.get("cursor", "")
+
+    def get_user_posted_via_browser(self, user_id: str, skip_pages: int = 0, max_pages: int = 3) -> tuple:
+        """用 Playwright 打开博主主页，拦截 user_posted API 响应获取笔记列表。
+        签名由页面内置 JS 生成，绕过 xhshow 签名失效问题。
+        skip_pages: 跳过前 N 页（已加载过的），max_pages: 本次最多捕获 N 页。
+        返回 (notes_list, has_more)。"""
+        from playwright.sync_api import sync_playwright
+        from backend.runtime import launch_chromium
+
+        cookie = get_settings().get("xhs_cookie", "").strip()
+        if not cookie:
+            raise RuntimeError("需要登录 Cookie")
+
+        profile_url = f"https://www.xiaohongshu.com/user/profile/{user_id}"
+        captured = []
+        page_count = [0]
+        has_more = [True]
+
+        def handle_response(response):
+            if "/api/sns/web/v1/user_posted" in response.url:
+                try:
+                    body = response.json()
+                    data = body.get("data") or {}
+                    notes = data.get("notes") or []
+                    page_count[0] += 1
+                    if page_count[0] > skip_pages:
+                        captured.extend(notes)
+                    if not data.get("has_more"):
+                        has_more[0] = False
+                except Exception:
+                    pass
+
+        with sync_playwright() as p:
+            browser = launch_chromium(p.chromium, headless=True, args=['--disable-blink-features=AutomationControlled'])
+            try:
+                context = browser.new_context(
+                    viewport={'width': 1280, 'height': 800},
+                    user_agent=self.USER_AGENT
+                )
+                context.add_init_script(
+                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                )
+                cookie_pairs = []
+                for part in cookie.split(";"):
+                    if "=" in part:
+                        k, v = part.split("=", 1)
+                        cookie_pairs.append({
+                            "name": k.strip(), "value": v.strip(),
+                            "domain": ".xiaohongshu.com", "path": "/"
+                        })
+                context.add_cookies(cookie_pairs)
+
+                page = context.new_page()
+                page.on("response", handle_response)
+                page.goto(profile_url, wait_until="networkidle", timeout=30000)
+
+                if page_count[0] == 0:
+                    page.wait_for_timeout(3000)
+
+                if page_count[0] == 0:
+                    for _ in range(3):
+                        page.mouse.wheel(0, 800)
+                        page.wait_for_timeout(2000)
+                        if page_count[0] > 0:
+                            break
+
+                target_pages = skip_pages + max_pages
+                max_scroll_rounds = target_pages * 5
+                for _ in range(max_scroll_rounds):
+                    if not has_more[0]:
+                        break
+                    if page_count[0] >= target_pages:
+                        break
+                    page.mouse.wheel(0, 1000)
+                    page.wait_for_timeout(2000)
+            finally:
+                browser.close()
+
+        if not captured and skip_pages == 0:
+            raise RuntimeError("浏览器未拦截到 user_posted 响应")
+
+        notes_list = []
+        for it in captured:
+            if not isinstance(it, dict):
+                continue
+            cover_obj = it.get("cover") or {}
+            cover = cover_obj.get("url_default") or cover_obj.get("url") or ""
+            if not cover:
+                info_list = cover_obj.get("info_list") or []
+                if info_list:
+                    cover = (info_list[-1] or {}).get("url", "")
+            interact = it.get("interact_info") or {}
+            notes_list.append({
+                "note_id": it.get("note_id", ""),
+                "xsec_token": it.get("xsec_token", ""),
+                "title": it.get("display_title", ""),
+                "cover": cover,
+                "type": "video" if it.get("type") == "video" else "normal",
+                "liked": self.format_count(interact.get("liked_count", "0")),
+            })
+        return notes_list, has_more[0]
 
     def _parse_ssr_notes(self, state: dict) -> list:
         """从主页 __INITIAL_STATE__ 解析首屏笔记（降级用）。
@@ -676,16 +791,23 @@ class XhsClient:
         source_match = re.search(r"xsec_source=([^&]+)", url)
         xsec_source = source_match.group(1) if source_match else "pc_feed"
 
-        # 优先用签名接口（带 note_id、约 30 条）；失败时降级 SSR（无 note_id，仅供浏览）。
+        # 优先用浏览器拦截（签名由页面 JS 生成，不依赖 xhshow）；
+        # 失败时尝试 xhshow 签名接口；最后降级 SSR（无 note_id，仅供浏览）。
         result = {"user": user_obj}
         try:
-            notes_list, _has_more, _cursor = self.get_user_posted(user_id, xsec_token, xsec_source=xsec_source)
+            notes_list, browser_has_more = self.get_user_posted_via_browser(user_id)
             result["notes"] = notes_list
-        except Exception as e:
-            result["notes"] = self._parse_ssr_notes(state)
-            result["warning"] = (
-                f"博主笔记列表签名接口不可用（{e}）；已降级为主页首屏解析，"
-                "该列表缺少笔记 ID 无法下载，请改用「链接下载」逐条下载。"
+            result["has_more"] = browser_has_more
+        except Exception as browser_err:
+            print(f"浏览器拦截获取笔记列表失败: {browser_err}")
+            try:
+                notes_list, _has_more, _cursor = self.get_user_posted(user_id, xsec_token, xsec_source=xsec_source)
+                result["notes"] = notes_list
+            except Exception as e:
+                result["notes"] = self._parse_ssr_notes(state)
+                result["warning"] = (
+                    f"笔记列表获取失败（浏览器: {browser_err}；签名: {e}）；已降级为主页首屏解析，"
+                    "该列表缺少笔记 ID 无法下载，请改用「链接下载」逐条下载。"
             )
         return result
 
@@ -751,8 +873,10 @@ def check_xhs_login(cookie: str) -> dict:
         headers["sec-fetch-site"] = "same-site"
         proxies = get_proxies_dict()
         proxy_url = proxies.get("http") if proxies else None
-        with httpx.Client(http2=True, proxy=proxy_url, timeout=15, trust_env=False) as client:
-            resp = client.get("https://edith.xiaohongshu.com" + uri, headers=headers)
+        resp = curl_requests.get(
+            "https://edith.xiaohongshu.com" + uri, headers=headers,
+            impersonate="chrome124", proxy=proxy_url, timeout=15
+        )
         body = resp.json()
         inner = body.get("data") or {}
         if body.get("success") and "guest" in inner:
@@ -1059,16 +1183,32 @@ def list_user_notes(user_id):
         if acc.get("user_id") == user_id:
             url = acc.get("url")
             break
-            
+
     if not url:
         url = f"https://www.xiaohongshu.com/user/profile/{user_id}"
-        
+
     client = XhsClient()
     try:
         profile = client.get_user_profile(url)
-        return jsonify({"notes": profile.get("notes", []), "warning": profile.get("warning")})
+        return jsonify({
+            "notes": profile.get("notes", []),
+            "has_more": profile.get("has_more", False),
+            "warning": profile.get("warning")
+        })
     except Exception as e:
         return jsonify({"error": f"获取博主笔记失败: {str(e)}"}), 500
+
+@xhs_bp.route("/accounts/<user_id>/notes/more", methods=["POST"])
+def load_more_notes(user_id):
+    data = request.get_json() or {}
+    skip_pages = data.get("skip_pages", 3)
+
+    client = XhsClient()
+    try:
+        notes_list, has_more = client.get_user_posted_via_browser(user_id, skip_pages=skip_pages, max_pages=3)
+        return jsonify({"notes": notes_list, "has_more": has_more})
+    except Exception as e:
+        return jsonify({"error": f"加载更多笔记失败: {str(e)}"}), 500
 
 @xhs_bp.route("/download-notes", methods=["POST"])
 def download_notes():

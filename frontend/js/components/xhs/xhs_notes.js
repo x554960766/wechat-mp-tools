@@ -8,6 +8,10 @@ const XhsNotesPage = {
     _warning: null,
     _selectedUserId: '',
     _selectedAccountName: '',
+    _multiSelect: false,
+    _hasMore: false,
+    _loadedPages: 0,
+    _loadingMore: false,
 
     render() {
         return `
@@ -27,12 +31,13 @@ const XhsNotesPage = {
                 </div>
                 
                 <div style="display: flex; gap: 10px;">
+                    <button class="btn btn-secondary" onclick="XhsNotesPage.toggleMultiSelect()" id="btn-xhs-multi-select" style="min-width: 80px;">☑ 多选</button>
                     <button class="btn btn-secondary" onclick="XhsNotesPage.refreshNotes()">🔄 刷新列表</button>
-                    <button class="btn btn-primary" id="btn-xhs-download-selected" onclick="XhsNotesPage.downloadSelected()" disabled>📥 下载选中 (0)</button>
+                    <button class="btn btn-primary" id="btn-xhs-download-selected" onclick="XhsNotesPage.downloadSelected()" style="display:none;" disabled>📥 下载选中 (0)</button>
                 </div>
             </div>
 
-            <div class="info-alert" style="background: rgba(0,122,255,0.05); border: 1px solid rgba(0,122,255,0.15); color: var(--primary); padding: 12px 16px; border-radius: 8px; font-size: 0.88rem; margin-bottom: 20px; display: flex; align-items: center; justify-content: space-between;">
+            <div class="info-alert" id="xhs-select-bar" style="background: rgba(0,122,255,0.05); border: 1px solid rgba(0,122,255,0.15); color: var(--primary); padding: 12px 16px; border-radius: 8px; font-size: 0.88rem; margin-bottom: 20px; display: none; align-items: center; justify-content: space-between;">
                 <span>💡 <strong>提示：</strong>由于小红书风控签名限制，当前仅能获取博主主页首屏约 30 条笔记。</span>
                 <div style="display: flex; gap: 12px;">
                     <span onclick="XhsNotesPage.selectAll()" style="cursor: pointer; font-weight: 600; text-decoration: underline;">全选</span>
@@ -88,6 +93,8 @@ const XhsNotesPage = {
         if (!userId) {
             this._selectedAccountName = '';
             this._notes = [];
+            this._hasMore = false;
+            this._loadedPages = 0;
             if (grid) grid.innerHTML = `<div style="grid-column: 1/-1; text-align: center; color: var(--text-muted); padding: 60px 24px;">请先选择博主</div>`;
             return;
         }
@@ -103,6 +110,8 @@ const XhsNotesPage = {
             const res = await API.xhs.listNotes(userId);
             const notes = Array.isArray(res) ? res : (res.notes || []);
             this._notes = notes;
+            this._hasMore = res.has_more || false;
+            this._loadedPages = 3;
             this._warning = (res && !Array.isArray(res)) ? res.warning : null;
             this.renderNotes();
         } catch (err) {
@@ -133,19 +142,30 @@ const XhsNotesPage = {
             return;
         }
 
+        const isMulti = this._multiSelect;
+
         grid.innerHTML = warningBanner + this._notes.map((note, idx) => {
             const isVideo = note.type === 'video';
             const icon = isVideo ? '🎬' : '📸';
             const typeLabel = isVideo ? '视频' : '图文';
             const title = note.title ? this._esc(note.title) : '无标题笔记';
             const hasId = !!note.note_id;
-            const clickHandler = hasId ? `XhsNotesPage.toggleNoteSelection(${idx})` : `XhsNotesPage.openInBrowser()`;
-            const cornerControl = hasId
+
+            const cardClick = isMulti && hasId
+                ? `XhsNotesPage.toggleNoteSelection(${idx})`
+                : hasId
+                    ? `XhsNotesPage.openNoteDetail('${note.note_id}', '${(note.xsec_token || '').replace(/'/g, "\\'")}')`
+                    : `XhsNotesPage.openInBrowser()`;
+
+            const cornerControl = isMulti && hasId
                 ? `<input type="checkbox" id="xhs-note-check-${idx}" style="position: absolute; top: 8px; right: 8px; width: 18px; height: 18px; cursor: pointer; pointer-events: none;" />`
-                : `<span style="position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.6); color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem;">🔗 浏览器打开</span>`;
-            const footerLeft = hasId
-                ? `<span>ID: ${note.note_id.substring(0, 8)}...</span>`
-                : `<span style="color: var(--warning);">无ID·点击在浏览器打开</span>`;
+                : !hasId
+                    ? `<span style="position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.6); color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.7rem;">🔗 浏览器打开</span>`
+                    : '';
+
+            const downloadBtn = hasId
+                ? `<button class="btn btn-secondary" style="padding: 2px 8px; font-size: 0.7rem; border-radius: 4px; min-width: auto;" onclick="event.stopPropagation(); XhsNotesPage.downloadSingleNote(${idx})">📥 下载</button>`
+                : '';
 
             return `
                 <div style="
@@ -158,12 +178,12 @@ const XhsNotesPage = {
                     position: relative;
                     cursor: pointer;
                     transition: transform 0.2s, box-shadow 0.2s;
-                " onclick="${clickHandler}"
+                " onclick="${cardClick}"
                   onmouseenter="this.style.transform='scale(1.02)'; this.style.boxShadow='var(--shadow-md)';"
                   onmouseleave="this.style.transform='none'; this.style.boxShadow='none';">
 
                     <div style="width: 100%; padding-top: 130%; background: var(--bg-tertiary); position: relative; overflow: hidden;">
-                        <img src="${note.cover}" style="position: absolute; top:0; left:0; width:100%; height:100%; object-fit: cover;" onerror="this.onerror=null; this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'100\' height=\'100\' viewBox=\'0 0 100 100\'><rect width=\'100%\' height=\'100%\' fill=\'%23eee\'/><text x=\'50%\' y=\'50%\' font-size=\'12\' text-anchor=\'middle\' alignment-baseline=\'middle\' fill=\'%23999\'>暂无封面</text></svg>'" />
+                        <img src="${note.cover}" style="position: absolute; top:0; left:0; width:100%; height:100%; object-fit: cover;" onerror="this.onerror=null; this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'100\\' height=\\'100\\' viewBox=\\'0 0 100 100\\'><rect width=\\'100%\\' height=\\'100%\\' fill=\\'%23eee\\'/><text x=\\'50%\\' y=\\'50%\\' font-size=\\'12\\' text-anchor=\\'middle\\' alignment-baseline=\\'middle\\' fill=\\'%23999\\'>暂无封面</text></svg>'" />
                         <span style="position: absolute; top: 8px; left: 8px; background: rgba(0,0,0,0.6); color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">
                             ${icon} ${typeLabel}
                         </span>
@@ -175,13 +195,60 @@ const XhsNotesPage = {
                             ${title}
                         </div>
                         <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.75rem; color: var(--text-muted);">
-                            ${footerLeft}
                             <span>❤️ ${note.liked}</span>
+                            ${downloadBtn}
                         </div>
                     </div>
                 </div>
             `;
         }).join('');
+
+        if (this._hasMore) {
+            grid.innerHTML += `
+                <div style="grid-column: 1/-1; text-align: center; padding: 20px 0;">
+                    <button class="btn btn-secondary" id="btn-xhs-load-more" onclick="XhsNotesPage.loadMore()" style="min-width: 200px; padding: 10px 24px;">
+                        📄 加载更多
+                    </button>
+                    <p style="color: var(--text-muted); font-size: 0.8rem; margin-top: 8px;">已加载 ${this._notes.length} 篇笔记</p>
+                </div>
+            `;
+        }
+    },
+
+    async loadMore() {
+        if (this._loadingMore || !this._hasMore || !this._selectedUserId) return;
+        this._loadingMore = true;
+
+        const btn = document.getElementById('btn-xhs-load-more');
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = '⏳ 加载中...';
+        }
+
+        try {
+            const res = await API.xhs.loadMoreNotes(this._selectedUserId, this._loadedPages);
+            const newNotes = res.notes || [];
+            this._notes = this._notes.concat(newNotes);
+            this._hasMore = res.has_more || false;
+            this._loadedPages += 3;
+            this.renderNotes();
+        } catch (err) {
+            Toast.error('加载更多失败: ' + err.message);
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = '📄 加载更多';
+            }
+        } finally {
+            this._loadingMore = false;
+        }
+    },
+
+    openNoteDetail(noteId, xsecToken) {
+        let url = `https://www.xiaohongshu.com/explore/${noteId}`;
+        if (xsecToken) {
+            url += `?xsec_token=${xsecToken}&xsec_source=pc_user`;
+        }
+        window.open(url, '_blank');
     },
 
     openInBrowser() {
@@ -192,6 +259,37 @@ const XhsNotesPage = {
             Toast.info('已打开博主主页：点开目标笔记 → 复制地址栏链接 → 到「链接下载」页粘贴下载。');
         } else {
             Toast.warning('未找到该博主主页链接');
+        }
+    },
+
+    toggleMultiSelect() {
+        this._multiSelect = !this._multiSelect;
+        const btn = document.getElementById('btn-xhs-multi-select');
+        const downloadBtn = document.getElementById('btn-xhs-download-selected');
+        const selectBar = document.getElementById('xhs-select-bar');
+
+        if (btn) {
+            btn.textContent = this._multiSelect ? '☑ 退出多选' : '☑ 多选';
+            btn.className = this._multiSelect ? 'btn btn-primary' : 'btn btn-secondary';
+        }
+        if (downloadBtn) downloadBtn.style.display = this._multiSelect ? '' : 'none';
+        if (selectBar) selectBar.style.display = this._multiSelect ? 'flex' : 'none';
+
+        this.renderNotes();
+        if (!this._multiSelect) this.updateDownloadButton();
+    },
+
+    async downloadSingleNote(idx) {
+        const note = this._notes[idx];
+        if (!note || !note.note_id) return;
+
+        try {
+            const res = await API.xhs.downloadNotes([note], this._selectedAccountName);
+            if (res.task_id) {
+                this.showProgressModal(res.task_id, 1);
+            }
+        } catch (err) {
+            Toast.error('下载失败: ' + err.message);
         }
     },
 
