@@ -4,6 +4,10 @@
 
 项目支持通过浏览器访问 Flask 后端，也可以通过 `pywebview` 以桌面应用方式运行。
 
+> [!TIP]
+> **无需配置本地开发环境，开箱即用！**
+> 本项目已通过 GitHub Actions 自动构建出 Windows 与 macOS 的可执行客户端。请直接前往 [👉 GitHub Releases 1.0 下载页面](https://github.com/x554960766/wechat-mp-tools/releases/tag/1.0) 下载最新版本。
+
 ---
 
 ## 功能概览
@@ -116,3 +120,12 @@ python3 -m playwright install chromium --no-shell
 
 ### 3. Windows 打开无反应？
 请查看 `WeChat MP Tools\wechat_mp_tools.log`，部分精简版系统需要手动安装 [Microsoft Edge WebView2 Runtime](https://developer.microsoft.com/en-us/microsoft-edge/webview2/)。
+
+---
+
+## 免责声明
+
+1. 本项目所有功能仅用于个人学习、研究与本地备份，请勿用于任何商业用途或非法牟利。
+2. 使用本工具下载资源时需遵守平台的用户服务协议及相关法律法规。用户因滥用本工具造成的账号风控、限制或法律纠纷，由用户本人承担，与本项目作者无关。
+3. 本项目为开源软件，不提供任何形式的担保或售后承诺。
+
