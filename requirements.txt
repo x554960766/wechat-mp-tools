@@ -12,3 +12,4 @@ clr_loader>=0.2; sys_platform == "win32"
 pyobjc-framework-Cocoa>=10.0; sys_platform == "darwin"
 pyobjc-framework-WebKit>=10.0; sys_platform == "darwin"
 xhshow>=0.2.0
+pyyaml>=6.0
