@@ -44,6 +44,53 @@
 
 ---
 
+## 本地运行与开发步骤
+
+如果你需要直接从源码在本地运行项目，或者进行二次开发，请按照以下步骤进行：
+
+### 1. 克隆或下载源码
+```bash
+git clone https://github.com/x554960766/wechat-mp-tools.git
+cd wechat-mp-tools
+```
+
+### 2. 创建并激活虚拟环境 (可选)
+建议为项目创建独立的虚拟环境：
+* **macOS / Linux**:
+  ```bash
+  python3 -m venv venv
+  source venv/bin/activate
+  ```
+* **Windows**:
+  ```cmd
+  python -m venv venv
+  venv\Scripts\activate
+  ```
+
+### 3. 安装依赖库
+```bash
+pip install -r requirements.txt
+```
+
+### 4. 安装 Playwright 浏览器依赖
+项目中的部分采集功能（如小红书、抖音、微信视频号）依赖 Playwright 浏览器。请在终端执行以下命令进行初始化安装：
+```bash
+playwright install chromium
+```
+
+### 5. 启动项目
+* **以桌面端模式启动 (推荐，基于 pywebview 原生窗口)**:
+  ```bash
+  python main.py
+  ```
+* **以浏览器网页模式启动**:
+  ```bash
+  python app.py
+  ```
+  启动后，程序会自动在你的默认浏览器中打开操作页面。如果未自动打开，可手动访问 [http://localhost:5200](http://localhost:5200)。
+
+---
+
 ## 数据目录
 
 - macOS：`~/Library/Application Support/WeChat MP Tools/data/`
