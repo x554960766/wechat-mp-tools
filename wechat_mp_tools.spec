@@ -55,6 +55,10 @@ hiddenimports = [
     'backend.rss_scheduler',
     'backend.transcode',
     'yaml',
+    'httpx',
+    'sniffio',
+    'httpcore',
+    'h11',
     
     # pywebview 核心支持
     'webview',
