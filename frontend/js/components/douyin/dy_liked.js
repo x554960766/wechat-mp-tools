@@ -57,6 +57,10 @@ const DyLikedPage = {
         await this.loadFeed();
     },
 
+    onShow() {
+        this.syncDownloadButtonStatus();
+    },
+
     async loadFeed() {
         if (this.loading) return;
 
@@ -272,6 +276,10 @@ const DyLikedPage = {
                 </button>
             `;
         }
+
+        if (!this.isSelectMode) {
+            this.syncDownloadButtonStatus();
+        }
     },
 
     toggleSelectAll() {
@@ -426,14 +434,61 @@ const DyLikedPage = {
             if (data.error) throw new Error(data.error);
 
             Toast.show('批量下载点赞作品已启动！', 'success');
+            this.syncDownloadButtonStatus();
             Router.navigate('dy_parse');
         } catch (err) {
             Toast.show(err.message, 'error');
-            if (btn) {
-                btn.disabled = false;
-                btn.textContent = '📥 批量下载全部点赞';
-            }
+            this.syncDownloadButtonStatus();
         }
+    },
+
+    async cancelDownloadAll() {
+        const btn = document.getElementById('dy-liked-download-all-btn');
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = '正在取消...';
+        }
+        try {
+            const res = await fetch('/api/douyin/cancel-download', { method: 'POST' });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            Toast.show(data.message, 'info');
+            this.updateDownloadAllButton('cancelled');
+        } catch (err) {
+            Toast.show(err.message, 'error');
+            if (btn) btn.disabled = false;
+        }
+    },
+
+    updateDownloadAllButton(status) {
+        const btn = document.getElementById('dy-liked-download-all-btn');
+        if (!btn) return;
+
+        if (status === 'running') {
+            btn.className = "btn btn-error";
+            btn.onclick = () => DyLikedPage.cancelDownloadAll();
+            btn.innerHTML = `
+                <svg viewBox="0 0 24 24" fill="none" style="width: 16px; height: 16px; margin-right: 6px; color: var(--error);">
+                    <rect x="4" y="4" width="16" height="16" rx="2" fill="currentColor"/>
+                </svg>
+                取消点赞下载
+            `;
+            btn.disabled = false;
+        } else {
+            btn.className = "btn btn-primary";
+            btn.onclick = () => DyLikedPage.downloadAll();
+            btn.innerHTML = `📥 批量下载全部点赞`;
+            btn.disabled = false;
+        }
+    },
+
+    syncDownloadButtonStatus() {
+        fetch('/api/douyin/progress')
+            .then(res => res.json())
+            .then(data => {
+                this.updateDownloadAllButton(data.status);
+            })
+            .catch(() => {});
     },
 
     destroy() {

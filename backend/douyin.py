@@ -494,11 +494,18 @@ class DouyinClient:
     def parse_media_info(detail: dict) -> dict:
         """
         从 aweme_detail 中提取下载所需的资源信息
-        返回: {type, title, urls, aweme_id}
+        返回: {type, title, urls, aweme_id, nickname}
         """
         aweme_id = detail.get("aweme_id", "unknown")
         desc = detail.get("desc", "")
         title = clean_filename(desc) if desc else f"抖音作品_{aweme_id}"
+
+        author_nickname = ""
+        if "author" in detail and isinstance(detail["author"], dict):
+            author_nickname = detail["author"].get("nickname", "")
+        nickname = clean_filename(author_nickname.strip()) if author_nickname else ""
+        if not nickname or nickname == "untitled":
+            nickname = "未知用户"
 
         # 判断类型：images 存在且非空 → 图文；否则 → 视频
         images = detail.get("images")
@@ -515,6 +522,7 @@ class DouyinClient:
                 "title": title,
                 "urls": urls,
                 "aweme_id": aweme_id,
+                "nickname": nickname,
             }
         else:
             # 视频类型 — 从多个地址源中选择最佳无水印版本
@@ -582,6 +590,7 @@ class DouyinClient:
                 "title": title,
                 "urls": [chosen_url] if chosen_url else [],
                 "aweme_id": aweme_id,
+                "nickname": nickname,
             }
 
 
@@ -620,6 +629,7 @@ def download_media(media_info: dict, target_dir: Path) -> dict:
     title = media_info["title"]
     item_type = media_info["type"]
     urls = media_info["urls"]
+    nickname = media_info.get("nickname", "未知用户")
 
     if not urls:
         raise Exception("无法获取资源下载链接")
@@ -627,14 +637,17 @@ def download_media(media_info: dict, target_dir: Path) -> dict:
     title_with_id = f"{aweme_id}_{title}"
     total_bytes = 0
 
+    user_dir = target_dir / nickname
+    user_dir.mkdir(parents=True, exist_ok=True)
+
     if item_type == "video":
-        save_file = target_dir / f"{title_with_id}.mp4"
+        save_file = user_dir / f"{title_with_id}.mp4"
         _add_log(f"🎬 正在下载无水印视频: {save_file.name}")
         total_bytes = download_file(urls[0], save_file)
         _add_log(f"✅ 视频下载完成! 大小: {total_bytes / (1024 * 1024):.2f} MB")
         add_history_item(title, "视频", save_file, total_bytes)
     else:
-        folder_path = target_dir / title_with_id
+        folder_path = user_dir / title_with_id
         folder_path.mkdir(parents=True, exist_ok=True)
         _add_log(f"📸 正在下载图集 (共 {len(urls)} 张) 到目录: {folder_path.name}")
         for idx, img_url in enumerate(urls, 1):

@@ -38,19 +38,19 @@ const DyParsePage = {
             <div class="card" id="dy-download-status" style="display: none;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--spacing-md);">
                     <h3 style="margin: 0; font-size: 1.1rem;">下载进度</h3>
-                    <button class="btn btn-secondary" onclick="DyParsePage.cancelDownload()" id="dy-cancel-btn">
-                        <svg viewBox="0 0 24 24" fill="none" style="width: 16px; height: 16px; margin-right: 6px; display: inline-block; vertical-align: text-bottom;">
+                </div>
+                <div style="display: flex; align-items: center; gap: var(--spacing-md); margin-bottom: var(--spacing-md); flex-wrap: wrap;">
+                    <div style="flex: 1; min-width: 200px; height: 8px; background: var(--bg-input); border-radius: 4px; overflow: hidden;">
+                        <div id="dy-progress-bar" style="width: 0%; height: 100%; background: var(--gradient-primary); transition: width 0.3s ease;"></div>
+                    </div>
+                    <span id="dy-progress-text" style="font-variant-numeric: tabular-nums; font-weight: 600; min-width: 45px;">0%</span>
+                    <button class="btn btn-secondary btn-sm" onclick="DyParsePage.cancelDownload()" id="dy-cancel-btn" style="padding: 4px 12px; font-size: 0.85rem; height: 32px; display: none; align-items: center; gap: 4px;">
+                        <svg viewBox="0 0 24 24" fill="none" style="width: 14px; height: 14px; display: inline-block; vertical-align: text-bottom;">
                             <line x1="18" y1="6" x2="6" y2="18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
                             <line x1="6" y1="6" x2="18" y2="18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
                         </svg>
                         取消下载
                     </button>
-                </div>
-                <div style="display: flex; align-items: center; gap: var(--spacing-md); margin-bottom: var(--spacing-md);">
-                    <div style="flex: 1; height: 8px; background: var(--bg-input); border-radius: 4px; overflow: hidden;">
-                        <div id="dy-progress-bar" style="width: 0%; height: 100%; background: var(--gradient-primary); transition: width 0.3s ease;"></div>
-                    </div>
-                    <span id="dy-progress-text" style="font-variant-numeric: tabular-nums; font-weight: 600;">0%</span>
                 </div>
                 <div id="dy-log-container" style="background: var(--bg-body); border-radius: var(--radius-sm); padding: var(--spacing-sm); height: 200px; overflow-y: auto; font-family: monospace; font-size: 0.85rem; color: var(--text-muted);">
                 </div>
@@ -58,16 +58,48 @@ const DyParsePage = {
         `;
     },
     async init() {
-        // 检查是否有正在运行的下载任务，如果有则自动启动进度轮询
         try {
             const res = await fetch('/api/douyin/progress');
             const data = await res.json();
-            if (data && data.status === 'running') {
-                this.startProgressPolling();
+            
+            if (data && (data.status === 'running' || (data.logs && data.logs.length > 0))) {
+                document.getElementById('dy-download-status').style.display = 'block';
+                const logContainer = document.getElementById('dy-log-container');
+                logContainer.innerHTML = data.logs.map(l => `<div style="margin-bottom: 4px;">${l}</div>`).join('');
+                logContainer.scrollTop = logContainer.scrollHeight;
+
+                let pct = 0;
+                let processed = (data.downloaded_count || 0) + (data.failed_count || 0);
+                if (data.total > 0) {
+                    pct = Math.floor((processed / data.total) * 100);
+                } else if (data.status === 'completed') {
+                    pct = 100;
+                }
+                document.getElementById('dy-progress-bar').style.width = pct + '%';
+                
+                const progressText = document.getElementById('dy-progress-text');
+                if (data.total > 1) {
+                    progressText.textContent = `${data.downloaded_count || 0}/${data.total}`;
+                } else {
+                    progressText.textContent = pct + '%';
+                }
+
+                const cancelBtn = document.getElementById('dy-cancel-btn');
+                if (data.status === 'running') {
+                    cancelBtn.style.display = 'flex';
+                    this.startProgressPolling();
+                } else {
+                    cancelBtn.style.display = 'none';
+                }
+            } else {
+                document.getElementById('dy-download-status').style.display = 'none';
             }
         } catch (e) {
             console.error('检查下载进度失败:', e);
         }
+    },
+    onShow() {
+        this.init();
     },
     toggleType() {
         const isProfile = document.querySelector('input[name="dy-parse-type"]:checked').value === 'profile';
@@ -128,14 +160,21 @@ const DyParsePage = {
                 const data = await res.json();
 
                 let pct = 0;
+                let processed = (data.downloaded_count || 0) + (data.failed_count || 0);
                 if (data.total > 0) {
-                    pct = Math.floor((data.current_index / data.total) * 100);
+                    pct = Math.floor((processed / data.total) * 100);
                 } else if (data.status === 'completed') {
                     pct = 100;
                 }
 
                 document.getElementById('dy-progress-bar').style.width = pct + '%';
-                document.getElementById('dy-progress-text').textContent = pct + '%';
+                
+                const progressText = document.getElementById('dy-progress-text');
+                if (data.total > 1) {
+                    progressText.textContent = `${data.downloaded_count || 0}/${data.total}`;
+                } else {
+                    progressText.textContent = pct + '%';
+                }
 
                 // update logs
                 if (data.logs && data.logs.length > 0) {
@@ -147,7 +186,7 @@ const DyParsePage = {
                 if (data.status === 'completed' || data.status === 'failed' || data.status === 'cancelled' || data.status === 'idle') {
                     clearInterval(this.pollTimer);
                     this.pollTimer = null;
-                    cancelBtn.disabled = true;
+                    cancelBtn.style.display = 'none';
 
                     if (data.status === 'completed') {
                         Toast.show('批量下载完成！', 'success');
@@ -157,15 +196,15 @@ const DyParsePage = {
                         Toast.show('下载失败', 'error');
                     }
                 } else {
-                    cancelBtn.disabled = false;
+                    cancelBtn.style.display = 'flex';
                 }
             } catch(e) {}
         }, 1000);
     },
     async cancelDownload() {
         const cancelBtn = document.getElementById('dy-cancel-btn');
-        cancelBtn.disabled = true;
-
+        if (cancelBtn) cancelBtn.style.display = 'none';
+ 
         try {
             const res = await API.douyin.cancelDownload();
             Toast.show(res.message, 'info');
