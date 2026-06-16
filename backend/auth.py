@@ -86,6 +86,10 @@ def _fetch_wechat_account_info(token: str, cookie_str: str) -> dict | None:
                 nick_match2 = re.search(r'nickname\s*:\s*"([^"]+)"', html)
                 if nick_match2:
                     nickname = nick_match2.group(1)
+                else:
+                    nick_match3 = re.search(r'nick_name\s*:\s*"([^"]+)"', html)
+                    if nick_match3:
+                        nickname = nick_match3.group(1)
                     
             # 正则匹配头像
             avatar_match = re.search(r'class="weui-desktop-account__avatar"[^>]*src="([^"]+)"', html)
@@ -95,11 +99,15 @@ def _fetch_wechat_account_info(token: str, cookie_str: str) -> dict | None:
                 avatar_match2 = re.search(r'avatar\s*:\s*"([^"]+)"', html)
                 if avatar_match2:
                     avatar = avatar_match2.group(1)
+                else:
+                    avatar_match3 = re.search(r'avatar_url\s*:\s*"([^"]+)"', html)
+                    if avatar_match3:
+                        avatar = avatar_match3.group(1)
                     
             if not nickname:
-                nick_match3 = re.search(r'<div class="weui-desktop-account__name">([^<]+)</div>', html)
-                if nick_match3:
-                    nickname = nick_match3.group(1).strip()
+                nick_match_div = re.search(r'<div class="weui-desktop-account__name">([^<]+)</div>', html)
+                if nick_match_div:
+                    nickname = nick_match_div.group(1).strip()
                     
             if nickname:
                 return {
@@ -294,17 +302,38 @@ def _do_login():
             try:
                 nickname = ""
                 avatar = ""
-                nickname_locator = page.locator(".weui-desktop-account__nickname")
-                if nickname_locator.count() > 0:
-                    nickname = nickname_locator.first.inner_text(timeout=1200)
-                else:
-                    name_locator = page.locator(".weui-desktop-account__name")
-                    if name_locator.count() > 0:
-                        nickname = name_locator.first.inner_text(timeout=1200)
+                
+                # 1. 优先从 window.wx.commonData.data 中读取
+                try:
+                    js_data = page.evaluate("() => { return window.wx && window.wx.commonData && window.wx.commonData.data; }")
+                    if js_data:
+                        nickname = js_data.get("nick_name") or js_data.get("nickname") or ""
+                        avatar = js_data.get("avatar") or js_data.get("avatar_url") or ""
+                except Exception as je:
+                    print(f"Failed to get commonData via JS: {je}")
 
-                avatar_elem = page.locator(".weui-desktop-account__avatar")
-                if avatar_elem.count() > 0:
-                    avatar = avatar_elem.first.get_attribute("src", timeout=1200) or ""
+                # 2. 如果未获取到昵称，使用 DOM 元素定位器
+                if not nickname:
+                    nickname_locator = page.locator(".weui-desktop-account__nickname")
+                    if nickname_locator.count() > 0:
+                        nickname = nickname_locator.first.inner_text(timeout=1200)
+                    else:
+                        name_locator = page.locator(".weui-desktop-account__name")
+                        if name_locator.count() > 0:
+                            nickname = name_locator.first.inner_text(timeout=1200)
+
+                if not avatar:
+                    avatar_elem = page.locator(".weui-desktop-account__avatar")
+                    if avatar_elem.count() > 0:
+                        avatar = avatar_elem.first.get_attribute("src", timeout=1200) or ""
+
+                # 3. 兜底方案：使用 requests 请求微信公众号首页解析
+                if not nickname:
+                    info = _fetch_wechat_account_info(token, cookie_str)
+                    if info:
+                        nickname = info.get("nickname") or ""
+                        if not avatar:
+                            avatar = info.get("avatar") or ""
 
                 if nickname or avatar:
                     config["account_info"] = {
@@ -321,8 +350,8 @@ def _do_login():
                         "avatar": avatar,
                         "save_time": config["save_time"],
                     })
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Error extracting account info: {e}")
 
             try:
                 browser.close()

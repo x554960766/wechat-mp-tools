@@ -226,9 +226,11 @@ const XhsNotesPage = {
         }
 
         try {
-            const res = await API.xhs.loadMoreNotes(this._selectedUserId, this._loadedPages);
+            const res = await API.xhs.loadMoreNotes(this._selectedUserId, this._notes.length);
             const newNotes = res.notes || [];
-            this._notes = this._notes.concat(newNotes);
+            const seen = new Set(this._notes.map(n => n.note_id).filter(Boolean));
+            const fresh = newNotes.filter(n => !n.note_id || !seen.has(n.note_id));
+            this._notes = this._notes.concat(fresh);
             this._hasMore = res.has_more || false;
             this._loadedPages += 3;
             this.renderNotes();

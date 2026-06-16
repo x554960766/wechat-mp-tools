@@ -9,6 +9,8 @@ import random
 import yaml
 import shutil
 import threading
+import queue
+import atexit
 import requests
 import httpx
 import math
@@ -517,6 +519,26 @@ class XhsClient:
             "cover": cover
         }
 
+    def _parse_note_item(self, it: dict) -> dict | None:
+        """把 user_posted API 的单条 note 解析成前端列表项；非 dict 返回 None。"""
+        if not isinstance(it, dict):
+            return None
+        cover_obj = it.get("cover") or {}
+        cover = cover_obj.get("url_default") or cover_obj.get("url") or ""
+        if not cover:
+            info_list = cover_obj.get("info_list") or []
+            if info_list:
+                cover = (info_list[-1] or {}).get("url", "")
+        interact = it.get("interact_info") or {}
+        return {
+            "note_id": it.get("note_id", ""),
+            "xsec_token": it.get("xsec_token", ""),
+            "title": it.get("display_title", ""),
+            "cover": cover,
+            "type": "video" if it.get("type") == "video" else "normal",
+            "liked": self.format_count(interact.get("liked_count", "0")),
+        }
+
     def get_user_posted(self, user_id: str, xsec_token: str = "", cursor: str = "", xsec_source: str = "pc_feed") -> tuple:
         """用 xhshow 签名调用 user_posted API，返回 (notes_list, has_more, next_cursor)。
         签名失败 / 风控 / 空数据时抛异常，由调用方降级到 SSR 解析。"""
@@ -594,125 +616,10 @@ class XhsClient:
 
         notes_list = []
         for it in raw:
-            if not isinstance(it, dict):
-                continue
-            cover_obj = it.get("cover") or {}
-            cover = cover_obj.get("url_default") or cover_obj.get("url") or ""
-            if not cover:
-                info_list = cover_obj.get("info_list") or []
-                if info_list:
-                    cover = (info_list[-1] or {}).get("url", "")
-            interact = it.get("interact_info") or {}
-            notes_list.append({
-                "note_id": it.get("note_id", ""),
-                "xsec_token": it.get("xsec_token", ""),
-                "title": it.get("display_title", ""),
-                "cover": cover,
-                "type": "video" if it.get("type") == "video" else "normal",
-                "liked": self.format_count(interact.get("liked_count", "0")),
-            })
+            parsed = self._parse_note_item(it)
+            if parsed:
+                notes_list.append(parsed)
         return notes_list, bool(data.get("has_more")), data.get("cursor", "")
-
-    def get_user_posted_via_browser(self, user_id: str, skip_pages: int = 0, max_pages: int = 3) -> tuple:
-        """用 Playwright 打开博主主页，拦截 user_posted API 响应获取笔记列表。
-        签名由页面内置 JS 生成，绕过 xhshow 签名失效问题。
-        skip_pages: 跳过前 N 页（已加载过的），max_pages: 本次最多捕获 N 页。
-        返回 (notes_list, has_more)。"""
-        from playwright.sync_api import sync_playwright
-        from backend.runtime import launch_chromium
-
-        cookie = get_settings().get("xhs_cookie", "").strip()
-        if not cookie:
-            raise RuntimeError("需要登录 Cookie")
-
-        profile_url = f"https://www.xiaohongshu.com/user/profile/{user_id}"
-        captured = []
-        page_count = [0]
-        has_more = [True]
-
-        def handle_response(response):
-            if "/api/sns/web/v1/user_posted" in response.url:
-                try:
-                    body = response.json()
-                    data = body.get("data") or {}
-                    notes = data.get("notes") or []
-                    page_count[0] += 1
-                    if page_count[0] > skip_pages:
-                        captured.extend(notes)
-                    if not data.get("has_more"):
-                        has_more[0] = False
-                except Exception:
-                    pass
-
-        with sync_playwright() as p:
-            browser = launch_chromium(p.chromium, headless=True, args=['--disable-blink-features=AutomationControlled'])
-            try:
-                context = browser.new_context(
-                    viewport={'width': 1280, 'height': 800},
-                    user_agent=self.USER_AGENT
-                )
-                context.add_init_script(
-                    "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-                )
-                cookie_pairs = []
-                for part in cookie.split(";"):
-                    if "=" in part:
-                        k, v = part.split("=", 1)
-                        cookie_pairs.append({
-                            "name": k.strip(), "value": v.strip(),
-                            "domain": ".xiaohongshu.com", "path": "/"
-                        })
-                context.add_cookies(cookie_pairs)
-
-                page = context.new_page()
-                page.on("response", handle_response)
-                page.goto(profile_url, wait_until="networkidle", timeout=30000)
-
-                if page_count[0] == 0:
-                    page.wait_for_timeout(3000)
-
-                if page_count[0] == 0:
-                    for _ in range(3):
-                        page.mouse.wheel(0, 800)
-                        page.wait_for_timeout(2000)
-                        if page_count[0] > 0:
-                            break
-
-                target_pages = skip_pages + max_pages
-                max_scroll_rounds = target_pages * 5
-                for _ in range(max_scroll_rounds):
-                    if not has_more[0]:
-                        break
-                    if page_count[0] >= target_pages:
-                        break
-                    page.mouse.wheel(0, 1000)
-                    page.wait_for_timeout(2000)
-            finally:
-                browser.close()
-
-        if not captured and skip_pages == 0:
-            raise RuntimeError("浏览器未拦截到 user_posted 响应")
-
-        notes_list = []
-        for it in captured:
-            if not isinstance(it, dict):
-                continue
-            cover_obj = it.get("cover") or {}
-            cover = cover_obj.get("url_default") or cover_obj.get("url") or ""
-            if not cover:
-                info_list = cover_obj.get("info_list") or []
-                if info_list:
-                    cover = (info_list[-1] or {}).get("url", "")
-            interact = it.get("interact_info") or {}
-            notes_list.append({
-                "note_id": it.get("note_id", ""),
-                "xsec_token": it.get("xsec_token", ""),
-                "title": it.get("display_title", ""),
-                "cover": cover,
-                "type": "video" if it.get("type") == "video" else "normal",
-                "liked": self.format_count(interact.get("liked_count", "0")),
-            })
-        return notes_list, has_more[0]
 
     def _parse_ssr_notes(self, state: dict) -> list:
         """从主页 __INITIAL_STATE__ 解析首屏笔记（降级用）。
@@ -795,7 +702,7 @@ class XhsClient:
         # 失败时尝试 xhshow 签名接口；最后降级 SSR（无 note_id，仅供浏览）。
         result = {"user": user_obj}
         try:
-            notes_list, browser_has_more = self.get_user_posted_via_browser(user_id)
+            notes_list, browser_has_more = _session_manager.get_first_batch(user_id)
             result["notes"] = notes_list
             result["has_more"] = browser_has_more
         except Exception as browser_err:
@@ -842,6 +749,227 @@ class XhsClient:
                 except Exception:
                     pass
             raise e
+
+# ── 持久化浏览器会话（博主笔记「加载更多」用）──────────────────
+class _XhsBrowserSession:
+    """单个博主主页的常驻 headless 浏览器会话。
+
+    sync Playwright 对象绑定其创建线程，Flask 各请求线程不同，故由一个专属
+    worker 线程持有浏览器，通过命令队列接收「继续滚动 / 关闭」。这样「加载更多」
+    复用同一活页面继续往下滚，cursor 连续、按 note_id 天然去重，O(1) 续抓。"""
+
+    def __init__(self, user_id: str, cookie: str, user_agent: str):
+        self.user_id = user_id
+        self.last_used = time.time()
+        self._cookie = cookie
+        self._user_agent = user_agent
+        self._client = XhsClient()          # 仅借用 _parse_note_item / format_count
+        self._cmd_q = queue.Queue()
+        self._captured = []                 # worker 线程独占：累计的原始 note dict
+        self._seen_ids = set()              # 已返回给调用方的 note_id
+        self._pages_loaded = 0              # 累计观测到的 user_posted 响应数
+        self._has_more = True
+        self._ready = threading.Event()
+        self._init_error = None
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=45)
+        if self._init_error:
+            raise self._init_error
+        if not self._ready.is_set():
+            # worker 仍卡在 goto，未就绪：入队 close，等它脱困后自行关闭浏览器，避免孤儿进程。
+            self.close()
+            raise RuntimeError("浏览器会话初始化超时")
+
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
+
+    def join(self, timeout=None):
+        self._thread.join(timeout)
+
+    def close(self):
+        try:
+            self._cmd_q.put(("close",))
+        except Exception:
+            pass
+
+    def scroll_more(self, max_pages: int = 3, timeout: int = 90) -> tuple:
+        """向 worker 请求多滚 max_pages 页，返回 (新增 notes, has_more)。"""
+        holder = queue.Queue(maxsize=1)
+        self._cmd_q.put(("scroll", max_pages, holder))
+        try:
+            ok, payload = holder.get(timeout=timeout)
+        except queue.Empty:
+            raise RuntimeError("浏览器会话无响应（可能已崩溃）")
+        self.last_used = time.time()
+        if not ok:
+            raise payload
+        return payload
+
+    def _cookie_pairs(self) -> list:
+        pairs = []
+        for part in self._cookie.split(";"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                pairs.append({
+                    "name": k.strip(), "value": v.strip(),
+                    "domain": ".xiaohongshu.com", "path": "/"
+                })
+        return pairs
+
+    def _on_response(self, response):
+        if "/api/sns/web/v1/user_posted" not in response.url:
+            return
+        try:
+            body = response.json()
+            data = body.get("data") or {}
+            self._pages_loaded += 1
+            self._captured.extend(data.get("notes") or [])
+            if not data.get("has_more"):
+                self._has_more = False
+        except Exception:
+            pass
+
+    def _do_scroll(self, page, max_pages: int) -> tuple:
+        target = self._pages_loaded + max_pages
+        for _ in range(max_pages * 6 + 3):
+            if not self._has_more or self._pages_loaded >= target:
+                break
+            page.mouse.wheel(0, 1000)
+            page.wait_for_timeout(2000)
+
+        fresh = []
+        for it in self._captured:
+            parsed = self._client._parse_note_item(it)
+            if not parsed:
+                continue
+            nid = parsed["note_id"]
+            if nid and nid in self._seen_ids:
+                continue
+            if nid:
+                self._seen_ids.add(nid)
+            fresh.append(parsed)
+        return fresh, self._has_more
+
+    def _run(self):
+        from playwright.sync_api import sync_playwright
+        from backend.runtime import launch_chromium
+
+        profile_url = f"https://www.xiaohongshu.com/user/profile/{self.user_id}"
+        try:
+            with sync_playwright() as p:
+                browser = launch_chromium(
+                    p.chromium, headless=True,
+                    args=['--disable-blink-features=AutomationControlled']
+                )
+                try:
+                    context = browser.new_context(
+                        viewport={'width': 1280, 'height': 800},
+                        user_agent=self._user_agent
+                    )
+                    context.add_init_script(
+                        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                    )
+                    context.add_cookies(self._cookie_pairs())
+                    page = context.new_page()
+                    page.on("response", self._on_response)
+                    page.goto(profile_url, wait_until="networkidle", timeout=30000)
+
+                    if self._pages_loaded == 0:
+                        page.wait_for_timeout(3000)
+                    if self._pages_loaded == 0:
+                        for _ in range(3):
+                            page.mouse.wheel(0, 800)
+                            page.wait_for_timeout(2000)
+                            if self._pages_loaded > 0:
+                                break
+
+                    self._ready.set()
+
+                    while True:
+                        cmd = self._cmd_q.get()
+                        if cmd[0] == "close":
+                            break
+                        if cmd[0] == "scroll":
+                            _, max_pages, holder = cmd
+                            try:
+                                holder.put((True, self._do_scroll(page, max_pages)))
+                            except Exception as e:
+                                holder.put((False, e))
+                finally:
+                    browser.close()
+        except Exception as e:
+            self._init_error = e
+            self._ready.set()
+
+
+class _XhsSessionManager:
+    """模块级单例：管理常驻浏览器会话。单活策略（界面一次只看一个博主，
+    ≤1 个浏览器），空闲超时由 reaper 守护线程回收。"""
+
+    IDLE_TIMEOUT = 120  # 秒
+
+    def __init__(self):
+        self._sessions = {}
+        self._lock = threading.Lock()
+        threading.Thread(target=self._reap_loop, daemon=True).start()
+
+    def _new_session(self, user_id: str) -> _XhsBrowserSession:
+        cookie = get_settings().get("xhs_cookie", "").strip()
+        if not cookie:
+            raise RuntimeError("需要登录 Cookie")
+        return _XhsBrowserSession(user_id, cookie, XhsClient.USER_AGENT)
+
+    def get_first_batch(self, user_id: str, first_pages: int = 3) -> tuple:
+        """选择/刷新博主：始终新建会话从主页顶部开始，关闭其它所有会话。"""
+        with self._lock:
+            for sess in self._sessions.values():
+                sess.close()
+            self._sessions.clear()
+            sess = self._new_session(user_id)
+            self._sessions[user_id] = sess
+        return sess.scroll_more(first_pages)
+
+    def get_more(self, user_id: str, max_pages: int = 3, loaded_count: int = 0) -> tuple:
+        """加载更多：复用活会话续滚；会话已被回收/崩溃则重建并滚到已展示深度之后。"""
+        with self._lock:
+            sess = self._sessions.get(user_id)
+            if sess and not sess.is_alive():
+                self._sessions.pop(user_id, None)
+                sess = None
+            rebuilt = sess is None
+            if rebuilt:
+                sess = self._new_session(user_id)
+                self._sessions[user_id] = sess
+        if rebuilt:
+            # 新会话从顶部开始：滚到已展示页数之后，再靠前端 note_id 去重丢弃重叠。
+            catch_up = (loaded_count // 30) + max_pages
+            return sess.scroll_more(catch_up)
+        return sess.scroll_more(max_pages)
+
+    def _reap_loop(self):
+        while True:
+            time.sleep(30)
+            now = time.time()
+            with self._lock:
+                for uid, sess in list(self._sessions.items()):
+                    if not sess.is_alive() or now - sess.last_used > self.IDLE_TIMEOUT:
+                        sess.close()
+                        self._sessions.pop(uid, None)
+
+    def shutdown(self):
+        """程序优雅退出时关闭所有常驻浏览器（由 atexit 调用）。"""
+        with self._lock:
+            sessions = list(self._sessions.values())
+            self._sessions.clear()
+        for sess in sessions:
+            sess.close()
+        for sess in sessions:
+            sess.join(timeout=5)
+
+
+_session_manager = _XhsSessionManager()
+atexit.register(_session_manager.shutdown)
 
 # ── 登录态校验 ────────────────────────────────────────────
 def check_xhs_login(cookie: str) -> dict:
@@ -1201,11 +1329,10 @@ def list_user_notes(user_id):
 @xhs_bp.route("/accounts/<user_id>/notes/more", methods=["POST"])
 def load_more_notes(user_id):
     data = request.get_json() or {}
-    skip_pages = data.get("skip_pages", 3)
+    loaded_count = data.get("loaded", 0)
 
-    client = XhsClient()
     try:
-        notes_list, has_more = client.get_user_posted_via_browser(user_id, skip_pages=skip_pages, max_pages=3)
+        notes_list, has_more = _session_manager.get_more(user_id, loaded_count=loaded_count)
         return jsonify({"notes": notes_list, "has_more": has_more})
     except Exception as e:
         return jsonify({"error": f"加载更多笔记失败: {str(e)}"}), 500

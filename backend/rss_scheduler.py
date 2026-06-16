@@ -389,24 +389,45 @@ class RssScheduler:
         upload_result = None
 
         try:
-            articles, _total = _fetch_articles_page(fakeid, begin=0, count=10)
             existing = self.get_articles(nickname)
             existing_links = {a.get("link") for a in existing}
+            
+            # 加载历史记录，用于去重和录入
+            history = load_json(DOWNLOAD_HISTORY_FILE, [])
+            history_links = {item.get("link") for item in history if isinstance(item, dict) and item.get("link")}
 
-            # 过滤出真正需要下载的新文章（最新拉取的 10 篇里，不在我们 RSS 缓存列表中的文章）
             new_articles = []
-            for art in articles:
-                if art.get("link") and art["link"] not in existing_links:
-                    new_articles.append(art)
+            begin = 0
+            count = 10
+            max_pages = 5 # 限制最大翻页数，防死循环
+            
+            for page_idx in range(max_pages):
+                page_articles, _total = _fetch_articles_page(fakeid, begin=begin, count=count)
+                if not page_articles:
+                    break
+                
+                has_old_article = False
+                for art in page_articles:
+                    link = art.get("link")
+                    if link:
+                        # 如果已经在 RSS 缓存或下载历史中，说明后面的文章都是已下载过的老文章了
+                        if link in existing_links or link in history_links:
+                            has_old_article = True
+                        else:
+                            new_articles.append(art)
+                
+                # 如果当前页中包含了已有的老文章，或者新文章总数已经太多了，就不需要再往后翻页了
+                if has_old_article or len(page_articles) < count:
+                    break
+                
+                begin += count
+                # 翻页间稍作延时，避免被微信风控
+                time.sleep(1.5)
 
             if new_articles:
                 # 准备下载目录
                 out_dir = OUTPUT_DIR / nickname
                 out_dir.mkdir(parents=True, exist_ok=True)
-
-                # 加载历史记录，用于去重和录入
-                history = load_json(DOWNLOAD_HISTORY_FILE, [])
-                history_links = {item.get("link") for item in history if isinstance(item, dict) and item.get("link")}
 
                 settings = get_settings()
                 delay = settings.get("request_delay", 0.8)

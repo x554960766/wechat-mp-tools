@@ -208,51 +208,108 @@ class AccountPool:
         return result
 
     def add_or_update(self, cred: dict) -> dict:
-        """登录成功后写入/更新（按 token 去重）"""
+        """登录成功后写入/更新（按 token 或 nickname 去重）"""
         with self._lock:
             accounts = self._load()
             token = cred.get("token", "")
             nickname = cred.get("nickname", "公众号未命名")
 
-            # 按 token 去重
+            # 1. 尝试按 token 匹配
+            token_match_acc = None
             for acc in accounts:
                 if acc.get("token") == token:
-                    acc["cookie_str"] = cred.get("cookie_str", "")
-                    acc["cookies"] = cred.get("cookies", [])
-                    acc["nickname"] = nickname
-                    acc["avatar"] = cred.get("avatar", "")
-                    acc["save_time"] = cred.get("save_time", time.time())
-                    acc["status"] = "active"
-                    acc["failures"] = 0
-                    acc["risk_hits"] = 0
-                    acc["last_error"] = None
-                    acc["cooldown_until"] = 0
-                    acc["kicked_time"] = 0
-                    self._save(accounts)
-                    logger.info("账号池更新: [%s]", nickname)
-                    return acc
+                    token_match_acc = acc
+                    break
 
-            # 新增
-            new_acc = {
-                "id": _gen_id(),
-                "token": token,
-                "cookie_str": cred.get("cookie_str", ""),
-                "cookies": cred.get("cookies", []),
-                "nickname": nickname,
-                "avatar": cred.get("avatar", ""),
-                "save_time": cred.get("save_time", time.time()),
-                "status": "active",
-                "failures": 0,
-                "risk_hits": 0,
-                "last_used": 0.0,
-                "cooldown_until": 0.0,
-                "last_error": None,
-                "kicked_time": 0.0,
-            }
-            accounts.append(new_acc)
-            self._save(accounts)
-            logger.info("账号池新增: [%s]", nickname)
-            return new_acc
+            # 2. 如果 nickname 不是默认未命名，尝试按 nickname 匹配其他账号
+            nickname_match_acc = None
+            if nickname and nickname != "公众号未命名":
+                for acc in accounts:
+                    # 排除当前 token_match_acc 本身
+                    if acc.get("nickname") == nickname and (token_match_acc is None or acc != token_match_acc):
+                        nickname_match_acc = acc
+                        break
+
+            if token_match_acc and nickname_match_acc:
+                # 这种情况发生在：之前新增了 token_match_acc（当时名字是"公众号未命名"），
+                # 现在拿到了真实名字，发现和已有账号 nickname_match_acc 冲突。
+                # 此时把 token_match_acc 的凭证合并到 nickname_match_acc（保留旧ID），并删除 token_match_acc。
+                nickname_match_acc["token"] = token
+                nickname_match_acc["cookie_str"] = cred.get("cookie_str", "")
+                nickname_match_acc["cookies"] = cred.get("cookies", [])
+                nickname_match_acc["avatar"] = cred.get("avatar") or nickname_match_acc.get("avatar", "")
+                nickname_match_acc["save_time"] = cred.get("save_time", time.time())
+                nickname_match_acc["status"] = "active"
+                nickname_match_acc["failures"] = 0
+                nickname_match_acc["risk_hits"] = 0
+                nickname_match_acc["last_error"] = None
+                nickname_match_acc["cooldown_until"] = 0
+                nickname_match_acc["kicked_time"] = 0
+                
+                # 删除临时创建的 token_match_acc
+                accounts = [a for a in accounts if a != token_match_acc]
+                self._save(accounts)
+                logger.info("账号池合并: [%s] (保留旧ID %s, 删除临时ID %s)", nickname, nickname_match_acc["id"], token_match_acc["id"])
+                return nickname_match_acc
+
+            elif token_match_acc:
+                # 只有 token 匹配（可能是刚才新建的，或者是正在更新当前同 token 账号）
+                token_match_acc["cookie_str"] = cred.get("cookie_str", "")
+                token_match_acc["cookies"] = cred.get("cookies", [])
+                token_match_acc["nickname"] = nickname
+                if cred.get("avatar"):
+                    token_match_acc["avatar"] = cred.get("avatar")
+                token_match_acc["save_time"] = cred.get("save_time", time.time())
+                token_match_acc["status"] = "active"
+                token_match_acc["failures"] = 0
+                token_match_acc["risk_hits"] = 0
+                token_match_acc["last_error"] = None
+                token_match_acc["cooldown_until"] = 0
+                token_match_acc["kicked_time"] = 0
+                self._save(accounts)
+                logger.info("账号池更新: [%s]", nickname)
+                return token_match_acc
+
+            elif nickname_match_acc:
+                # 只有 nickname 匹配（没有匹配到 token，说明是新登录的旧账号，直接更新老账号凭证）
+                nickname_match_acc["token"] = token
+                nickname_match_acc["cookie_str"] = cred.get("cookie_str", "")
+                nickname_match_acc["cookies"] = cred.get("cookies", [])
+                if cred.get("avatar"):
+                    nickname_match_acc["avatar"] = cred.get("avatar")
+                nickname_match_acc["save_time"] = cred.get("save_time", time.time())
+                nickname_match_acc["status"] = "active"
+                nickname_match_acc["failures"] = 0
+                nickname_match_acc["risk_hits"] = 0
+                nickname_match_acc["last_error"] = None
+                nickname_match_acc["cooldown_until"] = 0
+                nickname_match_acc["kicked_time"] = 0
+                self._save(accounts)
+                logger.info("账号池更新(按昵称): [%s]", nickname)
+                return nickname_match_acc
+
+            else:
+                # 全新账号，新增
+                new_acc = {
+                    "id": _gen_id(),
+                    "token": token,
+                    "cookie_str": cred.get("cookie_str", ""),
+                    "cookies": cred.get("cookies", []),
+                    "nickname": nickname,
+                    "avatar": cred.get("avatar", ""),
+                    "save_time": cred.get("save_time", time.time()),
+                    "status": "active",
+                    "failures": 0,
+                    "risk_hits": 0,
+                    "last_used": 0.0,
+                    "cooldown_until": 0.0,
+                    "last_error": None,
+                    "kicked_time": 0.0,
+                }
+                accounts.append(new_acc)
+                self._save(accounts)
+                logger.info("账号池新增: [%s]", nickname)
+                return new_acc
 
     def remove(self, account_id: str) -> bool:
         with self._lock:
