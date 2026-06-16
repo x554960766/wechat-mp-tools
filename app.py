@@ -35,6 +35,7 @@ from backend.channels import channels_bp
 from backend.transcode import transcode_bp
 from backend.xiaohongshu import xhs_bp
 from backend.xiaohongshu_login import xhs_login_bp
+from backend.updater import updater_bp
 
 # ── Flask 应用 ────────────────────────────────────────────
 static_folder_path = resource_dir() / "frontend"
@@ -59,6 +60,7 @@ app.register_blueprint(channels_bp)
 app.register_blueprint(transcode_bp)
 app.register_blueprint(xhs_bp)
 app.register_blueprint(xhs_login_bp)
+app.register_blueprint(updater_bp)
 
 
 # 账号池旧数据迁移

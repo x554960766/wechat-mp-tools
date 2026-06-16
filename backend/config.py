@@ -13,6 +13,9 @@ from pathlib import Path
 
 from backend.runtime import app_dir
 
+# ── 版本号 ────────────────────────────────────────────────
+APP_VERSION = "1.0.5"
+
 # ── 路径配置 ──────────────────────────────────────────────
 if getattr(sys, 'frozen', False):
     # 打包后数据保存在 exe 或 .app 旁边，避免写入应用包内部。

@@ -393,6 +393,11 @@ body {
     50% { opacity: 0.5; }
 }
 
+@keyframes pulse-dot {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.6; transform: scale(0.85); }
+}
+
 /* ── 主内容区 ──────────────────────────────────────────── */
 .main-content {
     flex: 1;

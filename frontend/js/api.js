@@ -251,5 +251,13 @@ const API = {
         openFolder(account = '')    { return API.post('/api/xhs/open-folder', { account }); },
         openFile(path)              { return API.post('/api/xhs/open-file', { path }); },
         openParent(path)            { return API.post('/api/xhs/open-parent', { path }); },
+    },
+
+    // ── Version Update API ──────────────────────────────
+    version: {
+        check()         { return API.get('/api/version/check', { showError: false }); },
+        download(url)   { return API.post('/api/version/download', { url }); },
+        progress()      { return API.get('/api/version/download-progress', { showError: false }); },
+        openFolder()    { return API.post('/api/version/open-update-folder'); },
     }
 };
