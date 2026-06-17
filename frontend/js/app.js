@@ -173,7 +173,7 @@ const App = {
     },
 
     toggleNavGroup(targetGroup) {
-        const groups = ['wechat', 'wechat_channels', 'douyin', 'xiaohongshu', 'common'];
+        const groups = ['wechat', 'wechat_channels', 'douyin', 'xiaohongshu', 'kuaishou', 'common'];
         groups.forEach(g => {
             const itemsEl = document.getElementById(`items-${g}`);
             const titleEl = document.querySelector(`.nav-group-title[data-group="${g}"]`);
@@ -326,7 +326,7 @@ const App = {
                 content: `
                     <div style="padding: 10px 0; text-align: center;">
                         <p style="font-size: 1.1rem; font-weight: 600; color: var(--success); margin-bottom: 8px;">✅ 已是最新版本</p>
-                        <p style="color: var(--text-secondary);">当前版本 v${(info && info.current_version) || '1.0.7'}</p>
+                        <p style="color: var(--text-secondary);">当前版本 v${(info && info.current_version) || '1.1.0'}</p>
                     </div>
                 `,
                 footer: '<button class="btn btn-primary" onclick="Modal.close()" style="width: 100%;">关闭</button>'

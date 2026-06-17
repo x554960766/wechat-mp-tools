@@ -31,6 +31,8 @@ from backend.account_pool_api import account_pool_bp
 from backend.douyin import douyin_bp
 from backend.douyin_login import douyin_login_bp
 from backend.douyin_auth import douyin_auth_bp
+from backend.kuaishou import kuaishou_bp
+from backend.kuaishou_auth import kuaishou_auth_bp
 from backend.channels import channels_bp
 from backend.transcode import transcode_bp
 from backend.xiaohongshu import xhs_bp
@@ -56,6 +58,8 @@ app.register_blueprint(account_pool_bp)
 app.register_blueprint(douyin_bp)
 app.register_blueprint(douyin_login_bp)
 app.register_blueprint(douyin_auth_bp)
+app.register_blueprint(kuaishou_bp)
+app.register_blueprint(kuaishou_auth_bp)
 app.register_blueprint(channels_bp)
 app.register_blueprint(transcode_bp)
 app.register_blueprint(xhs_bp)

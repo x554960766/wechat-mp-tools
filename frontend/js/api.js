@@ -168,6 +168,24 @@ const API = {
         openParent(path) { return API.post('/api/douyin/open-parent', { path }); },
     },
 
+    // ── Kuaishou Downloader API ──────────────────────
+    kuaishou: {
+        auth: {
+            start: () => API.post('/api/kuaishou/auth/start'),
+            cancel: () => API.post('/api/kuaishou/auth/cancel'),
+            status: () => API.get('/api/kuaishou/auth/status', { showError: false })
+        },
+        downloadSingle(url) { return API.post('/api/kuaishou/download-single', { url }); },
+        downloadProfile(url, max_pages) { return API.post('/api/kuaishou/download-profile', { url, max_pages }); },
+        cancelDownload() { return API.post('/api/kuaishou/cancel-download'); },
+        progress() { return API.get('/api/kuaishou/progress', { showError: false }); },
+        getHistory() { return API.get('/api/kuaishou/history'); },
+        clearHistory() { return API.delete('/api/kuaishou/history'); },
+        openFolder() { return API.post('/api/kuaishou/open-folder'); },
+        openFile(path) { return API.post('/api/kuaishou/open-file', { path }); },
+        openParent(path) { return API.post('/api/kuaishou/open-parent', { path }); },
+    },
+
     // ── WeChat Channels API ──────────────────────────
     channels: {
         fetchVideoProfile(url) { return API.post('/api/channels/fetch_video_profile', { url }); },

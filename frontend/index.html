@@ -180,6 +180,34 @@
                     </a>
                 </div>
 
+                <!-- ================= 快手视频 导航组 ================= -->
+                <div class="nav-divider"></div>
+                <div class="nav-group-title" data-group="kuaishou">
+                    <span>快手视频</span>
+                    <span class="group-arrow">▶</span>
+                </div>
+
+                <div class="nav-group-items collapsed" id="items-kuaishou">
+                    <a href="#ks_login" class="nav-item" data-page="ks_login" id="nav-ks_login">
+                        <span class="nav-icon">
+                            <svg viewBox="0 0 24 24" fill="none"><path d="M15 3H19C20.1 3 21 3.9 21 5V19C21 20.1 20.1 21 19 21H15" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><polyline points="10,17 15,12 10,7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="15" y1="12" x2="3" y2="12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                        </span>
+                        <span class="nav-label">扫码登录</span>
+                    </a>
+                    <a href="#ks_parse" class="nav-item" data-page="ks_parse" id="nav-ks_parse">
+                        <span class="nav-icon">
+                            <svg viewBox="0 0 24 24" fill="none"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                        </span>
+                        <span class="nav-label">解析链接</span>
+                    </a>
+                    <a href="#ks_downloads" class="nav-item" data-page="ks_downloads" id="nav-ks_downloads">
+                        <span class="nav-icon">
+                            <svg viewBox="0 0 24 24" fill="none"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="7 10 12 15 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="12" y1="15" x2="12" y2="3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                        </span>
+                        <span class="nav-label">下载历史</span>
+                    </a>
+                </div>
+
                 <!-- ================= 小红书 导航组 ================= -->
                 <div class="nav-divider"></div>
                 <div class="nav-group-title" data-group="xiaohongshu">
@@ -267,7 +295,7 @@
                 </div>
                 <div class="sidebar-about" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border-color); font-size: 0.75rem; text-align: center; color: var(--text-muted); display: flex; flex-direction: column; gap: 4px;">
                     <div id="version-display" style="cursor: pointer; position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 4px;" onclick="App.showUpdateModal()">
-                        <span id="version-text">Media Tools v1.0.7</span>
+                        <span id="version-text">Media Tools v1.1.0</span>
                         <span id="update-dot" style="display: none; width: 8px; height: 8px; background: #ff3b30; border-radius: 50%; animation: pulse-dot 2s ease-in-out infinite;"></span>
                     </div>
                     <div style="display: flex; justify-content: center; gap: 12px;">
@@ -326,6 +354,11 @@
     <script src="/js/components/douyin/dy_downloads.js"></script>
     <script src="/js/components/douyin/dy_liked.js"></script>
     <script src="/js/components/douyin/dy_collections.js"></script>
+
+    <!-- Kuaishou Pages -->
+    <script src="/js/components/kuaishou/ks_login.js"></script>
+    <script src="/js/components/kuaishou/ks_parse.js"></script>
+    <script src="/js/components/kuaishou/ks_downloads.js"></script>
 
     <!-- Xiaohongshu Pages -->
     <script src="/js/components/xhs/xhs_login.js"></script>

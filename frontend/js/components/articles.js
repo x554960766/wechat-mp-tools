@@ -248,16 +248,15 @@ const ArticlesPage = {
                 : '';
 
             return `
-                <div class="article-item ${isSelected ? 'selected' : ''}" data-idx="${globalIdx}">
+                <div class="article-item ${isSelected ? 'selected' : ''}" data-idx="${globalIdx}" onclick="ArticlesPage.handleArticleClick(${globalIdx}, ${idx}, event)">
                     ${this.selectionMode === 'multi' ? `
                         <div class="article-checkbox">
                             <input type="checkbox" ${isSelected ? 'checked' : ''}
-                                   onchange="ArticlesPage.toggleArticle(${globalIdx}, ${idx}, this.checked)">
+                                   onchange="event.stopPropagation(); ArticlesPage.toggleArticle(${globalIdx}, ${idx}, this.checked)">
                         </div>
                     ` : ''}
                     ${article.cover
-                        ? `<img class="article-cover" src="${article.cover}" alt="" loading="lazy"
-                                onerror="this.style.display='none'">`
+                        ? `<img class="article-cover" src="${article.cover}" alt="" loading="lazy" onerror="this.style.display='none'">`
                         : ''
                     }
                     <div class="article-info">
@@ -270,11 +269,36 @@ const ArticlesPage = {
                         </div>
                     </div>
                     <div class="article-actions">
-                        <button class="btn btn-primary btn-sm" onclick="ArticlesPage.downloadSingle(${idx})">下载</button>
+                        <button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); ArticlesPage.downloadSingle(${idx})">下载</button>
                     </div>
                 </div>
             `;
         }).join('');
+    },
+
+    handleArticleClick(globalIdx, localIdx, event) {
+        // 如果点击的是操作按钮或复选框等，不处理跳转/选中
+        if (event.target.closest('.article-actions') || event.target.closest('.article-checkbox')) {
+            return;
+        }
+
+        if (this.selectionMode === 'multi') {
+            const isSelected = this.selectedArticles.has(globalIdx);
+            const nextChecked = !isSelected;
+            
+            // 同步更新复选框 DOM 状态
+            const item = document.querySelector(`.article-item[data-idx="${globalIdx}"]`);
+            if (item) {
+                const checkbox = item.querySelector('.article-checkbox input[type="checkbox"]');
+                if (checkbox) checkbox.checked = nextChecked;
+            }
+            this.toggleArticle(globalIdx, localIdx, nextChecked);
+        } else {
+            const article = this.articles[localIdx];
+            if (article && article.link) {
+                window.open(article.link, '_blank');
+            }
+        }
     },
 
     toggleArticle(globalIdx, localIdx, checked) {

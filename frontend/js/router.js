@@ -36,6 +36,11 @@ const Router = {
             'dy_liked': typeof DyLikedPage !== 'undefined' ? DyLikedPage : null,
             'dy_collections': typeof DyCollectionsPage !== 'undefined' ? DyCollectionsPage : null,
             
+            // 快手子系统页面
+            'ks_login': typeof KsLoginComponent !== 'undefined' ? KsLoginComponent : null,
+            'ks_parse': typeof KsParsePage !== 'undefined' ? KsParsePage : null,
+            'ks_downloads': typeof KsDownloadsPage !== 'undefined' ? KsDownloadsPage : null,
+
             // 小红书页面
             'xhs_login': typeof XhsLoginPage !== 'undefined' ? XhsLoginPage : null,
             'xhs_accounts': typeof XhsAccountsPage !== 'undefined' ? XhsAccountsPage : null,
@@ -79,7 +84,7 @@ const Router = {
         if (pageKey.startsWith('dy_')) {
             document.body.classList.add('dy-theme');
             document.body.classList.remove('wechat-theme');
-        } else if (['login', 'accounts', 'articles', 'download', 'history', 'channels'].includes(pageKey) || pageKey.startsWith('channels_') || pageKey.startsWith('xhs_')) {
+        } else if (['login', 'accounts', 'articles', 'download', 'history', 'channels'].includes(pageKey) || pageKey.startsWith('channels_') || pageKey.startsWith('xhs_') || pageKey.startsWith('ks_')) {
             document.body.classList.remove('dy-theme');
             document.body.classList.add('wechat-theme');
         } else if (!document.body.classList.contains('dy-theme') && !document.body.classList.contains('wechat-theme')) {
@@ -272,13 +277,15 @@ const Router = {
             activeGroup = 'douyin';
         } else if (activeKey.startsWith('xhs_')) {
             activeGroup = 'xiaohongshu';
+        } else if (activeKey.startsWith('ks_')) {
+            activeGroup = 'kuaishou';
         } else if (activeKey.startsWith('channels_') || activeKey === 'channels') {
             activeGroup = 'wechat_channels';
         } else if (['transcode', 'proxy', 'settings'].includes(activeKey)) {
             activeGroup = 'common';
         }
 
-        const groups = ['wechat', 'wechat_channels', 'douyin', 'xiaohongshu', 'common'];
+        const groups = ['wechat', 'wechat_channels', 'douyin', 'xiaohongshu', 'kuaishou', 'common'];
         groups.forEach(g => {
             const itemsEl = document.getElementById(`items-${g}`);
             const titleEl = document.querySelector(`.nav-group-title[data-group="${g}"]`);
