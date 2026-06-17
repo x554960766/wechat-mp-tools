@@ -383,7 +383,7 @@ class RssScheduler:
 
         last_error = None
         new_count = 0
-        total_articles = 0
+        total_articles = sub.get("total_articles", 0)
         upload_articles = []
         all_downloads_success = True
         upload_result = None
@@ -534,7 +534,10 @@ class RssScheduler:
             # 截断保留上限
             existing = existing[:MAX_ARTICLES_PER_ACCOUNT]
             self._save_articles(nickname, existing)
-            total_articles = len(existing)
+            total_articles = sum(
+                1 for item in history
+                if isinstance(item, dict) and item.get("account") == nickname and item.get("success")
+            )
             if all_downloads_success:
                 upload_result = self._upload_new_articles(upload_articles)
             else:

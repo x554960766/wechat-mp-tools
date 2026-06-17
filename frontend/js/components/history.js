@@ -621,7 +621,6 @@ const HistoryPage = {
 
     buildArticleServeUrl(item) {
         const title = item.title || 'article';
-        const filename = `${title}.html`;
         const rawPath = String(item.path || '').replace(/\\/g, '/');
         const marker = '/articles_full/';
         const markerIndex = rawPath.lastIndexOf(marker);
@@ -634,6 +633,10 @@ const HistoryPage = {
             const dirName = parts.length ? parts[parts.length - 1] : title;
             relativeDir = [item.account || '', dirName].filter(Boolean).join('/');
         }
+
+        const parts = relativeDir.split('/');
+        const folderName = parts[parts.length - 1] || title;
+        const filename = `${folderName}.html`;
 
         const encodedDir = relativeDir
             .split('/')

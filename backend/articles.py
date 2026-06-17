@@ -413,10 +413,77 @@ def get_download_status(task_id):
     return jsonify(task)
 
 
+def _sync_history_from_disk(history: list) -> bool:
+    """自动扫描本地下载文件夹，同步历史记录中缺失的条目"""
+    settings = get_settings()
+    download_dir = Path(settings.get("download_dir") or str(OUTPUT_DIR))
+    if not download_dir.exists():
+        return False
+
+    existing_paths = {item.get("path") for item in history if isinstance(item, dict) and item.get("path")}
+    changed = False
+
+    try:
+        for account_dir in download_dir.iterdir():
+            if not account_dir.is_dir() or account_dir.name in ("channels", "douyin_downloads", "xhs_downloads", "temp_uploads"):
+                continue
+
+            for art_dir in account_dir.iterdir():
+                if not art_dir.is_dir():
+                    continue
+
+                art_path_str = str(art_dir)
+                if art_path_str in existing_paths:
+                    continue
+
+                meta_file = art_dir / "metadata.json"
+                if not meta_file.exists():
+                    continue
+
+                try:
+                    meta = json.loads(meta_file.read_text(encoding="utf-8"))
+                    link = meta.get("url", "")
+                    mtime = art_dir.stat().st_mtime
+                    time_val = mtime
+                    if meta.get("time"):
+                        try:
+                            # 尝试解析 2026-06-17T08:12:44 等标准 ISO 格式时间
+                            time_val = datetime.fromisoformat(meta["time"]).timestamp()
+                        except Exception:
+                            pass
+
+                    new_item = {
+                        "title": meta.get("title") or art_dir.name,
+                        "link": link,
+                        "account": account_dir.name,
+                        "success": True,
+                        "time": time_val,
+                        "error": None,
+                        "path": art_path_str,
+                        "cover_url": meta.get("cover_url", ""),
+                        "digest": meta.get("digest", ""),
+                        "publish_time": meta.get("publish_time") or int(time_val),
+                    }
+                    history.append(new_item)
+                    existing_paths.add(art_path_str)
+                    changed = True
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return changed
+
+
 @articles_bp.route("/history", methods=["GET"])
 def get_history():
     """获取下载历史"""
     history = load_json(DOWNLOAD_HISTORY_FILE, [])
+    
+    # 自动从磁盘同步丢失的历史记录
+    if _sync_history_from_disk(history):
+        save_json(DOWNLOAD_HISTORY_FILE, history)
+
     indexed_history = []
     for index, item in enumerate(history):
         if isinstance(item, dict):
@@ -434,9 +501,51 @@ def get_history():
 
 @articles_bp.route("/history", methods=["DELETE"])
 def clear_history():
-    """清空下载历史"""
-    save_json(DOWNLOAD_HISTORY_FILE, [])
-    return jsonify({"message": "历史已清空"})
+    """清空下载历史，并删除对应的本地下载文件/目录"""
+    history = load_json(DOWNLOAD_HISTORY_FILE, [])
+    deleted_dirs_count = 0
+    remaining_history = []
+
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+
+        # 保留微信视频号的历史记录不作处理（视频号有自己的 channels.py 清空接口）
+        if item.get("account") == "微信视频号":
+            remaining_history.append(item)
+            continue
+
+        path_str = item.get("path", "")
+        if path_str:
+            try:
+                path = Path(path_str)
+                if path.exists():
+                    if path.is_dir():
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink()
+                    deleted_dirs_count += 1
+            except Exception:
+                pass
+
+    save_json(DOWNLOAD_HISTORY_FILE, remaining_history)
+
+    # 自动清理空出来的公众号目录
+    try:
+        settings = get_settings()
+        download_dir = Path(settings.get("download_dir") or str(OUTPUT_DIR))
+        if download_dir.exists():
+            for account_dir in download_dir.iterdir():
+                if account_dir.is_dir() and account_dir.name not in ("channels", "douyin_downloads", "xhs_downloads", "temp_uploads"):
+                    # 如果该公众号目录没有任何文件/文件夹，则将其删除
+                    if not any(account_dir.iterdir()):
+                        account_dir.rmdir()
+    except Exception:
+        pass
+
+    return jsonify({
+        "message": f"历史已清空，成功删除 {deleted_dirs_count} 个本地下载内容。"
+    })
 
 
 @articles_bp.route("/history/<int:index>", methods=["DELETE"])
@@ -910,7 +1019,7 @@ def get_rss(account=None):
                     "publish_time": art.get("update_time", 0),
                     "cover_url": art.get("cover", ""),
                     "digest": art.get("digest", ""),
-                    "path": "",
+                    "path": art.get("path", ""),
                 })
                 existing_links.add(link)
     except Exception:
@@ -945,7 +1054,8 @@ def get_rss(account=None):
         orig_url = html.escape(str(orig_url_val))
 
         if local_exists:
-            local_url = f"{host_url}api/articles/serve-file/{quote(acc_name)}/{quote(safe_title)}/{quote(safe_title)}.html"
+            p_obj = Path(path_str)
+            local_url = f"{host_url}api/articles/serve-file/{quote(p_obj.parent.name)}/{quote(p_obj.name)}/{quote(p_obj.name)}.html"
             xml_link = html.escape(local_url)
         else:
             xml_link = orig_url
