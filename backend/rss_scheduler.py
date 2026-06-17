@@ -19,10 +19,17 @@ logger = logging.getLogger(__name__)
 
 RSS_SUBSCRIPTIONS_FILE = DATA_DIR / "rss_subscriptions.json"
 RSS_ARTICLES_FILE = DATA_DIR / "rss_articles.json"
-RSS_UPLOAD_PENDING_FILE = DATA_DIR / "rss_upload_pending.json"
+RSS_UPLOAD_LOG_FILE = DATA_DIR / "rss_upload_log.json"
 
 # 每个公众号 RSS 最多保留的文章数
 MAX_ARTICLES_PER_ACCOUNT = 200
+
+# 单次上传最多携带的文章数（超出部分留待下一轮）
+UPLOAD_BATCH_LIMIT = 100
+# 单篇连续失败达到该次数即隔离（quarantine），不再阻塞其他文章
+UPLOAD_QUARANTINE_THRESHOLD = 3
+# 上传审计日志最多保留的记录条数
+MAX_UPLOAD_LOG = 100
 
 
 class RssScheduler:
@@ -75,6 +82,7 @@ class RssScheduler:
                 "last_upload_count": 0,
                 "last_upload_error": None,
                 "pending_upload_count": 0,
+                "quarantined_count": 0,
                 "last_upload_attempted": False,
                 "last_upload_disabled": False,
             }
@@ -157,13 +165,6 @@ class RssScheduler:
             deduped.append(normalized)
         return deduped
 
-    def _load_pending_upload_articles(self) -> list:
-        pending = load_json(RSS_UPLOAD_PENDING_FILE, [])
-        return pending if isinstance(pending, list) else []
-
-    def _save_pending_upload_articles(self, articles: list):
-        save_json(RSS_UPLOAD_PENDING_FILE, self._dedupe_upload_articles(articles, encode_content=False))
-
     def _read_downloaded_article_data(self, article_dir: str, fallback: dict) -> dict | None:
         data_path = Path(article_dir) / "data.json"
         data = load_json(data_path, {})
@@ -173,165 +174,57 @@ class RssScheduler:
             return fallback
         return None
 
-    def _upload_new_articles(self, new_articles: list) -> dict:
-        from backend.config import get_settings, get_proxies_dict
+    # 以下载历史为唯一事实来源：候选 = success 且未上传、未隔离的条目
 
-        settings = get_settings()
-        pending_articles = self._dedupe_upload_articles(
-            self._load_pending_upload_articles(),
-            encode_content=False,
-        )
-        if not settings.get("rss_upload_enabled", False):
-            return {
-                "success": True,
-                "attempted": False,
-                "count": 0,
-                "pending_count": len(pending_articles),
-                "error": None,
-                "disabled": True,
-            }
-
-        pending_to_save = self._dedupe_upload_articles(
-            pending_articles + new_articles,
-            encode_content=False,
-        )
-        upload_articles = self._dedupe_upload_articles(pending_to_save)
-        if not upload_articles:
-            return {
-                "success": True,
-                "attempted": False,
-                "count": 0,
-                "pending_count": 0,
-                "error": None,
-                "disabled": False,
-            }
-
-        upload_url = (settings.get("rss_upload_url") or "").strip()
-        if not upload_url:
-            return self._defer_upload_articles(new_articles, "RSS 上传接口地址未配置")
-
-        payload = {
-            "articles": upload_articles,
-            "deviceId": settings.get("device_id") or "公众号_caiji100",
-        }
-
-        try:
-            resp = requests.post(
-                upload_url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                proxies=get_proxies_dict(),
-                timeout=30,
-            )
-            resp.raise_for_status()
-            try:
-                data = resp.json()
-                if isinstance(data, dict) and data.get("success") is False:
-                    raise RuntimeError(data.get("message") or data.get("error") or "远端接口返回失败")
-            except ValueError:
-                pass
-
-            # 更新下载历史中的上传标记并保存
-            from backend.config import load_json as _load_json, save_json as _save_json, DOWNLOAD_HISTORY_FILE
-            try:
-                history = _load_json(DOWNLOAD_HISTORY_FILE, [])
-                if history:
-                    uploaded_urls = {a.get("url") for a in upload_articles if a.get("url")}
-                    history_changed = False
-                    for item in history:
-                        if isinstance(item, dict) and item.get("link") in uploaded_urls:
-                            if not item.get("uploaded"):
-                                item["uploaded"] = True
-                                history_changed = True
-                    if history_changed:
-                        _save_json(DOWNLOAD_HISTORY_FILE, history)
-            except Exception as history_err:
-                logger.warning("更新下载历史上传标记失败: %s", history_err)
-
-            self._save_pending_upload_articles([])
-            logger.info("RSS 新文章上传成功: %d 篇", len(upload_articles))
-            return {
-                "success": True,
-                "attempted": True,
-                "count": len(upload_articles),
-                "pending_count": 0,
-                "error": None,
-                "disabled": False,
-            }
-        except Exception as e:
-            self._save_pending_upload_articles(pending_to_save)
-            logger.warning("RSS 新文章上传失败，已加入待重试队列: %s", e)
-            return {
-                "success": False,
-                "attempted": True,
-                "count": 0,
-                "pending_count": len(pending_to_save),
-                "error": str(e),
-                "disabled": False,
-            }
-
-    def _defer_upload_articles(self, new_articles: list, reason: str) -> dict:
-        upload_articles = self._dedupe_upload_articles(
-            self._load_pending_upload_articles() + new_articles,
-            encode_content=False,
-        )
-        self._save_pending_upload_articles(upload_articles)
-        logger.info("RSS 新文章上传暂缓: %s，待上传 %d 篇", reason, len(upload_articles))
-        return {
-            "success": False,
-            "attempted": False,
-            "count": 0,
-            "pending_count": len(upload_articles),
-            "error": reason,
-            "disabled": False,
-        }
-
-    def force_upload_all(self, nickname: str) -> dict:
-        """强制上传该公众号所有待上传文章 + 下载历史中未上传的文章（同步）"""
-        from backend.config import get_settings, get_proxies_dict, load_json as _load_json, save_json as _save_json, DOWNLOAD_HISTORY_FILE, OUTPUT_DIR
-
-        settings = get_settings()
-        upload_url = (settings.get("rss_upload_url") or "").strip()
-        if not upload_url:
-            return {"success": False, "count": 0, "pending_count": 0, "error": "RSS 上传接口地址未配置"}
-
-        # 1. 加载 pending 队列
-        pending = self._load_pending_upload_articles()
-
-        # 2. 扫描下载历史中该公众号的文章（成功下载且有路径的）
-        history = _load_json(DOWNLOAD_HISTORY_FILE, [])
-        scanned = []
-        pending_urls = {a.get("url", a.get("link", "")) for a in pending if isinstance(a, dict)}
+    def _collect_unuploaded(self, history: list, account: str | None = None) -> list:
+        """从下载历史中挑出待上传的条目（直接返回 history 中的对象引用，便于原地标记）"""
+        out = []
         for item in history:
             if not isinstance(item, dict):
                 continue
-            if item.get("account") != nickname:
+            if not item.get("success") or item.get("uploaded") or item.get("upload_quarantined"):
                 continue
-            if not item.get("success"):
+            if not item.get("link"):
                 continue
-            if item.get("uploaded"):
+            if account is not None and item.get("account") != account:
                 continue
-            link = item.get("link", "")
-            if link and link in pending_urls:
-                continue
-            if not item.get("path"):
-                continue
-            data = self._read_downloaded_article_data(
-                item["path"],
-                {"source": nickname, "title": item.get("title", ""), "url": link},
-            )
-            if data:
-                scanned.append(data)
-                pending_urls.add(data.get("url", link))
+            out.append(item)
+            if len(out) >= UPLOAD_BATCH_LIMIT:
+                break
+        return out
 
-        # 3. 合并、去重、编码
-        all_articles = self._dedupe_upload_articles(pending + scanned, encode_content=True)
-        if not all_articles:
-            return {"success": True, "count": 0, "pending_count": 0, "error": None}
+    def count_pending(self, history: list, account: str | None = None) -> int:
+        return sum(
+            1 for it in history
+            if isinstance(it, dict) and it.get("success") and not it.get("uploaded")
+            and not it.get("upload_quarantined") and it.get("link")
+            and (account is None or it.get("account") == account)
+        )
 
-        # 4. 上传
+    def count_quarantined(self, history: list, account: str | None = None) -> int:
+        return sum(
+            1 for it in history
+            if isinstance(it, dict) and it.get("upload_quarantined")
+            and (account is None or it.get("account") == account)
+        )
+
+    def _payload_for_item(self, item: dict) -> dict | None:
+        """读取该条目对应的文章正文，构造可上传的（已编码）article"""
+        data = self._read_downloaded_article_data(
+            item.get("path") or "",
+            {"source": item.get("account", ""), "title": item.get("title", ""), "url": item.get("link", "")},
+        )
+        if not data:
+            return None
+        return self._normalize_upload_article(data, encode_content=True)
+
+    def _post_articles(self, articles: list, settings: dict) -> tuple[bool, str | None]:
+        """POST 一批文章到远端网关，返回 (是否成功, 错误信息)"""
+        from backend.config import get_proxies_dict
+
+        upload_url = (settings.get("rss_upload_url") or "").strip()
         payload = {
-            "articles": all_articles,
+            "articles": articles,
             "deviceId": settings.get("device_id") or "公众号_caiji100",
         }
         try:
@@ -344,31 +237,164 @@ class RssScheduler:
             try:
                 data = resp.json()
                 if isinstance(data, dict) and data.get("success") is False:
-                    raise RuntimeError(data.get("message") or data.get("error") or "远端接口返回失败")
+                    return False, (data.get("message") or data.get("error") or "远端接口返回失败")
             except ValueError:
                 pass
-
-            # 更新下载历史中的上传标记并保存
-            try:
-                uploaded_urls = {a.get("url") for a in all_articles if a.get("url")}
-                history_changed = False
-                for item in history:
-                    if isinstance(item, dict) and item.get("link") in uploaded_urls:
-                        if not item.get("uploaded"):
-                            item["uploaded"] = True
-                            history_changed = True
-                if history_changed:
-                    _save_json(DOWNLOAD_HISTORY_FILE, history)
-            except Exception as history_err:
-                logger.warning("手动上传更新历史标记失败: %s", history_err)
-
-            self._save_pending_upload_articles([])
-            logger.info("RSS 手动上传成功 [%s]: %d 篇", nickname, len(all_articles))
-            return {"success": True, "count": len(all_articles), "pending_count": 0, "error": None}
+            return True, None
         except Exception as e:
-            self._save_pending_upload_articles(all_articles)
-            logger.warning("RSS 手动上传失败 [%s]: %s", nickname, e)
-            return {"success": False, "count": 0, "pending_count": len(all_articles), "error": str(e)}
+            return False, str(e)
+
+    @staticmethod
+    def _mark_uploaded(item: dict):
+        item["uploaded"] = True
+        item["upload_time"] = time.time()
+        item["upload_error"] = None
+        item["upload_quarantined"] = False
+
+    @staticmethod
+    def _mark_attempt(item: dict, error: str | None, allow_quarantine: bool = False):
+        item["upload_attempts"] = item.get("upload_attempts", 0) + 1
+        item["upload_error"] = error
+        if allow_quarantine and item["upload_attempts"] >= UPLOAD_QUARANTINE_THRESHOLD:
+            item["upload_quarantined"] = True
+
+    def _append_upload_log(self, record: dict):
+        log = load_json(RSS_UPLOAD_LOG_FILE, [])
+        if not isinstance(log, list):
+            log = []
+        log.insert(0, record)
+        save_json(RSS_UPLOAD_LOG_FILE, log[:MAX_UPLOAD_LOG])
+
+    def get_upload_log(self, limit: int = 50, account: str | None = None) -> list:
+        log = load_json(RSS_UPLOAD_LOG_FILE, [])
+        if not isinstance(log, list):
+            return []
+        if account:
+            log = [
+                r for r in log
+                if isinstance(r, dict) and (
+                    r.get("account") == account
+                    or any(i.get("account") == account for i in r.get("items", []))
+                )
+            ]
+        return log[:max(1, limit)]
+
+    def _run_upload(self, history: list, trigger: str = "auto", account: str | None = None) -> dict:
+        """上传编排器：以 history 为事实来源，原地标记上传/重试/隔离，并写审计日志。
+
+        注意：本方法只修改 history 中的对象，不负责保存，由调用方统一保存。
+        """
+        from backend.config import get_settings
+
+        settings = get_settings()
+        result = {
+            "success": True, "attempted": False, "count": 0,
+            "succeeded": 0, "failed": 0, "quarantined": 0,
+            "pending_count": self.count_pending(history, account), "error": None, "disabled": False,
+        }
+
+        if not settings.get("rss_upload_enabled", False):
+            result["disabled"] = True
+            return result
+
+        if not (settings.get("rss_upload_url") or "").strip():
+            result["success"] = False
+            result["error"] = "RSS 上传接口地址未配置"
+            return result
+
+        candidates = self._collect_unuploaded(history, account)
+        if not candidates:
+            result["pending_count"] = 0
+            return result
+
+        # 构造上传载荷，无法读取正文的视为坏数据（计为一次尝试，达阈值即隔离）
+        built = []
+        for item in candidates:
+            art = self._payload_for_item(item)
+            if art:
+                built.append((item, art))
+            else:
+                self._mark_attempt(item, "文章内容缺失或无法读取", allow_quarantine=True)
+
+        succeeded = 0
+        quarantined = 0
+        last_error = None
+
+        if built:
+            ok, err = self._post_articles([art for _, art in built], settings)
+            if ok:
+                for item, _ in built:
+                    self._mark_uploaded(item)
+                succeeded += len(built)
+            else:
+                last_error = err
+                for item, _ in built:
+                    self._mark_attempt(item, err, allow_quarantine=False)
+                # 整批反复失败后逐篇隔离：定位坏文章，避免阻塞其他文章
+                if any(item.get("upload_attempts", 0) >= UPLOAD_QUARANTINE_THRESHOLD for item, _ in built):
+                    singles = [(item, *self._post_articles([art], settings)) for item, art in built]
+                    any_ok = any(ok_i for _, ok_i, _ in singles)
+                    for item, ok_i, err_i in singles:
+                        if ok_i:
+                            self._mark_uploaded(item)
+                            succeeded += 1
+                        elif any_ok and item.get("upload_attempts", 0) >= UPLOAD_QUARANTINE_THRESHOLD:
+                            # 其他文章能上传、唯独这篇逐篇也失败 → 判定为坏文章并隔离
+                            item["upload_quarantined"] = True
+                            item["upload_error"] = err_i
+                        else:
+                            item["upload_error"] = err_i
+
+        quarantined = sum(1 for item in candidates if item.get("upload_quarantined"))
+        failed = len(candidates) - succeeded
+
+        record = {
+            "time": time.time(),
+            "trigger": trigger,
+            "account": account,
+            "attempted": len(candidates),
+            "succeeded": succeeded,
+            "failed": failed,
+            "quarantined": quarantined,
+            "success": failed == 0,
+            "error": last_error,
+            "items": [
+                {
+                    "url": item.get("link", ""),
+                    "title": item.get("title", ""),
+                    "account": item.get("account", ""),
+                    "ok": bool(item.get("uploaded")),
+                }
+                for item in candidates[:50]
+            ],
+        }
+        self._append_upload_log(record)
+        logger.info(
+            "RSS 上传[%s]: 成功 %d / 共 %d，隔离 %d%s",
+            trigger, succeeded, len(candidates), quarantined,
+            f"，错误: {last_error}" if last_error else "",
+        )
+
+        result.update({
+            "success": failed == 0,
+            "attempted": True,
+            "count": succeeded,
+            "succeeded": succeeded,
+            "failed": failed,
+            "quarantined": quarantined,
+            "pending_count": self.count_pending(history, account),
+            "error": last_error,
+        })
+        return result
+
+    def force_upload_all(self, nickname: str) -> dict:
+        """强制上传该公众号所有待上传（未上传/未隔离）的文章（同步）"""
+        from backend.config import load_json as _load_json, save_json as _save_json, DOWNLOAD_HISTORY_FILE
+
+        history = _load_json(DOWNLOAD_HISTORY_FILE, [])
+        result = self._run_upload(history, trigger="manual", account=nickname)
+        _save_json(DOWNLOAD_HISTORY_FILE, history)
+        return result
 
     # ── 抓取逻辑 ──────────────────────────────────────────
 
@@ -384,8 +410,6 @@ class RssScheduler:
         last_error = None
         new_count = 0
         total_articles = sub.get("total_articles", 0)
-        upload_articles = []
-        all_downloads_success = True
         upload_result = None
 
         try:
@@ -466,8 +490,6 @@ class RssScheduler:
                             break
 
                     is_permanent = result.get("is_permanent", False) if isinstance(result, dict) else False
-                    if not success and not is_permanent:
-                        all_downloads_success = False
 
                     if existing_history_item:
                         # 只有当新结果成功，或者之前也是失败时，才更新（避免用失败覆盖成功）
@@ -512,24 +534,9 @@ class RssScheduler:
                         existing.insert(0, rss_item)
                         new_count += 1
 
-                    if success and downloaded_path:
-                        article_data = self._read_downloaded_article_data(
-                            downloaded_path,
-                            {
-                                "source": nickname,
-                                "title": result.get("title") or title,
-                                "url": link,
-                            },
-                        )
-                        if article_data:
-                            upload_articles.append(article_data)
-
                     # 避免抓取频率过快，加入延迟
                     if i < len(new_articles) - 1:
                         time.sleep(delay)
-
-                # 保存历史记录
-                save_json(DOWNLOAD_HISTORY_FILE, history)
 
             # 截断保留上限
             existing = existing[:MAX_ARTICLES_PER_ACCOUNT]
@@ -538,13 +545,9 @@ class RssScheduler:
                 1 for item in history
                 if isinstance(item, dict) and item.get("account") == nickname and item.get("success")
             )
-            if all_downloads_success:
-                upload_result = self._upload_new_articles(upload_articles)
-            else:
-                upload_result = self._defer_upload_articles(
-                    upload_articles,
-                    "等待本轮 RSS 新文章全部下载成功后再上传",
-                )
+            # 以下载历史为准上传（本轮新文章 + 历史中所有未上传/未隔离的文章会一并重试）
+            upload_result = self._run_upload(history, trigger="auto")
+            save_json(DOWNLOAD_HISTORY_FILE, history)
         except PermissionError:
             last_error = "登录已过期"
             logger.warning("RSS 抓取跳过 [%s]: 登录已过期", nickname)
@@ -568,7 +571,9 @@ class RssScheduler:
                             s["last_upload_time"] = time.time()
                             s["last_upload_count"] = upload_result.get("count", 0)
                         s["last_upload_error"] = upload_result.get("error")
-                        s["pending_upload_count"] = upload_result.get("pending_count", 0)
+                        # 以该账号在下载历史中的实际状态为准（单一事实来源）
+                        s["pending_upload_count"] = self.count_pending(history, nickname)
+                        s["quarantined_count"] = self.count_quarantined(history, nickname)
                         s["last_upload_attempted"] = upload_result.get("attempted", False)
                         s["last_upload_disabled"] = upload_result.get("disabled", False)
                     break

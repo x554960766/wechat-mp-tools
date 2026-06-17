@@ -92,6 +92,11 @@ const API = {
         },
         rssSubscriptions() { return API.get('/api/accounts/rss-subscriptions'); },
         rssForceUpload(fakeid) { return API.post(`/api/accounts/${fakeid}/rss-force-upload`); },
+        rssUploadLog(account, limit = 30) {
+            const qs = new URLSearchParams({ limit });
+            if (account) qs.set('account', account);
+            return API.get(`/api/accounts/rss-upload-log?${qs.toString()}`);
+        },
     },
 
     // ── Articles API ─────────────────────────────────

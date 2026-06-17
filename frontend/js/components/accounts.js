@@ -278,10 +278,22 @@ const AccountsPage = {
                         <span style="color: var(--text-muted);">上次上传：</span>
                         <span>${sub?.last_upload_time ? new Date(sub.last_upload_time * 1000).toLocaleString() : '暂无'}</span>
                     </div>
+                    ${globalUploadEnabled && (sub?.quarantined_count || 0) > 0 ? `
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                        <span style="color: var(--text-muted);">已隔离：</span>
+                        <span style="font-weight: 600; color: var(--error);">⛔ ${sub.quarantined_count} 篇（多次上传失败，已跳过）</span>
+                    </div>` : ''}
+                    ${sub?.last_upload_error ? `
+                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
+                        <span style="color: var(--text-muted);">上传错误：</span>
+                        <span style="color: var(--error); max-width: 60%; text-align: right; word-break: break-all;">${sub.last_upload_error}</span>
+                    </div>` : ''}
                     <div style="display: flex; gap: 8px; justify-content: flex-end; margin-top: 8px;">
                         ${globalUploadEnabled ? `<button class="btn btn-sm" style="background: rgba(7, 193, 96, 0.12); color: #07c160; border: 1px solid rgba(7, 193, 96, 0.25);" id="rss-force-upload-btn">📤 上传历史文章</button>` : ''}
+                        ${globalUploadEnabled ? `<button class="btn btn-secondary btn-sm" id="rss-upload-log-btn" style="padding: 3px 10px; font-size: 0.75rem;">📋 上传日志</button>` : ''}
                         <button class="btn btn-secondary btn-sm" id="rss-refresh-status-btn" style="padding: 3px 10px; font-size: 0.75rem;">刷新状态</button>
                     </div>
+                    <div id="rss-upload-log-panel" style="display: none; margin-top: 8px; max-height: 180px; overflow-y: auto; border-top: 1px solid var(--border-color); padding-top: 6px;"></div>
                     <div style="display: flex; justify-content: space-between;">
                         <span style="color: var(--text-muted);">累计抓取：</span>
                         <span>${sub?.total_articles || 0} 篇</span>
@@ -391,9 +403,10 @@ const AccountsPage = {
                     try {
                         const res = await API.accounts.rssForceUpload(fakeid);
                         if (res.success) {
-                            Toast.success(`上传成功 ${res.count} 篇`);
+                            Toast.success(res.count > 0 ? `上传成功 ${res.count} 篇` : '没有待上传的文章');
                         } else {
-                            Toast.warning(res.error || '上传失败');
+                            const q = res.quarantined ? `，${res.quarantined} 篇已隔离` : '';
+                            Toast.warning((res.error || '上传失败') + q);
                         }
                     } catch (err) {
                         Toast.error('上传请求失败');
@@ -408,6 +421,42 @@ const AccountsPage = {
                     interval = sub ? sub.interval_minutes : interval;
                     globalUploadEnabled = !!settingsData.rss_upload_enabled;
                     updateModalBody();
+                });
+            }
+
+            // 上传日志按钮（展开/收起）
+            const uploadLogBtn = overlay.querySelector('#rss-upload-log-btn');
+            const uploadLogPanel = overlay.querySelector('#rss-upload-log-panel');
+            if (uploadLogBtn && uploadLogPanel) {
+                uploadLogBtn.addEventListener('click', async () => {
+                    if (uploadLogPanel.style.display !== 'none') {
+                        uploadLogPanel.style.display = 'none';
+                        return;
+                    }
+                    uploadLogPanel.style.display = 'block';
+                    uploadLogPanel.innerHTML = '<div style="color: var(--text-muted); text-align: center; padding: 8px;">加载中...</div>';
+                    try {
+                        const res = await API.accounts.rssUploadLog(nickname, 20);
+                        const log = res.log || [];
+                        if (!log.length) {
+                            uploadLogPanel.innerHTML = '<div style="color: var(--text-muted); text-align: center; padding: 8px;">暂无上传记录</div>';
+                            return;
+                        }
+                        uploadLogPanel.innerHTML = log.map(r => {
+                            const t = r.time ? new Date(r.time * 1000).toLocaleString() : '';
+                            const trig = r.trigger === 'manual' ? '手动' : '自动';
+                            const ok = r.success;
+                            const stat = `<span style="color: var(--success, #4caf50);">✓${r.succeeded || 0}</span>` +
+                                ((r.failed || 0) > 0 ? ` <span style="color: var(--error);">✗${r.failed}</span>` : '') +
+                                ((r.quarantined || 0) > 0 ? ` <span style="color: var(--error);">⛔${r.quarantined}</span>` : '');
+                            return `<div style="display: flex; justify-content: space-between; gap: 8px; padding: 4px 0; border-bottom: 1px dashed var(--border-color); font-size: 0.78rem;">
+                                <span style="color: var(--text-muted);">${t} · ${trig}</span>
+                                <span>${stat}</span>
+                            </div>` + (r.error && !ok ? `<div style="color: var(--error); font-size: 0.72rem; padding: 0 0 4px;">${r.error}</div>` : '');
+                        }).join('');
+                    } catch (err) {
+                        uploadLogPanel.innerHTML = '<div style="color: var(--error); text-align: center; padding: 8px;">加载日志失败</div>';
+                    }
                 });
             }
 
@@ -520,6 +569,8 @@ const AccountsPage = {
             return '已关闭';
         }
         const pending = sub ? (sub.pending_upload_count || 0) : 0;
-        return pending > 0 ? `${pending}篇待上传` : '已开启';
+        if (pending > 0) return `${pending} 篇待上传`;
+        if (sub?.last_upload_error) return '上次上传失败';
+        return '✅ 已全部上传';
     },
 };

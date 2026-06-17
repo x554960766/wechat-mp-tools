@@ -226,11 +226,28 @@ def rss_unsubscribe(fakeid):
 
 @accounts_bp.route("/rss-subscriptions", methods=["GET"])
 def rss_subscriptions():
-    """获取所有 RSS 订阅状态"""
+    """获取所有 RSS 订阅状态（待上传/已隔离数实时从下载历史派生，保证单一事实来源）"""
     from backend.rss_scheduler import rss_scheduler
+    from backend.config import load_json, DOWNLOAD_HISTORY_FILE
 
     subs = rss_scheduler.get_subscriptions()
+    history = load_json(DOWNLOAD_HISTORY_FILE, [])
+    for sub in subs:
+        nickname = sub.get("nickname", "")
+        sub["pending_upload_count"] = rss_scheduler.count_pending(history, nickname)
+        sub["quarantined_count"] = rss_scheduler.count_quarantined(history, nickname)
     return jsonify({"subscriptions": subs})
+
+
+@accounts_bp.route("/rss-upload-log", methods=["GET"])
+def rss_upload_log():
+    """获取 RSS 上传审计日志（最近若干次上传记录）"""
+    from backend.rss_scheduler import rss_scheduler
+
+    limit = request.args.get("limit", default=30, type=int)
+    account = request.args.get("account") or None
+    log = rss_scheduler.get_upload_log(limit=limit, account=account)
+    return jsonify({"log": log})
 
 
 @accounts_bp.route("/<fakeid>/rss-force-upload", methods=["POST"])
@@ -252,12 +269,14 @@ def rss_force_upload(fakeid):
         subs = rss_scheduler.get_subscriptions()
         for s in subs:
             if s.get("fakeid") == fakeid:
-                s["last_upload_time"] = time.time()
-                s["last_upload_count"] = result.get("count", 0)
+                if result.get("attempted"):
+                    s["last_upload_time"] = time.time()
+                    s["last_upload_count"] = result.get("count", 0)
                 s["last_upload_error"] = result.get("error")
                 s["pending_upload_count"] = result.get("pending_count", 0)
-                s["last_upload_attempted"] = True
-                s["last_upload_disabled"] = False
+                s["quarantined_count"] = result.get("quarantined", 0)
+                s["last_upload_attempted"] = result.get("attempted", False)
+                s["last_upload_disabled"] = result.get("disabled", False)
                 break
         rss_scheduler._save_subscriptions(subs)
 
