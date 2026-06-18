@@ -10,7 +10,7 @@ import requests
 from pathlib import Path
 from flask import Blueprint, jsonify, request
 
-from backend.config import APP_VERSION, app_dir
+from backend.config import APP_VERSION, app_dir, get_proxies_dict
 
 updater_bp = Blueprint('updater', __name__)
 
@@ -32,8 +32,12 @@ _download_lock = threading.Lock()
 def _compare_versions(current: str, latest: str) -> bool:
     """返回 True 如果 latest 比 current 更新"""
     try:
-        cur_parts = [int(x) for x in current.strip().split('.')]
-        lat_parts = [int(x) for x in latest.strip().split('.')]
+        cur_parts = [int(x) for x in current.strip().lstrip("v").split('.')]
+        lat_parts = [int(x) for x in latest.strip().lstrip("v").split('.')]
+        # 补齐长度以实现鲁棒的语义化版本号对比
+        max_len = max(len(cur_parts), len(lat_parts))
+        cur_parts += [0] * (max_len - len(cur_parts))
+        lat_parts += [0] * (max_len - len(lat_parts))
         return lat_parts > cur_parts
     except (ValueError, AttributeError):
         return False
@@ -68,7 +72,7 @@ def check_update():
     try:
         resp = requests.get(GITHUB_API_URL, timeout=10, headers={
             "Accept": "application/vnd.github.v3+json",
-        })
+        }, proxies=get_proxies_dict())
         resp.raise_for_status()
         data = resp.json()
 
@@ -147,7 +151,7 @@ def start_download():
     def _do_download():
         global _download_state
         try:
-            resp = requests.get(url, stream=True, timeout=300)
+            resp = requests.get(url, stream=True, timeout=300, proxies=get_proxies_dict())
             resp.raise_for_status()
             total = int(resp.headers.get("content-length", 0))
 

@@ -91,9 +91,9 @@ if __name__ == '__main__':
                 """检测 WebView2 Evergreen Runtime 是否已安装（注册表 + 文件双重验证）"""
                 # 方法1: 注册表（系统级 + 用户级）
                 reg_paths = [
-                    r'HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEB-56B135A0CD3F}',
-                    r'HKLM\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEB-56B135A0CD3F}',
-                    r'HKCU\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BEB-56B135A0CD3F}',
+                    r'HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+                    r'HKLM\SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
+                    r'HKCU\Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}',
                 ]
                 for reg_path in reg_paths:
                     try:
@@ -107,14 +107,23 @@ if __name__ == '__main__':
                         continue
 
                 # 方法2: 文件系统（兜底，Edge 可能通过其他方式安装）
-                for base in [
-                    os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'),
-                    os.environ.get('ProgramFiles', r'C:\Program Files'),
-                    os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Microsoft', 'EdgeWebView'),
-                ]:
-                    candidate = os.path.join(base, 'Microsoft', 'EdgeWebView', 'Application', 'msedgewebview2.exe')
-                    if os.path.isfile(candidate):
-                        return True
+                search_dirs = [
+                    os.path.join(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'), 'Microsoft', 'EdgeWebView', 'Application'),
+                    os.path.join(os.environ.get('ProgramFiles', r'C:\Program Files'), 'Microsoft', 'EdgeWebView', 'Application'),
+                    os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Microsoft', 'EdgeWebView', 'Application'),
+                    os.path.join(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'), 'Microsoft', 'Edge', 'Application'),
+                    os.path.join(os.environ.get('ProgramFiles', r'C:\Program Files'), 'Microsoft', 'Edge', 'Application'),
+                    os.path.join(os.environ.get('LOCALAPPDATA', ''), 'Microsoft', 'Edge', 'Application'),
+                ]
+                for app_dir in search_dirs:
+                    if os.path.isdir(app_dir):
+                        try:
+                            for item in os.listdir(app_dir):
+                                candidate = os.path.join(app_dir, item, 'msedgewebview2.exe')
+                                if os.path.isfile(candidate):
+                                    return True
+                        except Exception:
+                            continue
 
                 return False
 
