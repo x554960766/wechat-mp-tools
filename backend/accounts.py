@@ -200,11 +200,8 @@ def rss_subscribe(fakeid):
 
     immediate_fetch = rss_scheduler.is_in_fetch_window()
     if immediate_fetch:
-        # 立即执行一次抓取，让 RSS 马上有内容
-        import threading
-        threading.Thread(
-            target=rss_scheduler._fetch_for_account, args=(sub,), daemon=True
-        ).start()
+        # 提交到线程池立即抓取，让 RSS 马上有内容
+        rss_scheduler.submit_fetch(sub)
 
     message = f"已开启 RSS 订阅: {nickname}"
     if not immediate_fetch:

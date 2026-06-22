@@ -5,6 +5,7 @@ RSS 自动订阅调度模块
 
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import logging
 import base64
 import binascii
@@ -26,10 +27,15 @@ MAX_ARTICLES_PER_ACCOUNT = 200
 
 # 单次上传最多携带的文章数（超出部分留待下一轮）
 UPLOAD_BATCH_LIMIT = 100
+# 上传子批次的初始大小（自适应：遇到数据量过大的失败时自动减半，最小为 1）
+UPLOAD_INITIAL_BATCH_SIZE = 20
 # 单篇连续失败达到该次数即隔离（quarantine），不再阻塞其他文章
 UPLOAD_QUARANTINE_THRESHOLD = 3
 # 上传审计日志最多保留的记录条数
 MAX_UPLOAD_LOG = 100
+
+# 并发抓取的最大线程数（I/O 密集型，线程大部分时间在等网络响应和延时）
+MAX_FETCH_WORKERS = 50
 
 
 class RssScheduler:
@@ -38,7 +44,11 @@ class RssScheduler:
     def __init__(self):
         self._thread = None
         self._stop_event = threading.Event()
-        self._lock = threading.Lock()
+        self._lock = threading.Lock()          # 保护 rss_subscriptions.json
+        self._history_lock = threading.Lock()  # 保护 DOWNLOAD_HISTORY_FILE 读改写
+        self._executor = ThreadPoolExecutor(max_workers=MAX_FETCH_WORKERS, thread_name_prefix="rss-fetch")
+        self._fetching: set[str] = set()       # 正在抓取中的 fakeid，防重复提交
+        self._fetching_lock = threading.Lock() # 保护 _fetching 集合
 
     # ── 订阅管理 ──────────────────────────────────────────
 
@@ -258,6 +268,21 @@ class RssScheduler:
         if allow_quarantine and item["upload_attempts"] >= UPLOAD_QUARANTINE_THRESHOLD:
             item["upload_quarantined"] = True
 
+    @staticmethod
+    def _is_size_related_error(error: str | None) -> bool:
+        """判断上传失败是否可能由数据量过大导致"""
+        if not error:
+            return False
+        err_lower = error.lower()
+        indicators = [
+            "413", "too large", "payload too large", "entity too large",
+            "request entity too large", "content length",
+            "timeout", "timed out", "read timed out",
+            "connection reset", "connection aborted", "broken pipe",
+            "远程主机强迫关闭", "连接被重置",
+        ]
+        return any(ind in err_lower for ind in indicators)
+
     def _append_upload_log(self, record: dict):
         log = load_json(RSS_UPLOAD_LOG_FILE, [])
         if not isinstance(log, list):
@@ -321,18 +346,53 @@ class RssScheduler:
         last_error = None
 
         if built:
-            ok, err = self._post_articles([art for _, art in built], settings)
-            if ok:
-                for item, _ in built:
-                    self._mark_uploaded(item)
-                succeeded += len(built)
-            else:
-                last_error = err
-                for item, _ in built:
-                    self._mark_attempt(item, err, allow_quarantine=False)
-                # 整批反复失败后逐篇隔离：定位坏文章，避免阻塞其他文章
-                if any(item.get("upload_attempts", 0) >= UPLOAD_QUARANTINE_THRESHOLD for item, _ in built):
-                    singles = [(item, *self._post_articles([art], settings)) for item, art in built]
+            # 自适应分批上传：初始批次 UPLOAD_INITIAL_BATCH_SIZE，失败时自动减半
+            batch_size = min(UPLOAD_INITIAL_BATCH_SIZE, len(built))
+            pos = 0
+
+            while pos < len(built):
+                chunk = built[pos:pos + batch_size]
+                ok, err = self._post_articles([art for _, art in chunk], settings)
+
+                if ok:
+                    for item, _ in chunk:
+                        self._mark_uploaded(item)
+                    succeeded += len(chunk)
+                    pos += len(chunk)
+                else:
+                    last_error = err
+                    if batch_size > 1 and self._is_size_related_error(err):
+                        # 疑似数据量过大，自动缩小批次并从当前位置重试
+                        new_size = max(1, batch_size // 2)
+                        logger.info("RSS 上传批次失败(疑似数据过大)，自动缩小批次: %d → %d", batch_size, new_size)
+                        batch_size = new_size
+                        continue
+                    # 已缩至单条或非数据量问题 → 标记/隔离并跳过
+                    for item, _ in chunk:
+                        if batch_size == 1 and self._is_size_related_error(err):
+                            # 单条仍因数据过大失败 → 判定为坏文章，立即隔离跳过
+                            item["upload_quarantined"] = True
+                            item["upload_error"] = err
+                            logger.info("RSS 上传: 单篇文章过大已自动跳过 [%s]", item.get("title", ""))
+                        else:
+                            self._mark_attempt(item, err, allow_quarantine=False)
+                    pos += len(chunk)
+                    # 跳过坏文章后恢复初始批次大小，继续高效上传剩余文章
+                    if batch_size == 1:
+                        batch_size = UPLOAD_INITIAL_BATCH_SIZE
+
+            # 整批反复失败后逐篇隔离：定位坏文章，避免阻塞其他文章
+            needs_quarantine = any(
+                not item.get("uploaded") and item.get("upload_attempts", 0) >= UPLOAD_QUARANTINE_THRESHOLD
+                for item, _ in built
+            )
+            if needs_quarantine:
+                failed_pairs = [
+                    (item, art) for item, art in built
+                    if not item.get("uploaded") and not item.get("upload_quarantined")
+                ]
+                if failed_pairs:
+                    singles = [(item, *self._post_articles([art], settings)) for item, art in failed_pairs]
                     any_ok = any(ok_i for _, ok_i, _ in singles)
                     for item, ok_i, err_i in singles:
                         if ok_i:
@@ -391,15 +451,37 @@ class RssScheduler:
         """强制上传该公众号所有待上传（未上传/未隔离）的文章（同步）"""
         from backend.config import load_json as _load_json, save_json as _save_json, DOWNLOAD_HISTORY_FILE
 
-        history = _load_json(DOWNLOAD_HISTORY_FILE, [])
-        result = self._run_upload(history, trigger="manual", account=nickname)
-        _save_json(DOWNLOAD_HISTORY_FILE, history)
+        with self._history_lock:
+            history = _load_json(DOWNLOAD_HISTORY_FILE, [])
+            result = self._run_upload(history, trigger="manual", account=nickname)
+            _save_json(DOWNLOAD_HISTORY_FILE, history)
         return result
 
     # ── 抓取逻辑 ──────────────────────────────────────────
 
+    def submit_fetch(self, sub: dict) -> bool:
+        """提交抓取任务到线程池（自动去重，同一公众号不会重复提交）"""
+        fakeid = sub.get("fakeid", "")
+        with self._fetching_lock:
+            if fakeid in self._fetching:
+                logger.debug("RSS 抓取跳过 [%s]: 已在抓取队列中", sub.get("nickname", fakeid))
+                return False
+            self._fetching.add(fakeid)
+        self._executor.submit(self._fetch_wrapper, sub)
+        return True
+
+    def _fetch_wrapper(self, sub: dict):
+        """线程池执行入口：执行抓取并在完成后清理 _fetching 状态"""
+        try:
+            self._fetch_for_account(sub)
+        except Exception as e:
+            logger.error("RSS 抓取线程异常 [%s]: %s", sub.get("nickname", ""), e)
+        finally:
+            with self._fetching_lock:
+                self._fetching.discard(sub.get("fakeid", ""))
+
     def _fetch_for_account(self, sub: dict):
-        """为单个订阅抓取最新文章并执行离线下载"""
+        """为单个订阅抓取最新文章并执行离线下载（由线程池调度）"""
         from backend.articles import _fetch_articles_page
         from backend.downloader import download_single_article
         from backend.config import load_json, save_json, DOWNLOAD_HISTORY_FILE, OUTPUT_DIR, get_settings
@@ -541,13 +623,37 @@ class RssScheduler:
             # 截断保留上限
             existing = existing[:MAX_ARTICLES_PER_ACCOUNT]
             self._save_articles(nickname, existing)
-            total_articles = sum(
-                1 for item in history
-                if isinstance(item, dict) and item.get("account") == nickname and item.get("success")
-            )
-            # 以下载历史为准上传（本轮新文章 + 历史中所有未上传/未隔离的文章会一并重试）
-            upload_result = self._run_upload(history, trigger="auto")
-            save_json(DOWNLOAD_HISTORY_FILE, history)
+            # ── 提交阶段：加锁合并 + 上传 + 保存 ──
+            _upload_fields = {"uploaded", "upload_time", "upload_error", "upload_quarantined", "upload_attempts"}
+            with self._history_lock:
+                # 重新读取磁盘版本，合并其他线程的并发修改
+                disk_history = load_json(DOWNLOAD_HISTORY_FILE, [])
+                disk_by_link = {
+                    it["link"]: it for it in disk_history
+                    if isinstance(it, dict) and it.get("link")
+                }
+                # 将本线程下载阶段的修改合并到磁盘版本中
+                for item in history:
+                    if not isinstance(item, dict) or not item.get("link"):
+                        continue
+                    link = item["link"]
+                    if link in disk_by_link:
+                        disk_item = disk_by_link[link]
+                        # 取本线程的下载字段，保留磁盘上的上传状态（可能被其他线程更新）
+                        for key, value in item.items():
+                            if key not in _upload_fields:
+                                disk_item[key] = value
+                    else:
+                        disk_history.append(item)
+                history = disk_history
+
+                total_articles = sum(
+                    1 for item in history
+                    if isinstance(item, dict) and item.get("account") == nickname and item.get("success")
+                )
+                # 以下载历史为准上传（本轮新文章 + 历史中所有未上传/未隔离的文章会一并重试）
+                upload_result = self._run_upload(history, trigger="auto", account=nickname)
+                save_json(DOWNLOAD_HISTORY_FILE, history)
         except PermissionError:
             last_error = "登录已过期"
             logger.warning("RSS 抓取跳过 [%s]: 登录已过期", nickname)
@@ -684,7 +790,7 @@ class RssScheduler:
                 self._save_subscriptions(subs)
 
         for sub in due_subs:
-            self._fetch_for_account(sub)
+            self.submit_fetch(sub)
 
 
     # ── 启停控制 ──────────────────────────────────────────
@@ -700,6 +806,7 @@ class RssScheduler:
         self._stop_event.set()
         if self._thread:
             self._thread.join(timeout=5)
+        self._executor.shutdown(wait=False)
 
 
 # 全局单例
