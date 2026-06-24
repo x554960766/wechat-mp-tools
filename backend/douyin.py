@@ -369,6 +369,33 @@ class DouyinClient:
         return self.api_post("https://www.douyin.com/aweme/v1/web/aweme/listcollection/", params, data=body_data)
 
 
+    def get_collect_folders(self, cursor: int = 0, count: int = 10) -> dict:
+        """获取收藏夹列表 (需要登录)"""
+        params = {
+            "cursor": str(cursor),
+            "count": str(count)
+        }
+        self.session.headers.update({
+            "Referer": "https://www.douyin.com/user/self?showTab=favorite_collection",
+            "Origin": "https://www.douyin.com"
+        })
+        return self.api_get("https://www.douyin.com/aweme/v1/web/collects/list/", params)
+
+
+    def get_collect_folder_videos(self, collect_id: str, cursor: int = 0, count: int = 18) -> dict:
+        """获取特定收藏夹下的视频列表 (需要登录)"""
+        params = {
+            "collect_id": str(collect_id),
+            "cursor": str(cursor),
+            "count": str(count)
+        }
+        self.session.headers.update({
+            "Referer": f"https://www.douyin.com/collection/{collect_id}",
+            "Origin": "https://www.douyin.com"
+        })
+        return self.api_get("https://www.douyin.com/aweme/v1/web/collects/video/list/", params)
+
+
     # ── 链接解析 ──────────────────────────────────────────
 
     def resolve_share_url(self, url: str) -> str:
@@ -1225,6 +1252,49 @@ def api_collected():
     try:
         api = DouyinClient()
         res = api.get_collected_videos(cursor, count)
+        if isinstance(res, dict):
+            # 兼容前端的 max_cursor 字段
+            next_cursor = res.get("cursor") if res.get("cursor") is not None else res.get("max_cursor", 0)
+            res["max_cursor"] = next_cursor
+            if "has_more" in res:
+                res["has_more"] = res["has_more"] if isinstance(res["has_more"], bool) else int(res["has_more"]) == 1
+        return jsonify(res)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@douyin_bp.route("/collects/list", methods=["GET"])
+def api_collects_list():
+    cursor = int(request.args.get("cursor", 0))
+    count = int(request.args.get("count", 20))
+    try:
+        api = DouyinClient()
+        res = api.get_collect_folders(cursor, count)
+        if isinstance(res, dict):
+            next_cursor = res.get("cursor") if res.get("cursor") is not None else res.get("max_cursor", 0)
+            res["max_cursor"] = next_cursor
+            if "has_more" in res:
+                res["has_more"] = res["has_more"] if isinstance(res["has_more"], bool) else int(res["has_more"]) == 1
+        return jsonify(res)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@douyin_bp.route("/collects/video/list", methods=["GET"])
+def api_collects_video_list():
+    collect_id = request.args.get("collect_id", "")
+    cursor = int(request.args.get("cursor", 0))
+    count = int(request.args.get("count", 18))
+    if not collect_id:
+        return jsonify({"error": "collect_id 不能为空"}), 400
+    try:
+        api = DouyinClient()
+        res = api.get_collect_folder_videos(collect_id, cursor, count)
+        if isinstance(res, dict):
+            next_cursor = res.get("cursor") if res.get("cursor") is not None else res.get("max_cursor", 0)
+            res["max_cursor"] = next_cursor
+            if "has_more" in res:
+                res["has_more"] = res["has_more"] if isinstance(res["has_more"], bool) else int(res["has_more"]) == 1
         return jsonify(res)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

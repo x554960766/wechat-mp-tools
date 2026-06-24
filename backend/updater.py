@@ -70,9 +70,11 @@ def _updates_dir() -> Path:
 def check_update():
     """检查是否有新版本"""
     try:
-        resp = requests.get(GITHUB_API_URL, timeout=10, headers={
+        headers = {
             "Accept": "application/vnd.github.v3+json",
-        }, proxies=get_proxies_dict())
+            "User-Agent": f"wechat-mp-tools/{APP_VERSION}"
+        }
+        resp = requests.get(GITHUB_API_URL, timeout=10, headers=headers, proxies=get_proxies_dict())
         resp.raise_for_status()
         data = resp.json()
 
@@ -112,11 +114,16 @@ def check_update():
         })
 
     except requests.RequestException as e:
+        error_msg = f"检查更新失败: {str(e)}"
+        if e.response is not None:
+            if e.response.status_code in (403, 429):
+                error_msg = "检查更新过于频繁或被 GitHub 限制 (403/429)，请稍后再试或配置代理网络。"
+        
         return jsonify({
             "has_update": False,
             "current_version": APP_VERSION,
             "latest_version": APP_VERSION,
-            "error": f"检查更新失败: {str(e)}",
+            "error": error_msg,
         })
 
 

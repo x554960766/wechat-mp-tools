@@ -598,94 +598,103 @@ def _do_batch_download(task_id: str, articles: list, account_name: str):
 
     history = load_json(DOWNLOAD_HISTORY_FILE, [])
 
-    for i, article in enumerate(articles):
-        with _download_lock:
-            task = _download_tasks.get(task_id, {})
-            if task.get("cancel_requested") or task.get("status") == "cancelling":
-                task["status"] = "cancelled"
-                task["current"] = ""
-                task["end_time"] = time.time()
-                task["stop_reason"] = task.get("stop_reason") or "用户请求停止"
-                save_json(DOWNLOAD_HISTORY_FILE, history)
-                return
-
-        link = article.get("link", "")
-        title = article.get("title", f"article_{i+1}")
-
-        with _download_lock:
-            _download_tasks[task_id]["current"] = f"正在下载第 {i+1} 篇..."
-
-        if not link:
+    try:
+        for i, article in enumerate(articles):
             with _download_lock:
-                _download_tasks[task_id]["failed"] += 1
-                _download_tasks[task_id]["results"].append({
-                    "title": title, "success": False, "error": "无链接"
-                })
-            continue
+                task = _download_tasks.get(task_id, {})
+                if task.get("cancel_requested") or task.get("status") == "cancelling":
+                    task["status"] = "cancelled"
+                    task["current"] = ""
+                    task["end_time"] = time.time()
+                    task["stop_reason"] = task.get("stop_reason") or "用户请求停止"
+                    save_json(DOWNLOAD_HISTORY_FILE, history)
+                    return
 
-        success = False
-        error_msg = ""
-        result = {}
+            link = article.get("link", "")
+            title = article.get("title", f"article_{i+1}")
 
-        for attempt in range(1, max_retries + 1):
-            try:
-                result = download_single_article(link, out_dir, title)
-                if result.get("success"):
-                    success = True
-                    break
-                error_msg = result.get("error", "未知错误")
-            except Exception as e:
-                error_msg = str(e)
-            time.sleep(1)
+            with _download_lock:
+                _download_tasks[task_id]["current"] = f"正在下载第 {i+1} 篇..."
 
-        if result.get("title"):
-            title = result["title"]
+            if not link:
+                with _download_lock:
+                    _download_tasks[task_id]["failed"] += 1
+                    _download_tasks[task_id]["results"].append({
+                        "title": title, "success": False, "error": "无链接"
+                    })
+                continue
 
-        downloaded_path = result.get("path") if success else None
+            success = False
+            error_msg = ""
+            result = {}
+
+            for attempt in range(1, max_retries + 1):
+                try:
+                    result = download_single_article(link, out_dir, title)
+                    if result.get("success"):
+                        success = True
+                        break
+                    error_msg = result.get("error", "未知错误")
+                except Exception as e:
+                    error_msg = str(e)
+                time.sleep(1)
+
+            if result.get("title"):
+                title = result["title"]
+
+            downloaded_path = result.get("path") if success else None
+
+            with _download_lock:
+                if success:
+                    _download_tasks[task_id]["completed"] += 1
+                    _download_tasks[task_id]["current"] = f"已完成：{title}"
+                    _download_tasks[task_id]["results"].append({
+                        "title": title, "success": True, "path": downloaded_path or str(out_dir / title)
+                    })
+                else:
+                    _download_tasks[task_id]["failed"] += 1
+                    _download_tasks[task_id]["current"] = f"下载失败：{title}"
+                    _download_tasks[task_id]["results"].append({
+                        "title": title, "success": False, "error": error_msg
+                    })
+
+            # 记录到下载历史
+            history.append({
+                "title": title,
+                "link": link,
+                "account": account_name,
+                "success": success,
+                "time": time.time(),
+                "error": error_msg if not success else None,
+                "path": downloaded_path,
+                "cover_url": result.get("cover_url", ""),
+                "digest": result.get("digest", ""),
+                "publish_time": result.get("publish_time", int(time.time())),
+            })
+
+            if i < len(articles) - 1:
+                time.sleep(delay)
+
+        # 保存历史
+        save_json(DOWNLOAD_HISTORY_FILE, history)
 
         with _download_lock:
-            if success:
-                _download_tasks[task_id]["completed"] += 1
-                _download_tasks[task_id]["current"] = f"已完成：{title}"
-                _download_tasks[task_id]["results"].append({
-                    "title": title, "success": True, "path": downloaded_path or str(out_dir / title)
-                })
+            task = _download_tasks[task_id]
+            if task.get("status") == "cancelling":
+                task["status"] = "cancelled"
+                task["stop_reason"] = task.get("stop_reason") or "用户请求停止"
             else:
-                _download_tasks[task_id]["failed"] += 1
-                _download_tasks[task_id]["current"] = f"下载失败：{title}"
-                _download_tasks[task_id]["results"].append({
-                    "title": title, "success": False, "error": error_msg
-                })
-
-        # 记录到下载历史
-        history.append({
-            "title": title,
-            "link": link,
-            "account": account_name,
-            "success": success,
-            "time": time.time(),
-            "error": error_msg if not success else None,
-            "path": downloaded_path,
-            "cover_url": result.get("cover_url", ""),
-            "digest": result.get("digest", ""),
-            "publish_time": result.get("publish_time", int(time.time())),
-        })
-
-        if i < len(articles) - 1:
-            time.sleep(delay)
-
-    # 保存历史
-    save_json(DOWNLOAD_HISTORY_FILE, history)
-
-    with _download_lock:
-        task = _download_tasks[task_id]
-        if task.get("status") == "cancelling":
-            task["status"] = "cancelled"
-            task["stop_reason"] = task.get("stop_reason") or "用户请求停止"
-        else:
-            task["status"] = "completed"
-        task["current"] = ""
-        task["end_time"] = time.time()
+                task["status"] = "completed"
+            task["current"] = ""
+            task["end_time"] = time.time()
+    finally:
+        try:
+            if settings.get("rss_upload_enabled", False):
+                from backend.rss_scheduler import rss_scheduler
+                rss_scheduler.force_upload_all(account_name)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error("下载完成后自动上传失败 [%s]: %s", account_name, e)
 
 
 def _download_article_into_task(task_id: str, article: dict, account_name: str, history: list, index: int = 0):
@@ -773,38 +782,8 @@ def _do_range_download(
     stop = False
 
     try:
-        while not stop:
-            with _download_lock:
-                task = _download_tasks.get(task_id, {})
-                if task.get("cancel_requested") or task.get("status") == "cancelling":
-                    task["status"] = "cancelled"
-                    task["current"] = ""
-                    task["end_time"] = time.time()
-                    task["stop_reason"] = task.get("stop_reason") or "用户请求停止"
-                    save_json(DOWNLOAD_HISTORY_FILE, history)
-                    return
-                task["current"] = f"正在获取第 {begin // page_size + 1} 页"
-
-            articles, total_count = _fetch_articles_page(fakeid, begin, page_size, keyword)
-            if not articles:
-                stop = True
-                with _download_lock:
-                    _download_tasks[task_id]["stop_reason"] = "没有更多文章"
-                break
-
-            with _download_lock:
-                _download_tasks[task_id]["scanned"] += len(articles)
-
-            for article in articles:
-                article_time = article.get("update_time") or 0
-                if article_time > end_time:
-                    continue
-                if article_time < start_time:
-                    stop = True
-                    with _download_lock:
-                        _download_tasks[task_id]["stop_reason"] = "已到达所选时间范围之前的文章"
-                    break
-
+        try:
+            while not stop:
                 with _download_lock:
                     task = _download_tasks.get(task_id, {})
                     if task.get("cancel_requested") or task.get("status") == "cancelling":
@@ -814,42 +793,81 @@ def _do_range_download(
                         task["stop_reason"] = task.get("stop_reason") or "用户请求停止"
                         save_json(DOWNLOAD_HISTORY_FILE, history)
                         return
-                    task["total"] += 1
+                    task["current"] = f"正在获取第 {begin // page_size + 1} 页"
 
-                _download_article_into_task(task_id, article, account_name, history, downloaded_index)
-                downloaded_index += 1
-                time.sleep(delay)
+                articles, total_count = _fetch_articles_page(fakeid, begin, page_size, keyword)
+                if not articles:
+                    stop = True
+                    with _download_lock:
+                        _download_tasks[task_id]["stop_reason"] = "没有更多文章"
+                    break
 
-            begin += page_size
-            if total_count and begin >= total_count:
                 with _download_lock:
-                    _download_tasks[task_id]["stop_reason"] = "已扫描全部文章"
-                break
+                    _download_tasks[task_id]["scanned"] += len(articles)
 
-        save_json(DOWNLOAD_HISTORY_FILE, history)
-        with _download_lock:
-            task = _download_tasks[task_id]
-            if task["status"] not in ("cancelled",):
-                task["status"] = "completed"
-            task["current"] = ""
-            task["end_time"] = time.time()
+                for article in articles:
+                    article_time = article.get("update_time") or 0
+                    if article_time > end_time:
+                        continue
+                    if article_time < start_time:
+                        stop = True
+                        with _download_lock:
+                            _download_tasks[task_id]["stop_reason"] = "已到达所选时间范围之前的文章"
+                        break
 
-    except PermissionError as e:
-        save_json(DOWNLOAD_HISTORY_FILE, history)
-        with _download_lock:
-            task = _download_tasks[task_id]
-            task["status"] = "failed"
-            task["current"] = ""
-            task["stop_reason"] = str(e)
-            task["end_time"] = time.time()
-    except Exception as e:
-        save_json(DOWNLOAD_HISTORY_FILE, history)
-        with _download_lock:
-            task = _download_tasks[task_id]
-            task["status"] = "failed"
-            task["current"] = ""
-            task["stop_reason"] = str(e)
-            task["end_time"] = time.time()
+                    with _download_lock:
+                        task = _download_tasks.get(task_id, {})
+                        if task.get("cancel_requested") or task.get("status") == "cancelling":
+                            task["status"] = "cancelled"
+                            task["current"] = ""
+                            task["end_time"] = time.time()
+                            task["stop_reason"] = task.get("stop_reason") or "用户请求停止"
+                            save_json(DOWNLOAD_HISTORY_FILE, history)
+                            return
+                        task["total"] += 1
+
+                    _download_article_into_task(task_id, article, account_name, history, downloaded_index)
+                    downloaded_index += 1
+                    time.sleep(delay)
+
+                begin += page_size
+                if total_count and begin >= total_count:
+                    with _download_lock:
+                        _download_tasks[task_id]["stop_reason"] = "已扫描全部文章"
+                    break
+
+            save_json(DOWNLOAD_HISTORY_FILE, history)
+            with _download_lock:
+                task = _download_tasks[task_id]
+                if task["status"] not in ("cancelled",):
+                    task["status"] = "completed"
+                task["current"] = ""
+                task["end_time"] = time.time()
+
+        except PermissionError as e:
+            save_json(DOWNLOAD_HISTORY_FILE, history)
+            with _download_lock:
+                task = _download_tasks[task_id]
+                task["status"] = "failed"
+                task["current"] = ""
+                task["stop_reason"] = str(e)
+                task["end_time"] = time.time()
+        except Exception as e:
+            save_json(DOWNLOAD_HISTORY_FILE, history)
+            with _download_lock:
+                task = _download_tasks[task_id]
+                task["status"] = "failed"
+                task["current"] = ""
+                task["stop_reason"] = str(e)
+                task["end_time"] = time.time()
+    finally:
+        try:
+            if settings.get("rss_upload_enabled", False):
+                from backend.rss_scheduler import rss_scheduler
+                rss_scheduler.force_upload_all(account_name)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error("下载完成后自动上传失败 [%s]: %s", account_name, e)
 
 
 @articles_bp.route("/open-folder", methods=["POST"])

@@ -3,16 +3,24 @@ const DyCollectionsPage = {
     cursor: 0,
     loading: false,
     hasMore: true,
+    selectedFolderId: '',
+    folders: [],
 
     render() {
         return `
             <div class="page-header">
-                <div style="display: flex; justify-content: space-between; align-items: center;">
-                    <div>
+                <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                    <div style="display: flex; flex-direction: column; gap: 8px;">
                         <h2 class="page-title">收藏视频</h2>
                         <p class="page-description">查看账号收藏的视频内容</p>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <span style="font-size: 0.9rem; color: var(--text-muted);">当前收藏夹:</span>
+                            <select id="dy-collection-folder-select" class="form-select" style="background: var(--bg-body); color: var(--text-primary); border: 1px solid var(--border-color); padding: 6px 12px; border-radius: 6px; font-size: 0.9rem; outline: none; cursor: pointer; min-width: 180px; max-width: 250px;" onchange="DyCollectionsPage.onFolderChange(this.value)">
+                                <option value="">全部收藏</option>
+                            </select>
+                        </div>
                     </div>
-                    <button class="btn btn-primary" onclick="DyCollectionsPage.refresh()" id="dy-recommend-refresh">
+                    <button class="btn btn-primary" onclick="DyCollectionsPage.refresh()" id="dy-recommend-refresh" style="align-self: flex-start;">
                         <svg viewBox="0 0 24 24" fill="none" style="width: 16px; height: 16px; margin-right: 6px;">
                             <polyline points="23 4 23 10 17 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                             <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
@@ -51,6 +59,43 @@ const DyCollectionsPage = {
         this.videos = [];
         this.cursor = 0;
         this.hasMore = true;
+        this.selectedFolderId = '';
+        this.folders = [];
+        await this.loadFolders();
+        await this.loadFeed();
+    },
+
+    async loadFolders() {
+        try {
+            const res = await fetch('/api/douyin/collects/list?count=50');
+            const data = await res.json();
+            if (data.error) {
+                console.warn("获取收藏夹列表失败:", data.error);
+                return;
+            }
+            this.folders = data.collects_list || [];
+            
+            // 渲染下拉选择框
+            const select = document.getElementById('dy-collection-folder-select');
+            if (select) {
+                select.innerHTML = '<option value="">全部收藏</option>' + 
+                    this.folders.map(folder => {
+                        const fid = folder.collect_id || folder.id;
+                        const name = folder.collect_name || folder.name || '未命名收藏夹';
+                        return `<option value="${fid}">${name}</option>`;
+                    }).join('');
+                select.value = this.selectedFolderId || '';
+            }
+        } catch (err) {
+            console.error("加载收藏夹列表出错:", err);
+        }
+    },
+
+    async onFolderChange(folderId) {
+        this.selectedFolderId = folderId;
+        this.videos = [];
+        this.cursor = 0;
+        this.hasMore = true;
         await this.loadFeed();
     },
 
@@ -61,7 +106,10 @@ const DyCollectionsPage = {
         this.showLoading();
 
         try {
-            const res = await fetch(`/api/douyin/collected?count=18&cursor=${this.cursor}`);
+            const url = this.selectedFolderId 
+                ? `/api/douyin/collects/video/list?collect_id=${this.selectedFolderId}&count=18&cursor=${this.cursor}`
+                : `/api/douyin/collected?count=18&cursor=${this.cursor}`;
+            const res = await fetch(url);
             const data = await res.json();
 
             if (data.error) {
@@ -94,7 +142,10 @@ const DyCollectionsPage = {
         }
 
         try {
-            const res = await fetch(`/api/douyin/collected?count=18&cursor=${this.cursor}`);
+            const url = this.selectedFolderId 
+                ? `/api/douyin/collects/video/list?collect_id=${this.selectedFolderId}&count=18&cursor=${this.cursor}`
+                : `/api/douyin/collected?count=18&cursor=${this.cursor}`;
+            const res = await fetch(url);
             const data = await res.json();
 
             if (data.error) {
@@ -122,6 +173,7 @@ const DyCollectionsPage = {
         this.videos = [];
         this.cursor = 0;
         this.hasMore = true;
+        await this.loadFolders();
         await this.loadFeed();
     },
 

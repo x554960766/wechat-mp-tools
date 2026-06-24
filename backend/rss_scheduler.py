@@ -507,122 +507,131 @@ class RssScheduler:
             count = 10
             max_pages = 5 # 限制最大翻页数，防死循环
             
-            for page_idx in range(max_pages):
-                page_articles, _total = _fetch_articles_page(fakeid, begin=begin, count=count)
-                if not page_articles:
-                    break
-                
-                has_old_article = False
-                for art in page_articles:
-                    link = art.get("link")
-                    if link:
-                        # 如果已经在 RSS 缓存或下载历史中，说明后面的文章都是已下载过的老文章了
-                        if link in existing_links or link in history_links:
-                            has_old_article = True
-                        else:
-                            new_articles.append(art)
-                
-                # 如果当前页中包含了已有的老文章，或者新文章总数已经太多了，就不需要再往后翻页了
-                if has_old_article or len(page_articles) < count:
-                    break
-                
-                begin += count
-                # 翻页间稍作延时，避免被微信风控
-                time.sleep(1.5)
+            try:
+                for page_idx in range(max_pages):
+                    page_articles, _total = _fetch_articles_page(fakeid, begin=begin, count=count)
+                    if not page_articles:
+                        break
+                    
+                    has_old_article = False
+                    for art in page_articles:
+                        link = art.get("link")
+                        if link:
+                            # 如果已经在 RSS 缓存或下载历史中，说明后面的文章都是已下载过的老文章了
+                            if link in existing_links or link in history_links:
+                                has_old_article = True
+                            else:
+                                new_articles.append(art)
+                    
+                    # 如果当前页中包含了已有的老文章，或者新文章总数已经太多了，就不需要再往后翻页了
+                    if has_old_article or len(page_articles) < count:
+                        break
+                    
+                    begin += count
+                    # 翻页间稍作延时，避免被微信风控
+                    time.sleep(1.5)
 
-            if new_articles:
-                # 准备下载目录
-                out_dir = OUTPUT_DIR / nickname
-                out_dir.mkdir(parents=True, exist_ok=True)
+                if new_articles:
+                    # 准备下载目录
+                    out_dir = OUTPUT_DIR / nickname
+                    out_dir.mkdir(parents=True, exist_ok=True)
 
-                settings = get_settings()
-                delay = settings.get("request_delay", 0.8)
-                max_retries = settings.get("max_retries", 3)
+                    settings = get_settings()
+                    delay = settings.get("request_delay", 0.8)
+                    max_retries = settings.get("max_retries", 3)
 
-                # 按时间升序排序（最旧的新文章先下载，保证顺序正确）
-                for i, art in enumerate(reversed(new_articles)):
-                    link = art.get("link", "")
-                    title = art.get("title", "")
-                    if not link:
-                        continue
+                    # 按时间升序排序（最旧的新文章先下载，保证顺序正确）
+                    for i, art in enumerate(reversed(new_articles)):
+                        link = art.get("link", "")
+                        title = art.get("title", "")
+                        if not link:
+                            continue
 
-                    # 尝试下载
-                    success = False
-                    downloaded_path = None
-                    error_msg = ""
-                    result = {}
+                        # 尝试下载
+                        success = False
+                        downloaded_path = None
+                        error_msg = ""
+                        result = {}
 
-                    for attempt in range(1, max_retries + 1):
-                        try:
-                            result = download_single_article(link, out_dir, title)
-                            if result.get("success"):
-                                success = True
-                                downloaded_path = result.get("path")
+                        for attempt in range(1, max_retries + 1):
+                            try:
+                                result = download_single_article(link, out_dir, title)
+                                if result.get("success"):
+                                    success = True
+                                    downloaded_path = result.get("path")
+                                    break
+                                error_msg = result.get("error", "未知错误")
+                            except Exception as e:
+                                error_msg = str(e)
+                            time.sleep(1)
+
+                        # 寻找历史记录中是否已存在该链接
+                        existing_history_item = None
+                        for item in history:
+                            if isinstance(item, dict) and item.get("link") == link:
+                                existing_history_item = item
                                 break
-                            error_msg = result.get("error", "未知错误")
-                        except Exception as e:
-                            error_msg = str(e)
-                        time.sleep(1)
 
-                    # 寻找历史记录中是否已存在该链接
-                    existing_history_item = None
-                    for item in history:
-                        if isinstance(item, dict) and item.get("link") == link:
-                            existing_history_item = item
-                            break
+                        is_permanent = result.get("is_permanent", False) if isinstance(result, dict) else False
 
-                    is_permanent = result.get("is_permanent", False) if isinstance(result, dict) else False
+                        if existing_history_item:
+                            # 只有当新结果成功，或者之前也是失败时，才更新（避免用失败覆盖成功）
+                            if success or not existing_history_item.get("success"):
+                                existing_history_item["success"] = success
+                                existing_history_item["time"] = time.time()
+                                existing_history_item["error"] = error_msg if not success else None
+                                existing_history_item["path"] = downloaded_path
+                                if result.get("cover_url"):
+                                    existing_history_item["cover_url"] = result.get("cover_url")
+                                if result.get("digest"):
+                                    existing_history_item["digest"] = result.get("digest")
+                                if result.get("publish_time"):
+                                    existing_history_item["publish_time"] = result["publish_time"]
+                        else:
+                            existing_history_item = {
+                                "title": result.get("title") or title,
+                                "link": link,
+                                "account": nickname,
+                                "success": success,
+                                "time": time.time(),
+                                "error": error_msg if not success else None,
+                                "path": downloaded_path,
+                                "cover_url": result.get("cover_url") or art.get("cover", ""),
+                                "digest": result.get("digest") or art.get("digest", ""),
+                                "publish_time": result.get("publish_time") or art.get("update_time", int(time.time())),
+                            }
+                            history.append(existing_history_item)
+                            history_links.add(link)
 
-                    if existing_history_item:
-                        # 只有当新结果成功，或者之前也是失败时，才更新（避免用失败覆盖成功）
-                        if success or not existing_history_item.get("success"):
-                            existing_history_item["success"] = success
-                            existing_history_item["time"] = time.time()
-                            existing_history_item["error"] = error_msg if not success else None
-                            existing_history_item["path"] = downloaded_path
-                            if result.get("cover_url"):
-                                existing_history_item["cover_url"] = result.get("cover_url")
-                            if result.get("digest"):
-                                existing_history_item["digest"] = result.get("digest")
-                            if result.get("publish_time"):
-                                existing_history_item["publish_time"] = result["publish_time"]
-                    else:
-                        existing_history_item = {
-                            "title": result.get("title") or title,
-                            "link": link,
-                            "account": nickname,
-                            "success": success,
-                            "time": time.time(),
-                            "error": error_msg if not success else None,
-                            "path": downloaded_path,
-                            "cover_url": result.get("cover_url") or art.get("cover", ""),
-                            "digest": result.get("digest") or art.get("digest", ""),
-                            "publish_time": result.get("publish_time") or art.get("update_time", int(time.time())),
-                        }
-                        history.append(existing_history_item)
-                        history_links.add(link)
+                        # 仅在下载成功，或该失败是永久性失败（如作者已删除/内容被屏蔽）时，才加入到订阅缓存列表中（防止重复重试）
+                        if success or is_permanent:
+                            rss_item = {
+                                "title": result.get("title") or title,
+                                "link": link,
+                                "cover": result.get("cover_url") or art.get("cover", ""),
+                                "digest": result.get("digest") or art.get("digest", ""),
+                                "author": nickname,
+                                "update_time": result.get("publish_time") or art.get("update_time", int(time.time())),
+                                "path": downloaded_path or "",
+                            }
+                            existing.insert(0, rss_item)
+                            new_count += 1
 
-                    # 仅在下载成功，或该失败是永久性失败（如作者已删除/内容被屏蔽）时，才加入到订阅缓存列表中（防止重复重试）
-                    if success or is_permanent:
-                        rss_item = {
-                            "title": result.get("title") or title,
-                            "link": link,
-                            "cover": result.get("cover_url") or art.get("cover", ""),
-                            "digest": result.get("digest") or art.get("digest", ""),
-                            "author": nickname,
-                            "update_time": result.get("publish_time") or art.get("update_time", int(time.time())),
-                            "path": downloaded_path or "",
-                        }
-                        existing.insert(0, rss_item)
-                        new_count += 1
+                        # 避免抓取频率过快，加入延迟
+                        if i < len(new_articles) - 1:
+                            time.sleep(delay)
 
-                    # 避免抓取频率过快，加入延迟
-                    if i < len(new_articles) - 1:
-                        time.sleep(delay)
+            except PermissionError as e:
+                last_error = "登录已过期"
+                logger.warning("RSS 抓取跳过 [%s]: 登录已过期", nickname)
+            except Exception as e:
+                last_error = str(e)
+                logger.warning("RSS 抓取失败 [%s]: %s", nickname, e)
 
             # 截断保留上限
             existing = existing[:MAX_ARTICLES_PER_ACCOUNT]
             self._save_articles(nickname, existing)
+            
             # ── 提交阶段：加锁合并 + 上传 + 保存 ──
             _upload_fields = {"uploaded", "upload_time", "upload_error", "upload_quarantined", "upload_attempts"}
             with self._history_lock:
@@ -654,12 +663,11 @@ class RssScheduler:
                 # 以下载历史为准上传（本轮新文章 + 历史中所有未上传/未隔离的文章会一并重试）
                 upload_result = self._run_upload(history, trigger="auto", account=nickname)
                 save_json(DOWNLOAD_HISTORY_FILE, history)
-        except PermissionError:
-            last_error = "登录已过期"
-            logger.warning("RSS 抓取跳过 [%s]: 登录已过期", nickname)
-        except Exception as e:
-            last_error = str(e)
-            logger.warning("RSS 抓取失败 [%s]: %s", nickname, e)
+
+        except Exception as outer_e:
+            if not last_error:
+                last_error = str(outer_e)
+            logger.warning("RSS 抓取失败 [%s]: %s", nickname, outer_e)
 
         # 写入状态更新
         with self._lock:
