@@ -80,7 +80,7 @@ const DyCollectionsPage = {
             if (select) {
                 select.innerHTML = '<option value="">全部收藏</option>' + 
                     this.folders.map(folder => {
-                        const fid = folder.collects_id || folder.collect_id || folder.id;
+                        const fid = folder.collects_id_str || folder.collect_id_str || folder.id_str || folder.collects_id || folder.collect_id || folder.id;
                         const name = folder.collects_name || folder.collect_name || folder.name || folder.title || '未命名收藏夹';
                         return `<option value="${fid}">${name}</option>`;
                     }).join('');
