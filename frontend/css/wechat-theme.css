@@ -196,3 +196,13 @@ body.wechat-theme .modal-title {
 body.wechat-theme .modal-body {
     color: #515154;
 }
+
+body.wechat-theme .btn-danger {
+    background: #fa5151;
+    color: #ffffff;
+    box-shadow: 0 4px 15px rgba(250, 81, 81, 0.15);
+}
+body.wechat-theme .btn-danger:hover {
+    background: #d84545;
+    box-shadow: 0 6px 20px rgba(250, 81, 81, 0.25);
+}

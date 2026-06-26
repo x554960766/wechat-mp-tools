@@ -14,4 +14,7 @@ pyobjc-framework-WebKit>=10.0; sys_platform == "darwin"
 xhshow>=0.2.0
 pyyaml>=6.0
 httpx
+mitmproxy>=12.0
+# mitmproxy<=12.2.3 把 typing-extensions 锁在 <=4.14;固定该版本避免与 pydantic 的依赖解析冲突
+typing-extensions==4.14.0
 

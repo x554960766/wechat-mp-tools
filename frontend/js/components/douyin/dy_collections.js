@@ -73,15 +73,15 @@ const DyCollectionsPage = {
                 console.warn("获取收藏夹列表失败:", data.error);
                 return;
             }
-            this.folders = data.collects_list || [];
+            this.folders = data.collects_list || data.collect_list || [];
             
             // 渲染下拉选择框
             const select = document.getElementById('dy-collection-folder-select');
             if (select) {
                 select.innerHTML = '<option value="">全部收藏</option>' + 
                     this.folders.map(folder => {
-                        const fid = folder.collect_id || folder.id;
-                        const name = folder.collect_name || folder.name || '未命名收藏夹';
+                        const fid = folder.collects_id || folder.collect_id || folder.id;
+                        const name = folder.collects_name || folder.collect_name || folder.name || folder.title || '未命名收藏夹';
                         return `<option value="${fid}">${name}</option>`;
                     }).join('');
                 select.value = this.selectedFolderId || '';

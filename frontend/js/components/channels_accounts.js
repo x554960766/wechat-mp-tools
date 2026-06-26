@@ -100,6 +100,10 @@ const ChannelsAccountsPage = {
         this.isParsing = false;
     },
 
+    async onShow() {
+        await this.init();
+    },
+
     async init() {
         await this.loadFavorites();
     },
@@ -327,8 +331,8 @@ const ChannelsAccountsPage = {
                     </div>
 
                     <div style="display: flex; gap: var(--spacing-xs); justify-content: flex-end; margin-top: var(--spacing-md); border-top: 1px solid var(--border-color); padding-top: var(--spacing-sm);">
-                        <button class="btn btn-secondary btn-sm action-btn" onclick="ChannelsAccountsPage.removeFavoriteConfirm('${this.esc(fav.username)}', '${this.esc(fav.nickname)}')" style="font-size: 0.8rem; padding: 4px 10px; border-radius: 6px; color: #ff3b30; border-color: rgba(255,59,48,0.2);">
-                            🗑️ 取消收藏
+                        <button class="btn btn-secondary btn-sm action-btn" onclick="ChannelsAccountsPage.removeFavoriteConfirm('${this.esc(fav.username)}', '${this.esc(fav.nickname)}')" style="font-size: 0.8rem; padding: 4px 10px; border-radius: 6px; color: var(--error); border-color: rgba(245,87,108,0.2);">
+                            🗑️ 删除作者
                         </button>
                         <button class="btn btn-primary btn-sm action-btn" onclick="Router.navigate('channels_user?username=${this.esc(fav.username)}')" style="font-size: 0.8rem; padding: 4px 12px; border-radius: 6px; font-weight: 500;">
                             进入主页 ➔
@@ -341,23 +345,23 @@ const ChannelsAccountsPage = {
 
     removeFavoriteConfirm(username, nickname) {
         Modal.open({
-            title: '取消收藏确认',
-            content: `<p style="color: var(--text-secondary)">您确定要取消收藏创作者“${this.esc(nickname)}”吗？<br><span style="font-size:0.8rem;color:var(--text-muted);display:block;margin-top:6px;">取消收藏后，作者已下载的作品历史记录不会被删除，但将不再展示在创作者管理列表中。</span></p>`,
+            title: '删除作者确认',
+            content: `<p style="color: var(--text-secondary)">您确定要删除创作者“${this.esc(nickname)}”吗？<br><span style="font-size:0.8rem;color:var(--text-muted);display:block;margin-top:6px;">注意：确认后将删除该作者及其所有已同步的本地作品数据。</span></p>`,
             footer: `
-                <button class="btn btn-secondary" onclick="Modal.close()">暂不取消</button>
-                <button class="btn btn-primary" id="confirm-unfavorite-btn" style="background: #ff3b30; color: white; border-color: rgba(255,59,48,0.2); font-weight: 500;">确认取消</button>
+                <button class="btn btn-secondary" onclick="Modal.close()">取消</button>
+                <button class="btn btn-danger" id="confirm-delete-btn" style="font-weight: 500;">确认删除</button>
             `
         });
-        const confirmBtn = document.getElementById('confirm-unfavorite-btn');
+        const confirmBtn = document.getElementById('confirm-delete-btn');
         if (confirmBtn) {
             confirmBtn.onclick = async () => {
                 Modal.close();
                 try {
                     await API.channels.removeFavorite(username);
-                    Toast.success('取消收藏成功');
+                    Toast.success('删除作者成功');
                     await this.loadFavorites();
                 } catch (err) {
-                    Toast.error('取消收藏失败: ' + err.message);
+                    Toast.error('删除作者失败: ' + err.message);
                 }
             };
         }

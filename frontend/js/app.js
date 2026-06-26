@@ -206,8 +206,11 @@ const App = {
         let taskId = null;
         let isDownloading = true;
 
+        Toast.info('已开始视频下载任务，请稍候...');
+
         Modal.open({
             title: '📥 正在下载视频到本地',
+            preventClose: true,
             content: `
                 <div style="padding: 10px 0;">
                     <p style="font-size: 0.95rem; color: var(--text-secondary); margin-bottom: 20px; line-height: 1.5; word-break: break-all;">
@@ -389,7 +392,7 @@ const App = {
                     content: `
                         <div style="padding: 10px 0; text-align: center;">
                             <p style="font-size: 1.1rem; font-weight: 600; color: var(--success); margin-bottom: 8px;">✅ 已是最新版本</p>
-                            <p style="color: var(--text-secondary);">当前版本 v${data.current_version || '1.1.3'}</p>
+                            <p style="color: var(--text-secondary);">当前版本 v${data.current_version || '1.2.0'}</p>
                         </div>
                     `,
                     footer: '<button class="btn btn-primary" onclick="Modal.close()" style="width: 100%;">关闭</button>'

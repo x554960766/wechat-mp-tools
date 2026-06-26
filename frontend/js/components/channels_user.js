@@ -214,8 +214,8 @@ const ChannelsUserPage = {
             }
             if (favBtn) {
                 const isFav = favs.some(f => f.username === this.username);
-                favBtn.textContent = isFav ? '💚 取消收藏' : '➕ 收藏作者';
-                favBtn.className = isFav ? 'btn btn-secondary' : 'btn btn-primary';
+                favBtn.textContent = isFav ? '🗑️ 删除作者' : '➕ 收藏作者';
+                favBtn.className = isFav ? 'btn btn-danger' : 'btn btn-primary';
             }
         } catch (err) {
             console.error('加载作者详情失败:', err);
@@ -229,13 +229,32 @@ const ChannelsUserPage = {
             const isFav = favs.some(f => f.username === this.username);
 
             if (isFav) {
-                await API.channels.removeFavorite(this.username);
-                Toast.success('已取消收藏该作者');
+                Modal.open({
+                    title: '删除作者确认',
+                    content: `<p style="color: var(--text-secondary)">您确定要删除创作者“${this.esc(this.authorInfo.nickname)}”吗？<br><span style="font-size:0.8rem;color:var(--text-muted);display:block;margin-top:6px;">注意：确认后将删除该作者及其所有已同步的本地作品数据。</span></p>`,
+                    footer: `
+                        <button class="btn btn-secondary" onclick="Modal.close()">取消</button>
+                        <button class="btn btn-danger" id="confirm-user-delete-btn" style="font-weight: 500;">确认删除</button>
+                    `
+                });
+                const confirmBtn = document.getElementById('confirm-user-delete-btn');
+                if (confirmBtn) {
+                    confirmBtn.onclick = async () => {
+                        Modal.close();
+                        try {
+                            await API.channels.removeFavorite(this.username);
+                            Toast.success('删除作者成功');
+                            Router.navigate('channels_accounts');
+                        } catch (err) {
+                            Toast.error('删除作者失败: ' + err.message);
+                        }
+                    };
+                }
             } else {
                 await API.channels.addFavorite(this.authorInfo);
                 Toast.success('收藏作者成功！');
+                await this.loadAuthorDetails();
             }
-            await this.loadAuthorDetails();
         } catch (err) {
             Toast.error('操作失败: ' + err.message);
         }

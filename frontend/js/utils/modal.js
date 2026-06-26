@@ -10,11 +10,15 @@ const Modal = {
         this.dialog = document.getElementById('modal-dialog');
 
         this.overlay.addEventListener('click', (e) => {
-            if (e.target === this.overlay) this.close();
+            if (e.target === this.overlay) {
+                if (this.preventClose) return;
+                this.close();
+            }
         });
 
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape' && this.overlay.classList.contains('active')) {
+                if (this.preventClose) return;
                 this.close();
             }
         });
@@ -23,12 +27,13 @@ const Modal = {
     open(options = {}) {
         if (!this.overlay) this.init();
 
-        const { title = '', content = '', footer = '', onClose = null } = options;
+        const { title = '', content = '', footer = '', onClose = null, preventClose = false } = options;
+        this.preventClose = preventClose;
 
         this.dialog.innerHTML = `
             <div class="modal-header">
                 <h3 class="modal-title">${title}</h3>
-                <button class="modal-close" onclick="Modal.close()">&times;</button>
+                ${preventClose ? '' : '<button class="modal-close" onclick="Modal.close()">&times;</button>'}
             </div>
             <div class="modal-body">${content}</div>
             ${footer ? `<div class="modal-footer">${footer}</div>` : ''}

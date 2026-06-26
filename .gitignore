@@ -37,3 +37,12 @@ backend/subtitle_remover/backend/ffmpeg/
 we-mp-rss/
 wechat_video_sniffer_repo/
 wx_channels_download_temp/
+updates/
+scratch/
+scratch_*
+wechat-mp-server/
+
+*.recovered
+*.spec.bak
+*.pyc
+

@@ -386,6 +386,7 @@ class DouyinClient:
         """获取特定收藏夹下的视频列表 (需要登录)"""
         params = {
             "collect_id": str(collect_id),
+            "collects_id": str(collect_id),
             "cursor": str(cursor),
             "count": str(count)
         }
@@ -1256,8 +1257,10 @@ def api_collected():
             # 兼容前端的 max_cursor 字段
             next_cursor = res.get("cursor") if res.get("cursor") is not None else res.get("max_cursor", 0)
             res["max_cursor"] = next_cursor
-            if "has_more" in res:
+            if res.get("has_more") is not None:
                 res["has_more"] = res["has_more"] if isinstance(res["has_more"], bool) else int(res["has_more"]) == 1
+            else:
+                res["has_more"] = False
         return jsonify(res)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1273,8 +1276,10 @@ def api_collects_list():
         if isinstance(res, dict):
             next_cursor = res.get("cursor") if res.get("cursor") is not None else res.get("max_cursor", 0)
             res["max_cursor"] = next_cursor
-            if "has_more" in res:
+            if res.get("has_more") is not None:
                 res["has_more"] = res["has_more"] if isinstance(res["has_more"], bool) else int(res["has_more"]) == 1
+            else:
+                res["has_more"] = False
         return jsonify(res)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1293,8 +1298,10 @@ def api_collects_video_list():
         if isinstance(res, dict):
             next_cursor = res.get("cursor") if res.get("cursor") is not None else res.get("max_cursor", 0)
             res["max_cursor"] = next_cursor
-            if "has_more" in res:
+            if res.get("has_more") is not None:
                 res["has_more"] = res["has_more"] if isinstance(res["has_more"], bool) else int(res["has_more"]) == 1
+            else:
+                res["has_more"] = False
         return jsonify(res)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

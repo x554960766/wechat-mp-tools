@@ -377,6 +377,97 @@ def cookie_acquisition_status():
         return jsonify(_cookie_task)
 
 
+def save_parsed_video_to_db(result):
+    """把解析成功的视频和作者信息自动保存到本地作者库和收藏列表"""
+    if not result or result.get("errCode") != 0:
+        return
+    data = result.get("data") or {}
+    fi = data.get("feedInfo")
+    ai = data.get("authorInfo")
+    if not fi or not ai:
+        return
+        
+    username = ai.get("username") or ai.get("nickname")
+    nickname = ai.get("nickname") or "未命名作者"
+    head_img_url = ai.get("headImgUrl") or ""
+    
+    if not username:
+        return
+        
+    username = urllib.parse.unquote(username)
+        
+    # 1. 自动把作者加到收藏列表 (CHANNELS_FAVORITES_FILE)
+    try:
+        favorites = load_json(CHANNELS_FAVORITES_FILE, [])
+        found_fav = False
+        for fav in favorites:
+            if fav.get("username") == username:
+                if head_img_url:
+                    fav["head_img_url"] = head_img_url
+                if nickname and nickname != "未命名作者":
+                    fav["nickname"] = nickname
+                found_fav = True
+                break
+        if not found_fav:
+            favorites.append({
+                "username": username,
+                "nickname": nickname,
+                "head_img_url": head_img_url,
+                "added_time": int(time.time())
+            })
+        save_json(CHANNELS_FAVORITES_FILE, favorites)
+    except Exception as ef:
+        print(f"自动保存作者到收藏失败: {ef}")
+        
+    # 2. 把视频加到作者的作品库中 (CHANNELS_FEEDS_FILE)
+    try:
+        feeds_db = load_json(CHANNELS_FEEDS_FILE, {})
+        if username not in feeds_db:
+            feeds_db[username] = []
+            
+        feed_id = fi.get("id")
+        if feed_id:
+            description = fi.get("description") or ""
+            cover_url = fi.get("coverUrl") or ""
+            video_url = fi.get("videoUrl") or ""
+            
+            # 提取 specs
+            video_url_h264 = fi.get("h264VideoInfo", {}).get("videoUrl", "")
+            video_url_h265 = fi.get("h265VideoInfo", {}).get("videoUrl", "")
+            if not video_url_h264:
+                video_url_h264 = video_url
+            if not video_url_h265:
+                video_url_h265 = video_url
+                
+            createtime = str(fi.get("createtime", 0))
+            decode_key = fi.get("decodeKey") or ""
+            
+            item = {
+                "id": feed_id,
+                "description": description,
+                "cover_url": cover_url,
+                "video_url": video_url,
+                "video_url_h264": video_url_h264,
+                "video_url_h265": video_url_h265,
+                "createtime": createtime,
+                "decode_key": decode_key
+            }
+            
+            exists = False
+            for ex_item in feeds_db[username]:
+                if ex_item.get("id") == feed_id:
+                    ex_item.update(item)
+                    exists = True
+                    break
+                    
+            if not exists:
+                feeds_db[username].append(item)
+                
+            save_json(CHANNELS_FEEDS_FILE, feeds_db)
+    except Exception as ev:
+        print(f"自动保存视频到作者库失败: {ev}")
+
+
 @channels_bp.route("/fetch_video_profile", methods=["POST"])
 def fetch_video_profile():
     """解析视频号分享链接，提取视频 CDN 地址和元数据（支持本地解析、私有Worker以及免翻墙智能穿透）"""
@@ -400,6 +491,7 @@ def fetch_video_profile():
     if yuanbao_cookie:
         try:
             result = local_parse_with_yuanbao(share_url, yuanbao_cookie)
+            save_parsed_video_to_db(result)
             return jsonify(result)
         except Exception as e:
             # 本地解析失败时，可优雅回退到云端代理模式
@@ -438,7 +530,9 @@ def fetch_video_profile():
         if resp.status_code == 200:
             if proxy_url:
                 report_proxy_status(proxy_url, success=True)
-            return jsonify(resp.json())
+            result = resp.json()
+            save_parsed_video_to_db(result)
+            return jsonify(result)
     except Exception:
         if proxy_url:
             report_proxy_status(proxy_url, success=False)
@@ -472,7 +566,9 @@ def fetch_video_profile():
                     timeout=12
                 )
                 if resp.status_code == 200:
-                    return jsonify(resp.json())
+                    result = resp.json()
+                    save_parsed_video_to_db(result)
+                    return jsonify(result)
             except Exception:
                 continue
 
@@ -700,14 +796,32 @@ def add_favorite():
 
 @channels_bp.route("/favorites/<username>", methods=["DELETE"])
 def remove_favorite(username):
-    """从收藏列表删除视频号作者"""
+    """从收藏列表删除视频号作者及其同步的数据"""
     if not username:
         return jsonify({"error": "作者 ID 不能为空"}), 400
 
+    username = urllib.parse.unquote(username)
     favorites = load_json(CHANNELS_FAVORITES_FILE, [])
+    
+    # 查找作者的 nickname，用于清理任何以 nickname 为键的数据
+    nickname = None
+    for fav in favorites:
+        if fav.get("username") == username:
+            nickname = fav.get("nickname")
+            break
+
     new_favorites = [fav for fav in favorites if fav.get("username") != username]
     save_json(CHANNELS_FAVORITES_FILE, new_favorites)
-    return jsonify({"message": "已取消收藏", "favorites": new_favorites})
+
+    # 从 Feeds 数据库移除该作者的所有视频/同步数据
+    feeds_db = load_json(CHANNELS_FEEDS_FILE, {})
+    if username in feeds_db:
+        feeds_db.pop(username, None)
+    if nickname and nickname in feeds_db:
+        feeds_db.pop(nickname, None)
+    save_json(CHANNELS_FEEDS_FILE, feeds_db)
+
+    return jsonify({"message": "已删除作者及同步数据", "favorites": new_favorites})
 
 
 @channels_bp.route("/author-videos/<username>", methods=["GET"])
@@ -715,6 +829,7 @@ def get_author_videos(username):
     """获取指定作者已解析的视频列表"""
     if not username:
         return jsonify([])
+    username = urllib.parse.unquote(username)
     feeds_db = load_json(CHANNELS_FEEDS_FILE, {})
     author_videos = feeds_db.get(username, [])
     return jsonify(author_videos)
@@ -725,6 +840,7 @@ def add_author_video(username):
     """为指定作者添加/保存一条解析成功的视频信息"""
     if not username:
         return jsonify({"error": "作者 ID 不能为空"}), 400
+    username = urllib.parse.unquote(username)
     feed = request.get_json() or {}
     feed_id = feed.get("id")
     if not feed_id:
@@ -769,11 +885,14 @@ def start_proxy_server():
     """启动本地拦截代理服务"""
     from backend.mitm_proxy import ProxyManager
     manager = ProxyManager.get_instance()
-    success = manager.start()
-    if success:
-        return jsonify({"message": "同步代理服务已成功启动，系统代理已设置", "running": True})
-    else:
-        return jsonify({"error": "启动同步代理服务失败，端口可能被占用"}), 500
+    try:
+        success = manager.start()
+        if success:
+            return jsonify({"message": "同步代理服务已成功启动，系统代理已设置", "running": True})
+        else:
+            return jsonify({"error": "启动同步代理服务失败，端口可能被占用"}), 500
+    except Exception as ex:
+        return jsonify({"error": str(ex)}), 500
 
 
 @channels_bp.route("/proxy/stop", methods=["POST"])

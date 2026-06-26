@@ -9,8 +9,6 @@ import re
 import sys
 import json
 import time
-import socket
-import ssl
 import threading
 import subprocess
 from pathlib import Path
@@ -25,6 +23,12 @@ def print(*args, **kwargs):
 CA_KEY_PATH = DATA_DIR / "ca.key"
 CA_CERT_PATH = DATA_DIR / "ca.crt"
 CERTS_DIR = DATA_DIR / "certs"
+# mitmproxy 的配置目录:复用我们已生成并已被系统信任的 CA,
+# 避免 mitmproxy 自己另生成一张未受信任的 CA(那会导致握手失败 → 页面疯狂重刷)。
+MITM_CONFDIR = DATA_DIR / "mitm"
+
+# 拦截目标主机(仅对这两个域名做 TLS 解密,其余全部透传)
+TARGET_HOSTS = ("channels.weixin.qq.com", "mp.weixin.qq.com", "res.wx.qq.com")
 
 # Create certs directory
 CERTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -71,6 +75,18 @@ def ensure_ca_certificates():
         datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3650)
     ).add_extension(
         x509.BasicConstraints(ca=True, path_length=None), critical=True
+    ).add_extension(
+        x509.KeyUsage(
+            digital_signature=True,
+            content_commitment=False,
+            key_encipherment=False,
+            data_encipherment=False,
+            key_agreement=False,
+            key_cert_sign=True,
+            crl_sign=True,
+            encipher_only=False,
+            decipher_only=False
+        ), critical=True
     ).sign(private_key, hashes.SHA256())
     
     with open(CA_KEY_PATH, "wb") as f:
@@ -81,96 +97,72 @@ def ensure_ca_certificates():
         ))
     with open(CA_CERT_PATH, "wb") as f:
         f.write(cert.public_bytes(serialization.Encoding.PEM))
-        
+
     return CA_KEY_PATH, CA_CERT_PATH
 
-def get_host_certificate(host):
+def prepare_mitm_confdir():
+    """把已生成、已受系统信任的 CA(ca.key + ca.crt)写入 mitmproxy 的
+    配置目录,文件名为 mitmproxy-ca.pem(key 与 cert 拼接的 PEM)。
+    这样 mitmproxy 用我们这张 CA 去签发各站点的叶子证书,沿用现有的
+    安装/信任/卸载逻辑(CN=Channels Interceptor CA),不会另起一张新 CA。
+    返回 confdir 路径。
+    """
     ensure_ca_certificates()
-    
-    host_key_path = CERTS_DIR / f"{host}.key"
-    host_cert_path = CERTS_DIR / f"{host}.crt"
-    
-    if host_key_path.exists() and host_cert_path.exists():
-        return host_cert_path, host_key_path
-        
-    # Generate host cert signed by CA
-    import datetime
-    from cryptography import x509
-    from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.hazmat.primitives import serialization
+    MITM_CONFDIR.mkdir(parents=True, exist_ok=True)
+    ca_pem = MITM_CONFDIR / "mitmproxy-ca.pem"
+    key_bytes = CA_KEY_PATH.read_bytes()
+    cert_bytes = CA_CERT_PATH.read_bytes()
+    combined = key_bytes
+    if not combined.endswith(b"\n"):
+        combined += b"\n"
+    combined += cert_bytes
+    # 仅在内容变化时重写,避免每次启动都触碰文件
+    if not ca_pem.exists() or ca_pem.read_bytes() != combined:
+        ca_pem.write_bytes(combined)
+    # mitmproxy 还会用到 *-ca-cert.pem 等派生文件;删掉旧的让其按新 CA 重建
+    for stale in ("mitmproxy-ca-cert.pem", "mitmproxy-ca-cert.cer",
+                  "mitmproxy-ca-cert.p12", "mitmproxy-dhparam.pem"):
+        p = MITM_CONFDIR / stale
+        try:
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+    return MITM_CONFDIR
 
-    with open(CA_KEY_PATH, "rb") as f:
-        ca_key = serialization.load_pem_private_key(f.read(), password=None)
-    with open(CA_CERT_PATH, "rb") as f:
-        ca_cert = x509.load_pem_x509_certificate(f.read())
-        
-    host_key = rsa.generate_private_key(
-        public_exponent=65537,
-        key_size=2048,
-    )
-    
-    subject = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, host),
-    ])
-    
-    cert = x509.CertificateBuilder().subject_name(
-        subject
-    ).issuer_name(
-        ca_cert.subject
-    ).public_key(
-        host_key.public_key()
-    ).serial_number(
-        x509.random_serial_number()
-    ).not_valid_before(
-        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=1)
-    ).not_valid_after(
-        datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=365)
-    ).add_extension(
-        x509.SubjectAlternativeName([x509.DNSName(host)]), critical=False
-    ).add_extension(
-        x509.BasicConstraints(ca=False, path_length=None), critical=True
-    ).add_extension(
-        x509.KeyUsage(
-            digital_signature=True,
-            content_commitment=False,
-            key_encipherment=True,
-            data_encipherment=False,
-            key_agreement=False,
-            key_cert_sign=False,
-            crl_sign=False,
-            encipher_only=False,
-            decipher_only=False
-        ), critical=True
-    ).add_extension(
-        x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False
-    ).sign(ca_key, hashes.SHA256())
-    
-    with open(host_key_path, "wb") as f:
-        f.write(host_key.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.TraditionalOpenSSL,
-            encryption_algorithm=serialization.NoEncryption()
-        ))
-    with open(host_cert_path, "wb") as f:
-        f.write(cert.public_bytes(serialization.Encoding.PEM))
-        
-    return host_cert_path, host_key_path
 
 def check_cert_trusted():
     if sys.platform == "darwin":
         try:
-            # Check if cert is present in keychain and trusted for SSL in any domain
-            out = subprocess.run(["security", "dump-trust-settings"], capture_output=True, text=True)
-            if out.returncode == 0 and "Channels Interceptor CA" in out.stdout:
-                return True
+            def has_valid_trust_count(output_text):
+                lines = output_text.splitlines()
+                for i, line in enumerate(lines):
+                    if "Channels Interceptor CA" in line:
+                        for j in range(i + 1, min(i + 5, len(lines))):
+                            if "Number of trust settings" in lines[j]:
+                                match = re.search(r"Number of trust settings\s*:\s*(\d+)", lines[j])
+                                if match and int(match.group(1)) > 0:
+                                    return True
+                return False
+
+            # 1. Check System-wide domain trust settings
             out_d = subprocess.run(["security", "dump-trust-settings", "-d"], capture_output=True, text=True)
             if out_d.returncode == 0 and "Channels Interceptor CA" in out_d.stdout:
-                return True
+                if has_valid_trust_count(out_d.stdout):
+                    return True
+            
+            # 2. Check User domain trust settings (installed via fallback to login keychain)
             out_s = subprocess.run(["security", "dump-trust-settings", "-s"], capture_output=True, text=True)
             if out_s.returncode == 0 and "Channels Interceptor CA" in out_s.stdout:
-                return True
+                if has_valid_trust_count(out_s.stdout):
+                    return True
+                    
+            # 3. Check Default domain trust settings
+            out = subprocess.run(["security", "dump-trust-settings"], capture_output=True, text=True)
+            if out.returncode == 0 and "Channels Interceptor CA" in out.stdout:
+                if has_valid_trust_count(out.stdout):
+                    return True
+                    
             return False
         except Exception:
             return False
@@ -187,20 +179,39 @@ def install_system_cert(ca_cert_path):
         return True
         
     if sys.platform == "darwin":
+        # Try to delete from user keychains to prevent duplicates/conflicts
         try:
-            # Install to user login keychain and trust it for SSL without admin/sudo prompts
-            keychain_path = os.path.expanduser("~/Library/Keychains/login.keychain-db")
+            subprocess.run(["security", "delete-certificate", "-c", "Channels Interceptor CA"], capture_output=True)
+        except Exception:
+            pass
+            
+        # 1. Attempt to install system-wide first (targets System.keychain)
+        try:
             subprocess.run([
                 "security", "add-trusted-cert",
+                "-d",
                 "-r", "trustRoot",
-                "-p", "ssl",
-                "-k", keychain_path,
+                "-k", "/Library/Keychains/System.keychain",
                 str(ca_cert_path)
-            ], check=True)
+            ], check=True, capture_output=True)
             return True
-        except Exception as e:
-            print(f"Failed to install Mac cert: {e}")
-            return False
+        except Exception as system_err:
+            print(f"System keychain installation failed: {system_err}. Falling back to Login keychain...")
+            
+            # 2. Fallback to user login keychain (no admin privileges / GUI prompt required)
+            try:
+                keychain_path = os.path.expanduser("~/Library/Keychains/login.keychain-db")
+                subprocess.run([
+                    "security", "add-trusted-cert",
+                    "-r", "trustRoot",
+                    "-p", "ssl",
+                    "-k", keychain_path,
+                    str(ca_cert_path)
+                ], check=True)
+                return True
+            except Exception as e:
+                print(f"Failed to install Mac cert to Login keychain: {e}")
+                return False
     elif sys.platform == "win32":
         try:
             subprocess.run(["certutil", "-addstore", "-user", "root", str(ca_cert_path)], check=True)
@@ -212,12 +223,39 @@ def install_system_cert(ca_cert_path):
 
 def uninstall_system_cert():
     if sys.platform == "darwin":
+        cert_path = str(CA_CERT_PATH)
+        # 1. 先删用户登录钥匙串里的(不需要管理员权限)
         try:
-            subprocess.run(["security", "delete-certificate", "-c", "Channels Interceptor CA"], check=True)
-            return True
-        except Exception as e:
-            print(f"Failed to delete Mac cert: {e}")
-            return False
+            subprocess.run(
+                ["security", "delete-certificate", "-c", "Channels Interceptor CA"],
+                capture_output=True
+            )
+        except Exception:
+            pass
+
+        # 2. System.keychain 的删除与去信任需要管理员权限。
+        #    用 osascript 触发一次 GUI 授权(与安装时一致),
+        #    在一个提权 shell 里同时去掉信任设置并删除证书。
+        if CA_CERT_PATH.exists():
+            inner = (
+                f"/usr/bin/security remove-trusted-cert -d '{cert_path}'; "
+                "/usr/bin/security delete-certificate -c 'Channels Interceptor CA' "
+                "/Library/Keychains/System.keychain"
+            )
+            osa = (
+                'do shell script "' + inner.replace('"', '\\"') + '" '
+                'with administrator privileges'
+            )
+            try:
+                subprocess.run(["osascript", "-e", osa], capture_output=True)
+            except Exception as e:
+                print(f"osascript uninstall failed: {e}")
+
+        # 3. 以信任状态为准返回真实结果,不再无条件 True
+        still_trusted = check_cert_trusted()
+        if still_trusted:
+            print("Cert still trusted after uninstall attempt")
+        return not still_trusted
     elif sys.platform == "win32":
         try:
             subprocess.run(["certutil", "-delstore", "-user", "root", "Channels Interceptor CA"], check=True)
@@ -292,593 +330,255 @@ def set_system_proxy(enabled, port=5202):
         set_windows_proxy(enabled, port=port)
 
 
-# ── HTTP 解析与代理逻辑 (HTTP Parsing & Proxy Core) ───────────────
+# ── mitmproxy 拦截插件 (Interception Addon) ──────────────────────
+# 用成熟的 mitmproxy 引擎替代手写 HTTP/1.1 解析器:
+# HTTP/2、chunked、SSE/长轮询、WebSocket 全部由引擎正确处理,
+# 不会再因解析错位或 read-until-EOF 阻塞导致视频号页面疯狂重刷。
 
-def read_http_request(r_file):
-    req_line = r_file.readline()
-    if not req_line:
-        return None
-    headers = {}
-    while True:
-        line = r_file.readline()
-        if not line or line == b"\r\n" or line == b"\n":
-            break
-        parts = line.decode("utf-8", errors="ignore").split(":", 1)
-        if len(parts) == 2:
-            headers[parts[0].strip().lower()] = parts[1].strip()
-            
-    body = b""
-    if "content-length" in headers:
-        content_length = int(headers["content-length"])
-        body = r_file.read(content_length)
-        
-    return {
-        "line": req_line,
-        "headers": headers,
-        "body": body
-    }
+class ChannelsAddon:
+    """只对视频号 / 公众号两个域名做拦截与注入,其余流量透传。"""
 
-def read_http_response(r_file):
-    resp_line = r_file.readline()
-    if not resp_line:
-        return None
-    # Parse status code
-    status_code = 200
-    try:
-        parts = resp_line.decode("utf-8", errors="ignore").split()
-        if len(parts) >= 2:
-            status_code = int(parts[1])
-    except:
-        pass
+    def _local_json(self, flow, status, payload_bytes):
+        from mitmproxy import http
+        flow.response = http.Response.make(
+            status,
+            payload_bytes,
+            {"Content-Type": "application/json"},
+        )
 
-    headers = {}
-    while True:
-        line = r_file.readline()
-        if not line or line == b"\r\n" or line == b"\n":
-            break
-        parts = line.decode("utf-8", errors="ignore").split(":", 1)
-        if len(parts) == 2:
-            headers[parts[0].strip().lower()] = parts[1].strip()
-            
-    body = b""
-    if status_code in (204, 304) or (100 <= status_code < 200):
-        pass
-    elif "content-length" in headers:
-        content_length = int(headers["content-length"])
-        body = r_file.read(content_length)
-    elif headers.get("transfer-encoding") == "chunked":
-        while True:
-            chunk_header = r_file.readline()
-            if not chunk_header:
-                break
-            chunk_size_str = chunk_header.split(b";")[0].strip()
-            if not chunk_size_str:
-                break
-            try:
-                chunk_size = int(chunk_size_str, 16)
-            except ValueError:
-                break
-            if chunk_size == 0:
-                while True:
-                    line = r_file.readline()
-                    if not line or line == b"\r\n" or line == b"\n":
-                        break
-                break
-            data = r_file.read(chunk_size)
-            r_file.read(2) # CRLF
-            body += data
-        if "transfer-encoding" in headers:
-            del headers["transfer-encoding"]
-    else:
-        # Read until EOF
-        body = r_file.read()
-            
-    return {
-        "line": resp_line,
-        "status_code": status_code,
-        "headers": headers,
-        "body": body
-    }
-
-def tcp_tunnel(sock1, sock2):
-    sock1.settimeout(15.0)
-    sock2.settimeout(15.0)
-    def forward(src, dst):
+    def _forward_to_flask(self, flow, url):
+        import urllib.request
         try:
-            while True:
-                data = src.recv(16384)
-                if not data:
-                    break
-                dst.sendall(data)
-        except Exception:
-            pass
-        finally:
-            try: src.close()
-            except: pass
-            try: dst.close()
-            except: pass
-
-    t = threading.Thread(target=forward, args=(sock1, sock2), daemon=True)
-    t.start()
-    forward(sock2, sock1)
-    t.join()
-
-def process_http_session(client_ssl, server_ssl, host):
-    client_ssl.settimeout(30.0)
-    server_ssl.settimeout(30.0)
-    try:
-        client_r = client_ssl.makefile("rb", buffering=4096)
-        server_r = server_ssl.makefile("rb", buffering=4096)
-        
-        while True:
-            req = read_http_request(client_r)
-            if not req:
-                break
-                
-            req_line_str = req["line"].decode("utf-8", errors="ignore")
-            req_parts = req_line_str.split()
-            if len(req_parts) < 2:
-                break
-            path = req_parts[1]
-            print(f"[Proxy Request] {host} {req_parts[0]} {path}", flush=True)
-            
-            # Intercept fake sync feed path
-            if host == "channels.weixin.qq.com" and path == "/__wx_channels_api/sync-feed":
-                try:
-                    payload = json.loads(req["body"].decode("utf-8"))
-                    username = payload.get("username")
-                    feeds = payload.get("feeds", [])
-                    save_synced_feeds(username, feeds)
-                    
-                    resp_body = b'{"success":true,"message":"Feeds synced successfully"}'
-                    resp = (
-                        b"HTTP/1.1 200 OK\r\n"
-                        b"Content-Type: application/json\r\n"
-                        b"Content-Length: " + str(len(resp_body)).encode() + b"\r\n"
-                        b"Connection: keep-alive\r\n\r\n" + resp_body
-                    )
-                    client_ssl.sendall(resp)
-                    continue
-                except Exception as ex:
-                    print(f"Error handling sync-feed in proxy: {ex}")
-                    resp_body = f'{{"success":false,"error":"{str(ex)}"}}'.encode()
-                    resp = (
-                        b"HTTP/1.1 500 Internal Server Error\r\n"
-                        b"Content-Type: application/json\r\n"
-                        b"Content-Length: " + str(len(resp_body)).encode() + b"\r\n"
-                        b"Connection: keep-alive\r\n\r\n" + resp_body
-                    )
-                    client_ssl.sendall(resp)
-                    continue
-
-            # Intercept frontend error logging
-            elif host == "channels.weixin.qq.com" and path == "/__wx_channels_api/log-error":
-                try:
-                    payload = json.loads(req["body"].decode("utf-8"))
-                    print(f"[FRONTEND ERROR] {payload.get('message')}", flush=True)
-                    resp_body = b'{"success":true}'
-                    resp = (
-                        b"HTTP/1.1 200 OK\r\n"
-                        b"Content-Type: application/json\r\n"
-                        b"Content-Length: " + str(len(resp_body)).encode() + b"\r\n"
-                        b"Connection: keep-alive\r\n\r\n" + resp_body
-                    )
-                    client_ssl.sendall(resp)
-                    continue
-                except Exception as ex:
-                    print(f"Error handling log-error: {ex}")
-                    resp_body = f'{{"success":false,"error":"{str(ex)}"}}'.encode()
-                    resp = (
-                        b"HTTP/1.1 500 Internal Server Error\r\n"
-                        b"Content-Type: application/json\r\n"
-                        b"Content-Length: " + str(len(resp_body)).encode() + b"\r\n"
-                        b"Connection: keep-alive\r\n\r\n" + resp_body
-                    )
-                    client_ssl.sendall(resp)
-                    continue
-
-            # Intercept video download requests to forward to Flask backend
-            elif host == "channels.weixin.qq.com" and path == "/__wx_channels_api/download":
-                try:
-                    import urllib.request
-                    req_data = req["body"]
-                    headers = {"Content-Type": "application/json"}
-                    flask_req = urllib.request.Request(
-                        "http://127.0.0.1:5200/api/channels/download",
-                        data=req_data,
-                        headers=headers,
-                        method="POST"
-                    )
-                    with urllib.request.urlopen(flask_req, timeout=60) as flask_resp:
-                        resp_body = flask_resp.read()
-                        
-                    resp = (
-                        b"HTTP/1.1 200 OK\r\n"
-                        b"Content-Type: application/json\r\n"
-                        b"Content-Length: " + str(len(resp_body)).encode() + b"\r\n"
-                        b"Connection: keep-alive\r\n\r\n" + resp_body
-                    )
-                    client_ssl.sendall(resp)
-                    continue
-                except Exception as ex:
-                    print(f"Error handling video download in proxy: {ex}")
-                    resp_body = f'{{"success":false,"error":"{str(ex)}"}}'.encode()
-                    resp = (
-                        b"HTTP/1.1 500 Internal Server Error\r\n"
-                        b"Content-Type: application/json\r\n"
-                        b"Content-Length: " + str(len(resp_body)).encode() + b"\r\n"
-                        b"Connection: keep-alive\r\n\r\n" + resp_body
-                    )
-                    client_ssl.sendall(resp)
-                    continue
-
-            # Intercept official account article download requests to forward to Flask backend
-            elif host == "mp.weixin.qq.com" and path == "/__wx_official_api/download":
-                try:
-                    import urllib.request
-                    req_data = req["body"]
-                    headers = {"Content-Type": "application/json"}
-                    flask_req = urllib.request.Request(
-                        "http://127.0.0.1:5200/api/articles/download-url",
-                        data=req_data,
-                        headers=headers,
-                        method="POST"
-                    )
-                    with urllib.request.urlopen(flask_req, timeout=60) as flask_resp:
-                        resp_body = flask_resp.read()
-                        
-                    resp = (
-                        b"HTTP/1.1 200 OK\r\n"
-                        b"Content-Type: application/json\r\n"
-                        b"Content-Length: " + str(len(resp_body)).encode() + b"\r\n"
-                        b"Connection: keep-alive\r\n\r\n" + resp_body
-                    )
-                    client_ssl.sendall(resp)
-                    continue
-                except Exception as ex:
-                    print(f"Error handling official-download in proxy: {ex}")
-                    resp_body = f'{{"success":false,"error":"{str(ex)}"}}'.encode()
-                    resp = (
-                        b"HTTP/1.1 500 Internal Server Error\r\n"
-                        b"Content-Type: application/json\r\n"
-                        b"Content-Length: " + str(len(resp_body)).encode() + b"\r\n"
-                        b"Connection: keep-alive\r\n\r\n" + resp_body
-                    )
-                    client_ssl.sendall(resp)
-                    continue
-            
-            # Only strip Accept-Encoding for the specific JS file we need to modify
-            # (matching the third-party library's approach of minimal interference)
-            is_target_js = host == "res.wx.qq.com" and (
-                "virtual_svg-icons-register.publish" in path
-                or "connect.publish" in path
-                or "applyMic.publish" in path
+            req = urllib.request.Request(
+                url,
+                data=flow.request.raw_content,
+                headers={"Content-Type": "application/json"},
+                method="POST",
             )
-            is_target_html = host in ("channels.weixin.qq.com", "mp.weixin.qq.com")
-            if is_target_js or is_target_html:
-                req["headers"]["accept-encoding"] = "identity"
-                if "if-none-match" in req["headers"]:
-                    del req["headers"]["if-none-match"]
-                if "if-modified-since" in req["headers"]:
-                    del req["headers"]["if-modified-since"]
-                
-            # Forward request to real server
-            req_data = req["line"]
-            for k, v in req["headers"].items():
-                req_data += f"{k}: {v}\r\n".encode("utf-8")
-            req_data += b"\r\n" + req["body"]
-            server_ssl.sendall(req_data)
-            
-            # Read response from real server
-            resp = read_http_response(server_r)
-            if not resp:
-                break
-                
-            content_type = resp["headers"].get("content-type", "").lower()
-            content_encoding = resp["headers"].get("content-encoding", "").lower()
-            
-            # Decompress response body if compressed (gzip, deflate, or brotli)
-            body_bytes = resp["body"]
-            decompressed = False
-            
-            if "gzip" in content_encoding:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                body = r.read()
+            self._local_json(flow, 200, body)
+        except Exception as ex:
+            print(f"Error forwarding to flask {url}: {ex}")
+            self._local_json(
+                flow, 500,
+                json.dumps({"success": False, "error": str(ex)}).encode("utf-8"),
+            )
+
+    def http_connect(self, flow):
+        # DIAG: 记录所有 CONNECT 的目标域名,用于发现 bundle 实际所在 CDN
+        print(f"[DIAG CONNECT] {flow.request.host}:{flow.request.port}", flush=True)
+
+    def request(self, flow):
+        host = flow.request.pretty_host
+        path = flow.request.path.split("?", 1)[0]
+
+        if host == "channels.weixin.qq.com":
+            if path == "/__wx_channels_api/sync-feed":
                 try:
-                    import gzip
-                    body_bytes = gzip.decompress(body_bytes)
-                    decompressed = True
-                except Exception as e:
-                    print(f"Proxy failed to decompress gzip: {e}")
-            elif "deflate" in content_encoding:
+                    payload = json.loads(flow.request.get_text())
+                    save_synced_feeds(payload.get("username"), payload.get("feeds", []))
+                    self._local_json(
+                        flow, 200,
+                        b'{"code":0,"success":true,"message":"Feeds synced successfully"}',
+                    )
+                except Exception as ex:
+                    print(f"Error handling sync-feed: {ex}")
+                    self._local_json(
+                        flow, 500,
+                        json.dumps({"success": False, "error": str(ex)}).encode("utf-8"),
+                    )
+                return
+            if path in ("/__wx_channels_api/error", "/__wx_channels_api/log-error"):
                 try:
-                    import zlib
-                    body_bytes = zlib.decompress(body_bytes)
-                    decompressed = True
-                except Exception as e:
-                    print(f"Proxy failed to decompress deflate: {e}")
-            elif "br" in content_encoding:
+                    payload = json.loads(flow.request.get_text())
+                    msg = payload.get('message') or payload.get('msg')
+                    print(f"[FRONTEND ERROR] {msg}", flush=True)
+                except Exception as ex:
+                    print(f"[FRONTEND ERROR LOG FAILED] {ex}", flush=True)
+                self._local_json(flow, 200, b'{"success":true}')
+                return
+            if path == "/__wx_channels_api/tip":
                 try:
-                    import brotli
-                    body_bytes = brotli.decompress(body_bytes)
-                    decompressed = True
-                except Exception as e:
-                    print(f"Proxy failed to decompress brotli: {e}")
-                    
-            if decompressed:
-                if "content-encoding" in resp["headers"]:
-                    del resp["headers"]["content-encoding"]
-            
-            is_compressed = bool(resp["headers"].get("content-encoding"))
-            
-            # Modify only if NOT compressed (meaning it's plain text now)
-            if not is_compressed:
-                # HTML modification for channels script injection
-                if host == "channels.weixin.qq.com" and "text/html" in content_type:
-                    html = body_bytes.decode("utf-8", errors="ignore")
-                    inject_script = f"<script>{get_injected_js_content()}</script>"
-                    if "<head>" in html:
-                        html = html.replace("<head>", f"<head>\n{inject_script}", 1)
-                    else:
-                        html = inject_script + html
-                    # Cache-busting: append dynamic version parameter to scripts & stylesheets in HTML
-                    html = re.sub(r'src="([^"]+?\.js)"', rf'src="\1?t={PROXY_SESSION_ID}"', html)
-                    html = re.sub(r'href="([^"]+?\.js)"', rf'href="\1?t={PROXY_SESSION_ID}"', html)
-                    body_bytes = html.encode("utf-8")
-                    
-                # HTML modification for official account script injection
-                elif host == "mp.weixin.qq.com" and "text/html" in content_type:
-                    html = body_bytes.decode("utf-8", errors="ignore")
-                    inject_script = f"<script>{get_injected_official_js()}</script>"
-                    if "<head>" in html:
-                        html = html.replace("<head>", f"<head>\n{inject_script}", 1)
-                    else:
-                        html = inject_script + html
-                    body_bytes = html.encode("utf-8")
-                    
-                # JS API hooking - ONLY modify virtual_svg-icons-register.publish
-                elif host == "res.wx.qq.com" and "javascript" in content_type:
-                    modified = False
-                    js_content = body_bytes.decode("utf-8", errors="ignore")
-
-                    # Cache-busting: rewrite ES6 dynamic imports inside res.wx.qq.com Javascript files
-                    # e.g., from"chunk.js" -> from"chunk.js?t=PROXY_SESSION_ID"
-                    original_js = js_content
-                    js_content = re.sub(r'from\s*\"([^\"]+?)\.js\"', rf'from"\1.js?t={PROXY_SESSION_ID}"', js_content)
-                    js_content = re.sub(r'\"js/([^\"]+?)\.js\"', rf'"js/\1.js?t={PROXY_SESSION_ID}"', js_content)
-                    js_content = re.sub(r'import\(\"([^\"]+?)\.js\"\)', rf'import("\1.js?t={PROXY_SESSION_ID}")', js_content)
-                    js_content = re.sub(r'import\s*\"([^\"]+?)\.js\"', rf'import"\1.js?t={PROXY_SESSION_ID}"', js_content)
-                    if js_content != original_js:
-                        modified = True
-
-                    if "virtual_svg-icons-register.publish" in path:
-                        # (A) 注入 feed 捕获:把 finderXxx 方法体包一层,emit 已解析的 feed(含 decodeKey)
-                        js_content, feed_hooked = _inject_feed_capture_hooks(js_content)
-                        if feed_hooked:
-                            modified = True
-                            print("[Proxy Hook] Injected feed-capture hooks (finderPcFlow/finderGetCommentDetail/...)", flush=True)
-                        # (B) 注入 APILoaded(供"同步作者作品"调用 finderUserPage)
-                        if "exports" in js_content or "export" in js_content:
-                            match = re.search(r'export\s*\{([^}]*)\}', js_content)
-                            if match:
-                                export_content = match.group(1)
-                                items = export_content.split(',')
-                                locals_set = set()
-                                JS_RESERVED_WORDS = {
-                                    "default", "class", "const", "let", "var", "function", "import", "export",
-                                    "extends", "super", "this", "arguments", "case", "catch", "continue",
-                                    "debugger", "delete", "do", "else", "finally", "for", "if", "in",
-                                    "instanceof", "new", "return", "switch", "throw", "try", "typeof", "void", "while", "with"
-                                }
-                                for item in items:
-                                    p = item.strip()
-                                    if not p:
-                                        continue
-                                    if " as " in p:
-                                        parts = p.split(" as ")
-                                        local = parts[0].strip()
-                                    else:
-                                        local = p
-                                    if local and local not in JS_RESERVED_WORDS and re.match(r'^[a-zA-Z_$][a-zA-Z0-9_$]*$', local):
-                                        locals_set.add(local)
-                                if locals_set:
-                                    api_methods = "{" + ",".join(sorted(list(locals_set))) + "}"
-                                    js_wxapi = f";if(window.WXU&&window.WXU.emit){{window.WXU.emit('APILoaded',{api_methods})}};export{{"
-                                    js_content = re.sub(r'export\s*\{', js_wxapi, js_content, count=1)
-                                    print(f"[Proxy Hook] Successfully injected API hook into virtual_svg-icons-register.publish (methods: {len(locals_set)})", flush=True)
-                                    modified = True
-                                else:
-                                    print("[Proxy Hook] No valid export methods found in export block!", flush=True)
-                            else:
-                                print("[Proxy Hook] export block match failed in virtual_svg-icons-register.publish!", flush=True)
-
-                    if "connect.publish" in path or "applyMic.publish" in path:
-                        js_content, flow_hooked = _inject_flow_scroll_hooks(js_content)
-                        if flow_hooked:
-                            modified = True
-                            print("[Proxy Hook] Injected flow-scroll hooks (goToNextFlowFeed/goToPrevFlowFeed)", flush=True)
-
-                    # 诊断:finder API 方法存在于某个 chunk 却没被 hook 到
-                    # (modified 仍为 False)→ 说明要么正则没匹配上,要么微信把方法挪到了别的 chunk。
-                    if not modified and ("finderUserPage" in js_content or "finderGetCommentDetail" in js_content):
-                        print(f"[Proxy Hook][DIAG] finder API methods present but NOT hooked, chunk: {path}", flush=True)
-
-                    if modified:
-                        body_bytes = js_content.encode("utf-8")
-            
-            # Only disable cache headers for files we actually modified
-            if is_target_js or is_target_html:
-                for cache_hdr in ["etag", "last-modified", "expires"]:
-                    if cache_hdr in resp["headers"]:
-                        del resp["headers"][cache_hdr]
-                resp["headers"]["cache-control"] = "no-store, no-cache, must-revalidate, max-age=0"
-                resp["headers"]["pragma"] = "no-cache"
-            
-            resp["body"] = body_bytes
-            resp["headers"]["content-length"] = str(len(body_bytes))
-            
-            print(f"[Proxy Response] {host} {path} -> {resp['line'].decode('utf-8', errors='ignore').strip()} (len: {len(body_bytes)}, type: {content_type})", flush=True)
-            
-            # Send response back to client
-            resp_data = resp["line"]
-            for k, v in resp["headers"].items():
-                resp_data += f"{k}: {v}\r\n".encode("utf-8")
-            resp_data += b"\r\n" + resp["body"]
-            client_ssl.sendall(resp_data)
-            
-            # Handle close connection headers
-            connection_header = resp["headers"].get("connection", "").lower()
-            if connection_header == "close" or req["headers"].get("connection", "").lower() == "close":
-                break
-            
-    except Exception as e:
-        import traceback
-        print(f"[Proxy] Session error: {e}")
-        traceback.print_exc()
-    finally:
-        try: client_ssl.close()
-        except: pass
-        try: server_ssl.close()
-        except: pass
-
-def handle_client_connection(client_sock):
-    host = "unknown"
-    try:
-        client_r = client_sock.makefile("rb", buffering=4096)
-        first_line_bytes = client_r.readline()
-        if not first_line_bytes:
-            client_sock.close()
-            return
-            
-        first_line = first_line_bytes.decode("utf-8", errors="ignore")
-        parts = first_line.split()
-        if len(parts) < 3:
-            client_sock.close()
-            return
-            
-        # Support plain HTTP requests (method is GET, POST, etc. instead of CONNECT)
-        if parts[0] != "CONNECT":
-            url_str = parts[1]
-            from urllib.parse import urlparse
-            try:
-                parsed_url = urlparse(url_str)
-                host = parsed_url.hostname
-                port = parsed_url.port or 80
-                path = parsed_url.path or "/"
-                if parsed_url.query:
-                    path += "?" + parsed_url.query
-            except Exception as e:
-                host = None
-                port = 80
-                path = url_str
-
-            # Read remaining headers
-            headers = {}
-            while True:
-                line = client_r.readline()
-                if not line or line == b"\r\n" or line == b"\n":
-                    break
-                h_parts = line.decode("utf-8", errors="ignore").split(":", 1)
-                if len(h_parts) == 2:
-                    headers[h_parts[0].strip().lower()] = h_parts[1].strip()
-
-            if not host and "host" in headers:
-                host_val = headers["host"]
-                if ":" in host_val:
-                    host, port_str = host_val.split(":", 1)
-                    port = int(port_str)
-                else:
-                    host = host_val
-                    port = 80
-
-            if not host:
-                client_sock.close()
+                    payload = json.loads(flow.request.get_text())
+                    print(f"[FRONTEND TIP] {payload.get('msg')}", flush=True)
+                except Exception:
+                    pass
+                self._local_json(flow, 200, b'{"success":true}')
+                return
+            if path == "/__wx_channels_api/profile":
+                try:
+                    payload = json.loads(flow.request.get_text())
+                    print(f"[FRONTEND PROFILE] {payload.get('username')}", flush=True)
+                except Exception:
+                    pass
+                self._local_json(flow, 200, b'{"success":true}')
+                return
+            if path == "/__wx_channels_api/download":
+                self._forward_to_flask(
+                    flow, "http://127.0.0.1:5200/api/channels/download"
+                )
                 return
 
-            # Read body if Content-Length is present
-            body = b""
-            if "content-length" in headers:
-                content_length = int(headers["content-length"])
-                body = client_r.read(content_length)
+        elif host == "mp.weixin.qq.com":
+            if path == "/__wx_official_api/download":
+                self._forward_to_flask(
+                    flow, "http://127.0.0.1:5200/api/articles/download-url"
+                )
+                return
 
-            # Establish connection to the plain HTTP server
-            server_sock = socket.create_connection((host, port))
-            # Reconstruct plain HTTP request line and headers, then forward
-            new_first_line = f"{parts[0]} {path} {parts[2]}\r\n".encode("utf-8")
-            server_sock.sendall(new_first_line)
-            for k, v in headers.items():
-                server_sock.sendall(f"{k}: {v}\r\n".encode("utf-8"))
-            server_sock.sendall(b"\r\n" + body)
-
-            # Forward response back to client
-            tcp_tunnel(client_sock, server_sock)
+    def response(self, flow):
+        host = flow.request.pretty_host
+        if host not in TARGET_HOSTS:
             return
-
-        # Handle CONNECT requests (HTTPS)
-        target = parts[1]
-        if ":" in target:
-            host, port_str = target.split(":", 1)
-            port = int(port_str)
-        else:
-            host = target
-            port = 443
-            
-        while True:
-            line = client_r.readline()
-            if not line or line == b"\r\n" or line == b"\n":
-                break
-                
-        client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+        content_type = flow.response.headers.get("content-type", "").lower()
         
-        if host in ["channels.weixin.qq.com", "res.wx.qq.com", "mp.weixin.qq.com"]:
-            cert_file, key_file = get_host_certificate(host)
-            
-            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-            context.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
-            try:
-                client_ssl = context.wrap_socket(client_sock, server_side=True)
-            except Exception as e:
-                print(f"[Proxy] SSL handshake with client failed for {host}: {e}", flush=True)
+        # 1. Check for res.wx.qq.com JS bundles
+        if host == "res.wx.qq.com":
+            pathname = flow.request.path.split("?", 1)[0]
+            print(f"[DIAG res.wx] path={pathname} ct={content_type}", flush=True)
+            if "javascript" not in content_type:
                 return
+            if "wasm_video_decode" in pathname:
+                return
+            try:
+                js_content = flow.response.get_text(strict=False)
+                if js_content:
+                    modified = _hook_wx_bundle(pathname, js_content)
+                    # DIAG: dump raw+hooked for virtual_svg bundle to locate syntax break
+                    if "virtual_svg-icons-register.publish" in pathname:
+                        try:
+                            with open("/tmp/wx_bundle_raw.js", "w") as _f:
+                                _f.write(js_content)
+                            with open("/tmp/wx_bundle_hooked.js", "w") as _f:
+                                _f.write(modified)
+                            print("[DIAG] dumped virtual_svg bundle raw+hooked", flush=True)
+                        except Exception as _e:
+                            print(f"[DIAG] dump failed: {_e}", flush=True)
+                    flow.response.text = modified
+            except Exception as ex:
+                print(f"[Proxy] Error hooking JS bundle: {ex}", flush=True)
+            return
+
+        # 2. Check for channels.weixin.qq.com / mp.weixin.qq.com HTML
+        if "text/html" not in content_type:
+            return
+
+        try:
+            html = flow.response.get_text(strict=False)
+        except Exception:
+            return
+        if not html:
+            return
+
+        if host == "channels.weixin.qq.com":
+            # Cache-busting for JS/CSS files loaded in the HTML
+            html = re.sub(r'src="([^"]+)\.js"', r'src="\1.js?t=local"', html)
+            html = re.sub(r'href="([^"]+)\.js"', r'href="\1.js?t=local"', html)
             
             try:
-                server_sock = socket.create_connection((host, port))
-                server_context = ssl.create_default_context()
-                server_ssl = server_context.wrap_socket(server_sock, server_hostname=host)
-            except Exception as e:
-                print(f"[Proxy] SSL connection to upstream {host}:{port} failed: {e}", flush=True)
-                try: client_ssl.close()
-                except: pass
-                return
+                libs = [
+                    ("lib/mitt.umd.js", "script"),
+                    ("lib/timeless.reactive.umd.min.js", "script"),
+                    ("lib/timeless.utils.umd.min.js", "script"),
+                    ("lib/timeless.ui.umd.min.js", "script"),
+                    ("lib/timeless.kit.umd.min.js", "script"),
+                    ("lib/timeless.headless.umd.min.js", "script"),
+                    ("lib/timeless.icons.umd.min.js", "script"),
+                    ("lib/timeless.web.umd.min.js", "script"),
+                    ("lib/floating-ui.core.1.7.4.min.js", "script"),
+                    ("lib/floating-ui.dom.1.7.4.min.js", "script"),
+                    ("lib/weui.min.css", "style"),
+                    ("lib/weui.min.js", "script"),
+                    ("lib/wui.umd.js", "script"),
+                ]
                 
-            process_http_session(client_ssl, server_ssl, host)
+                parts = []
+                for relpath, tag in libs:
+                    content = _read_injection(relpath)
+                    parts.append(f"<{tag}>{content}</{tag}>")
+                
+                # Inject inline config & variables
+                inline_config = (
+                    "var __wx_channels_config__ = { downloadInFrontend: false, downloadForceCheckAllFeeds: true, defaultHighest: true };\n"
+                    "var __wx_channels_version__ = 'local';\n"
+                    "window.addEventListener('error', (event) => {\n"
+                    "    const errorMsg = `[JS Error] ${event.message}\\nFile: ${event.lineno ? (event.filename + ':' + event.lineno) : event.filename}\\nStack: ${event.error ? event.error.stack : ''}`;\n"
+                    "    console.error(errorMsg);\n"
+                    "    fetch('/__wx_channels_api/error', {\n"
+                    "        method: 'POST',\n"
+                    "        headers: { 'Content-Type': 'application/json' },\n"
+                    "        body: JSON.stringify({ msg: errorMsg })\n"
+                    "    }).catch(e => {});\n"
+                    "});"
+                )
+                parts.append(f"<script>{inline_config}</script>")
+                
+                inline_variables = "var WXVariable = {};"
+                parts.append(f"<script>{inline_variables}</script>")
+                
+                # Inject eventbus, utils, components
+                src_files = ["src/eventbus.js", "src/utils.js", "src/components.js"]
+                for relpath in src_files:
+                    content = _read_injection(relpath)
+                    parts.append(f"<script>{content}</script>")
+                
+                # Inject page specific script
+                path_only = flow.request.path.split("?", 1)[0]
+                if path_only == "/web/pages/home":
+                    parts.append(f"<script>{_read_injection('src/home.js')}</script>")
+                elif path_only == "/web/pages/feed":
+                    parts.append(f"<script>{_read_injection('src/feed.js')}</script>")
+                elif path_only == "/web/pages/profile":
+                    parts.append(f"<script>{_read_injection('src/profile.js')}</script>")
+                
+                inject_script = "\n".join(parts)
+            except Exception as ex:
+                print(f"[Proxy] Error reading injection scripts: {ex}", flush=True)
+                inject_script = ""
         else:
-            server_sock = socket.create_connection((host, port))
-            tcp_tunnel(client_sock, server_sock)
-            
-    except Exception as e:
-        print(f"[Proxy] Connection handling error for host {host}: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
-        try: client_sock.close()
-        except: pass
+            inject_script = f"<script>{get_injected_official_js()}</script>"
+
+        m = re.search(r"<head\b[^>]*>", html, flags=re.IGNORECASE)
+        if m:
+            pos = m.end()
+            html = html[:pos] + "\n" + inject_script + html[pos:]
+        else:
+            html = inject_script + html
+        # 设置 .text 会按 content-encoding/charset 重新编码并自动更新 Content-Length
+        flow.response.text = html
+
+        # 我们改过 HTML,关闭缓存,避免 webview 拿旧缓存导致注入丢失
+        for h in ("etag", "last-modified", "expires"):
+            if h in flow.response.headers:
+                del flow.response.headers[h]
+        flow.response.headers["cache-control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        flow.response.headers["pragma"] = "no-cache"
 
 
 # ── Synced Data Saving (同步数据持久化) ──────────────────────────
 
 def save_synced_feeds(username, feeds):
+    import urllib.parse
     from backend.config import load_json, save_json
     from backend.channels import CHANNELS_FEEDS_FILE, CHANNELS_FAVORITES_FILE
     
     if not username or not feeds:
         return
         
+    username = urllib.parse.unquote(username)
+        
     first_feed = feeds[0]
     contact = first_feed.get("contact", {})
-    nickname = contact.get("nickname", "已同步作者")
-    head_img_url = contact.get("headUrl", "")
+    nickname = contact.get("nickname") or "已同步作者"
+    head_img_url = contact.get("headUrl") or contact.get("avatar_url") or ""
     
     # Extract first video's decrypted CDN URL
     first_video_url = ""
     for feed in feeds:
+        if feed.get("url"):
+            first_video_url = feed.get("url")
+            break
         media_list = feed.get("objectDesc", {}).get("media", [])
         if media_list and media_list[0].get("url"):
             media = media_list[0]
@@ -947,46 +647,71 @@ def save_synced_feeds(username, feeds):
             feeds_db[username].append(of)
         
     for feed in feeds:
-        media_type = feed.get("objectDesc", {}).get("mediaType")
-        if media_type != 4:
+        is_media = False
+        if feed.get("type") == "media":
+            is_media = True
+        elif feed.get("objectDesc", {}).get("mediaType") == 4:
+            is_media = True
+            
+        if not is_media:
             continue # Sync videos only
             
         feed_id = feed.get("id")
         if not feed_id:
             continue
             
-        media = feed.get("objectDesc", {}).get("media", [{}])[0]
-        video_url = media.get("url", "") + media.get("urlToken", "")
+        # Try to parse as raw first, fallback to flat
+        object_desc = feed.get("objectDesc", {})
+        media_list = object_desc.get("media", [])
         
+        description = object_desc.get("description") or feed.get("title") or feed.get("description") or ""
+        createtime = str(feed.get("createtime", 0))
+        
+        if media_list:
+            media = media_list[0]
+            video_url = media.get("url", "") + media.get("urlToken", "")
+            cover_url = media.get("coverUrl", "")
+            decode_key = media.get("decodeKey") or feed.get("key") or ""
+            spec_list = media.get("spec", [])
+        else:
+            # Flat structure fallback
+            video_url = feed.get("url", "")
+            cover_url = feed.get("cover_url", "")
+            decode_key = feed.get("key") or ""
+            spec_list = feed.get("spec", [])
+            
         # Extract specs
-        spec_list = media.get("spec", [])
         video_url_h264 = ""
         video_url_h265 = ""
-        for s in spec_list:
-            ff = s.get("fileFormat")
-            if not ff:
-                continue
-            url_with_flag = video_url + f"&X-snsvideoflag={ff}"
-            coding = s.get("codingFormat", 0)
-            if coding == 2:
-                video_url_h265 = url_with_flag
-            elif coding == 1:
-                video_url_h264 = url_with_flag
-                
-        if not video_url_h265 and spec_list:
-            video_url_h265 = video_url + f"&X-snsvideoflag={spec_list[0].get('fileFormat')}"
-        if not video_url_h264 and len(spec_list) > 1:
-            video_url_h264 = video_url + f"&X-snsvideoflag={spec_list[1].get('fileFormat')}"
+        if spec_list:
+            for s in spec_list:
+                ff = s.get("fileFormat")
+                if not ff:
+                    continue
+                url_with_flag = video_url + f"&X-snsvideoflag={ff}"
+                coding = s.get("codingFormat", 0)
+                if coding == 2:
+                    video_url_h265 = url_with_flag
+                elif coding == 1:
+                    video_url_h264 = url_with_flag
+                    
+            if not video_url_h265 and spec_list:
+                video_url_h265 = video_url + f"&X-snsvideoflag={spec_list[0].get('fileFormat')}"
+            if not video_url_h264 and len(spec_list) > 1:
+                video_url_h264 = video_url + f"&X-snsvideoflag={spec_list[1].get('fileFormat')}"
+        else:
+            video_url_h264 = video_url
+            video_url_h265 = video_url
             
         item = {
             "id": feed_id,
-            "description": feed.get("objectDesc", {}).get("description", ""),
-            "cover_url": media.get("coverUrl", ""),
+            "description": description,
+            "cover_url": cover_url,
             "video_url": video_url,
             "video_url_h264": video_url_h264,
             "video_url_h265": video_url_h265,
-            "createtime": str(feed.get("createtime", 0)),
-            "decode_key": media.get("decodeKey", "")
+            "createtime": createtime,
+            "decode_key": decode_key
         }
         
         found = False
@@ -1003,1007 +728,177 @@ def save_synced_feeds(username, feeds):
 
 # ── Custom Injected Script Content (注入 JS 模板) ───────────────
 
-def _inject_feed_capture_hooks(js):
-    """在 virtual_svg-icons-register.publish 里给 finderXxx 方法体包一层,
-    把视频号 App 自己解析出来的 feed(含 objectDesc.media[0].decodeKey)通过 WXU.emit 抛给页面脚本。
-    这样"抓取"不再依赖页面侧 APILoaded 的时序,也不依赖能否拦到明文网络 JSON。
-    参考 wx_channels_download_temp/internal/interceptor/plugin.go 的服务端注入实现。
-    """
-    hooked = False
+def _injection_base():
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        return os.path.join(base, "injection_scripts")
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "injection_scripts")
+
+def _read_injection(relpath):
+    with open(os.path.join(_injection_base(), relpath), "r", encoding="utf-8") as f:
+        return f.read()
+
+def _hook_wx_bundle(pathname, js_script):
+    v = "?t=local"
     
-    # 1. Hook finderInit specifically (takes no arguments)
-    init_pattern = r'async finderInit\(\)\{(.*?)\}async'
-    match_init = re.search(init_pattern, js, flags=re.S)
-    if match_init:
-        body = match_init.group(1)
-        start, end = match_init.span()
-        repl = (
-            f"async finderInit(){{var __wxr=await(async()=>{{{body}}})();"
-            f"try{{if(window.WXU&&window.WXU.emit){{window.WXU.emit('Init',__wxr.data)}}}}catch(e){{}}"
-            f"return __wxr}}async"
+    # Cache-busting imports in JS
+    js_script = re.sub(r'from\s*"([^"]+)\.js"', r'from "\1.js' + v + '"', js_script)
+    js_script = re.sub(r'"js/([^"]+)\.js"', r'"js/\1.js' + v + '"', js_script)
+    js_script = re.sub(r'import\("([^"]+)\.js"\)', r'import("\1.js' + v + '")', js_script)
+    js_script = re.sub(r'import\s*"([^"]+)\.js"', r'import "\1.js' + v + '"', js_script)
+
+    if "virtual_svg-icons-register.publish" in pathname:
+        print("[Bundle Hook] Hooking virtual_svg-icons-register.publish", flush=True)
+        # 1. finderInit
+        js_script = re.sub(
+            r'async finderInit\(\)\{(.*?)\}async',
+            r'async finderInit(){var result=await(async()=>{\1})();var data=result.data;WXU.emit(WXU.Events.Init,data);return result;}async',
+            js_script
         )
-        js = js[:start] + repl + js[end:]
-        hooked = True
-        print("[Proxy Hook] Injected finderInit hook specifically", flush=True)
-
-    # 2. Hook other finder APIs (take one argument)
-    specs = [
-        ("finderPcFlow", "PCFlowLoaded"),
-        ("finderGetRecommend", "RecommendFeedsLoaded"),
-        ("finderUserPage", "UserFeedsLoaded"),
-        ("finderGetCommentDetail", "FeedProfileLoaded"),
-    ]
-    for name, event in specs:
-        pattern = r'async ' + name + r'\((\w+)\)\{(.*?)\}async'
-        match = re.search(pattern, js, flags=re.S)
-        if match:
-            param = match.group(1)
-            body = match.group(2)
-            start, end = match.span()
-            repl = (
-                f"async {name}({param}){{var __wxr=await(async()=>{{{body}}})();"
-                f"try{{if(window.WXU&&window.WXU.emit){{window.WXU.emit('{event}',__wxr.data.object)}}}}catch(e){{}}"
-                f"return __wxr}}async"
-            )
-            js = js[:start] + repl + js[end:]
-            hooked = True
-    return js, hooked
-
-
-def _inject_flow_scroll_hooks(js):
-    """在 connect.publish / applyMic.publish 里给上下滑动切换 feed 的方法包一层,
-    每次切到新视频就 emit 当前 feed(读 App 内存里的 flowTab.value.feeds[currentFeedIndex])。
-    用于"推荐"等滚动流页面的当前视频捕获。"""
-    hooked = False
-    m = re.search(r'flowTab:([a-zA-Z_$][\w$]*)', js)
-    var = m.group(1) if m else "yt"
-    for fn, event in [("goToNextFlowFeed", "GotoNextFeed"), ("goToPrevFlowFeed", "GotoPrevFeed")]:
-        pattern = fn + r':([a-zA-Z_$][\w$]*)'
-        repl = (
-            fn + r':async function(__v){await \1(__v);'
-            'try{if(' + var + '&&' + var + '.value&&' + var + '.value.feeds){'
-            'var __f=' + var + '.value.feeds[' + var + '.value.currentFeedIndex];'
-            'if(window.WXU&&window.WXU.emit){window.WXU.emit("' + event + '",__f)}}}catch(e){}}'
-        )
-        js, n = re.subn(pattern, repl, js, count=1)
-        if n:
-            hooked = True
-    return js, hooked
-
-
-def get_injected_js_content():
-    return r"""
-    (() => {
-        // Global Error Catcher to diagnose white-screens in WeChat client
-        window.addEventListener('error', (event) => {
-            const errorMsg = `[JS Error] ${event.message}\nFile: ${event.filename}:${event.lineno}\nStack: ${event.error ? event.error.stack : ''}`;
-            console.error(errorMsg);
-            fetch('/__wx_channels_api/log-error', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: errorMsg })
-            }).catch(e => {});
-        });
-        window.addEventListener('unhandledrejection', (event) => {
-            const errorMsg = `[Unhandled Promise Rejection] ${event.reason}\nStack: ${event.reason ? event.reason.stack : ''}`;
-            console.error(errorMsg);
-            fetch('/__wx_channels_api/log-error', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ message: errorMsg })
-            }).catch(e => {});
-        });
-
-        // Debug log to trace injection success and client URL
-        fetch('/__wx_channels_api/log-error', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ message: `[ChannelsSync] Injected script active on: ` + window.location.href })
-        }).catch(e => {});
-
-
-        const WXE = {
-            _events: {},
-            on(event, cb) {
-                (this._events[event] = this._events[event] || []).push(cb);
-            },
-            emit(event, data) {
-                (this._events[event] || []).forEach(cb => cb(data));
-            },
-            onAPILoaded(cb) { this.on('APILoaded', cb); },
-            onUtilsLoaded(cb) { this.on('UtilsLoaded', cb); }
-        };
-        window.WXU = window.WXU || WXE;
-        window.WXU.Events = {
-            APILoaded: 'APILoaded',
-            UtilsLoaded: 'UtilsLoaded',
-            UserFeedsLoaded: 'UserFeedsLoaded'
-        };
-
-        var API_OBJECTS = [];
-        var WXAPI = new Proxy({}, {
-            get(target, prop) {
-                for (const obj of API_OBJECTS) {
-                    if (obj && typeof obj[prop] === 'function') {
-                        return obj[prop].bind(obj);
-                    }
-                    if (obj && obj[prop] !== undefined) {
-                        return obj[prop];
-                    }
-                }
-                return undefined;
-            }
-        });
-        window.WXU.API = WXAPI;
-
-        window.capturedFeeds = window.capturedFeeds || {};
         
-        function captureFeeds(feeds) {
-            if (!Array.isArray(feeds)) return;
-            feeds.forEach(feed => {
-                if (feed && feed.id) {
-                    window.capturedFeeds[feed.id] = feed;
-                    try {
-                        const m = feed.objectDesc && feed.objectDesc.media && feed.objectDesc.media[0];
-                        const mediaType = feed.objectDesc && feed.objectDesc.mediaType;
-                        if (m && m.url && mediaType === 4) {
-                            window.__wx_last_video_feed = feed;
-                        }
-                    } catch (e) {}
-                }
-            });
-        }
+        # 2. finderPcFlow
+        js_script = re.sub(
+            r'async finderPcFlow\((\w+)\)\{(.*?)\}async',
+            r'async finderPcFlow(\1){var result=await(async()=>{\2})();var feeds=result.data.object;WXU.emit(WXU.Events.PCFlowLoaded,feeds);return result;}async',
+            js_script
+        )
+        
+        # 3. finderGetRecommend
+        js_script = re.sub(
+            r'async finderGetRecommend\((\w+)\)\{(.*?)\}async',
+            r'async finderGetRecommend(\1){var result=await(async()=>{\2})();var feeds=result.data.object;WXU.emit(WXU.Events.RecommendFeedsLoaded,feeds);return result;}async',
+            js_script
+        )
+        
+        # 4. finderGetCommentDetail
+        js_script = re.sub(
+            r'async finderGetCommentDetail\((\w+)\)\{(.*?)\}async',
+            r'async finderGetCommentDetail(\1){var result=await(async()=>{\2})();var feed=result.data.object;WXU.emit(WXU.Events.FeedProfileLoaded,feed);return result;}async',
+            js_script
+        )
+        
+        # 5. finderGetCommentList
+        js_script = re.sub(
+            r'async finderGetCommentList\((\w+)\)\{(.*?)\}async',
+            r'async finderGetCommentList(\1){var result=await(async()=>{\2})();WXU.emit(WXU.Events.FeedCommentListLoaded,result.data);return result;}async',
+            js_script
+        )
+        
+        # 6. finderPCSearch
+        js_script = re.sub(
+            r'async finderPCSearch\((\w+)\)\{(.*?)\}async',
+            r'async finderPCSearch(\1){var result=await(async()=>{\2})();return result;}async',
+            js_script
+        )
+        
+        # 7. finderSearch
+        js_script = re.sub(
+            r'async finderSearch\((\w+)\)\{(.*?)\}async',
+            r'async finderSearch(\1){var result=await(async()=>{\2})();return result;}async',
+            js_script
+        )
+        
+        # 8. finderGetInteractionedFeedList
+        js_script = re.sub(
+            r'async finderGetInteractionedFeedList\((\w+)\)\{(.*?)\}\}const',
+            r'async finderGetInteractionedFeedList(\1){var result=await(async()=>{\2})();var feeds=result.data.object;WXU.emit(WXU.Events.InteractionedFeedsLoaded,feeds);return result;}}const',
+            js_script
+        )
+        
+        # 9. finderUserPage
+        js_script = re.sub(
+            r'async finderUserPage\((\w+)\)\{(.*?)\}async',
+            r'async finderUserPage(\1){var result=await(async()=>{\2})();var feeds=result.data.object;WXU.emit(WXU.Events.UserFeedsLoaded,{feeds:feeds,lastBuffer:result.data.lastBuffer,raw:result.data});return result;}async',
+            js_script
+        )
+        
+        # 10. finderLiveUserPage
+        js_script = re.sub(
+            r'async finderLiveUserPage\((\w+)\)\{(.*?)\}async',
+            r'async finderLiveUserPage(\1){var result=await(async()=>{\2})();var feeds=result.data.object;WXU.emit(WXU.Events.LiveUserFeedsLoaded,feeds);return result;}async',
+            js_script
+        )
+        
+        # 11. finderGetLiveInfo
+        js_script = re.sub(
+            r'async finderGetLiveInfo\((\w+)\)\{(.*?)\}async',
+            r'async finderGetLiveInfo(\1){var result=await(async()=>{\2})();var live=result.data;WXU.emit(WXU.Events.LiveProfileLoaded,live);return result;}async',
+            js_script
+        )
+        
+        # 12. joinLive
+        js_script = re.sub(
+            r'async joinLive\((\w+)\)\{(.*?)\}async',
+            r'async joinLive(\1){var result=await(async()=>{\2})();var data=result.data;WXU.emit(WXU.Events.JoinLive,data);return result;}async',
+            js_script
+        )
+        
+        # 13. Export hooks (APILoaded)
+        export_match = re.search(r'exports?\s*\{([^}]+)\}', js_script)
+        api_methods = "{}"
+        if export_match:
+            items = export_match.group(1).split(",")
+            locals_list = []
+            for item in items:
+                p = item.strip()
+                if not p:
+                    continue
+                if " as " in p:
+                    local = p.split(" as ")[0].strip()
+                else:
+                    local = p
+                if local and not local.isspace():
+                    locals_list.append(local)
+            if locals_list:
+                api_methods = "{" + ",".join(locals_list) + "}"
+        
+        api_methods_escaped = api_methods
+        js_wxapi = f";WXU.emit(WXU.Events.APILoaded,{api_methods_escaped});export{{"
+        js_script = re.sub(r'exports?\s*\{', js_wxapi, js_script, count=1)
+
+    elif "connect.publish" in pathname or "applyMic.publish" in pathname:
+        print(f"[Bundle Hook] Hooking {pathname}", flush=True)
+        m_flow = re.search(r'flowTab:([a-zA-Z_$][\w$]*)', js_script)
+        flow_var = m_flow.group(1) if m_flow else "yt"
+        
+        js_go_next = (
+            f"goToNextFlowFeed:async function(v){{"
+            f"await \\1(v);"
+            f"if(!{flow_var}||!{flow_var}.value.feeds){{return;}}"
+            f"var feed={flow_var}.value.feeds[{flow_var}.value.currentFeedIndex];"
+            f"WXU.emit(WXU.Events.GotoNextFeed,feed);"
+            f"}}"
+        )
+        js_script = re.sub(r'\bgoToNextFlowFeed:([a-zA-Z_$][\w$]*)', js_go_next, js_script)
+        
+        js_go_prev = (
+            f"goToPrevFlowFeed:async function(v){{"
+            f"await \\1(v);"
+            f"if(!{flow_var}||!{flow_var}.value.feeds){{return;}}"
+            f"var feed={flow_var}.value.feeds[{flow_var}.value.currentFeedIndex];"
+            f"WXU.emit(WXU.Events.GotoPrevFeed,feed);"
+            f"}}"
+        )
+        js_script = re.sub(r'\bgoToPrevFlowFeed:([a-zA-Z_$][\w$]*)', js_go_prev, js_script)
+        
+        js_wxutil = ";WXU.emit(WXU.Events.UtilsLoaded,{decodeBase64ToUint64String:decodeBase64ToUint64String,createAdapterFromGlobalMapper:createAdapterFromGlobalMapper,finderJoinLiveMapper:finderJoinLiveMapper});export{"
+        js_script = re.sub(r'exports?\s*\{', js_wxutil, js_script, count=1)
+        
+        m_local = re.search(r'localFlowTab:([a-zA-Z_$][\w$]*)', js_script)
+        local_var = m_local.group(1) if m_local else "vn"
+        
+        js_load_local = (
+            f"loadLocalPlaylist:async function(...args){{"
+            f"await \\1(...args);"
+            f"if(!{local_var}||!{local_var}.value||!{local_var}.value.feeds){{return;}}"
+            f"var feed={local_var}.value.feeds[{local_var}.value.currentFeedIndex];"
+            f"WXU.emit(WXU.Events.HomeFeedChanged,feed);"
+            f"}}"
+        )
+        js_script = re.sub(r'\bloadLocalPlaylist:([a-zA-Z_$][\w$]*)', js_load_local, js_script)
+        
+    return js_script
 
-        // 订阅"代理服务端注入"抛出的 feed 事件(finderPcFlow/finderGetCommentDetail/滚动切换等)。
-        // 这些事件携带 App 已解析的 feed(含 decodeKey),是最可靠的捕获来源,
-        // 不依赖 APILoaded 时序,也不依赖能否拦到明文网络 JSON。
-         (function subscribeFeedEvents() {
-            const FEED_EVENTS = [
-                'PCFlowLoaded', 'RecommendFeedsLoaded', 'UserFeedsLoaded',
-                'FeedProfileLoaded', 'GotoNextFeed', 'GotoPrevFeed', 'Init'
-            ];
-            FEED_EVENTS.forEach(ev => {
-                window.WXU.on(ev, payload => {
-                    try {
-                        if (ev === 'Init') {
-                            if (payload && payload.mainFinderUsername) {
-                                localStorage.setItem('__wx_main_finder_username', payload.mainFinderUsername);
-                                console.log("[ChannelsSync] Captured mainFinderUsername: " + payload.mainFinderUsername);
-                            }
-                            return;
-                        }
-                        
-                        const arr = Array.isArray(payload) ? payload : [payload];
-                        captureFeeds(arr);
-                        
-                        // Track current playing feed for single-feed navigation/detail events
-                        if (ev !== 'UserFeedsLoaded' && ev !== 'RecommendFeedsLoaded') {
-                            if (payload && !Array.isArray(payload)) {
-                                window.__wx_current_playing_feed = payload;
-                            } else if (Array.isArray(payload) && payload.length === 1) {
-                                window.__wx_current_playing_feed = payload[0];
-                            }
-                        }
-                    } catch (e) {}
-                });
-            });
-        })();
-
-        // Fetch & XHR Interceptors as a robust fallback to auto-capture feed details & keys
-        // (independent of JS file cache/hook states)
-        try {
-            // Intercept XMLHttpRequest
-            const origOpen = XMLHttpRequest.prototype.open;
-            XMLHttpRequest.prototype.open = function(method, url, ...args) {
-                this._url = url;
-                return origOpen.call(this, method, url, ...args);
-            };
-            const origSend = XMLHttpRequest.prototype.send;
-            XMLHttpRequest.prototype.send = function(...args) {
-                this.addEventListener('load', function() {
-                    try {
-                        if (this.responseText) {
-                            const data = JSON.parse(this.responseText);
-                            handleResponseData(data, this._url);
-                        }
-                    } catch (e) {}
-                });
-                return origSend.apply(this, args);
-            };
-
-            // Intercept Fetch transparently without modifying the returned Promise object
-            const origFetch = window.fetch;
-            window.fetch = function(resource, init) {
-                const p = origFetch(resource, init);
-                p.then(response => {
-                    try {
-                        const url = typeof resource === 'string' ? resource : (resource.url || '');
-                        const clone = response.clone();
-                        clone.json().then(data => {
-                            handleResponseData(data, url);
-                        }).catch(() => {});
-                    } catch (e) {}
-                }).catch(() => {});
-                return p;
-            };
-
-            function handleResponseData(data, url) {
-                try {
-                    if (!data) return;
-                    let feeds = [];
-                    const foundFeeds = findFeedsInObject(data);
-                    if (foundFeeds.length > 0) {
-                        feeds = feeds.concat(foundFeeds);
-                    }
-                    if (feeds.length > 0) {
-                        captureFeeds(feeds);
-                    }
-                } catch (err) {}
-            }
-
-            function findFeedsInObject(obj, visited = new Set()) {
-                let results = [];
-                if (!obj || typeof obj !== 'object' || visited.has(obj)) return results;
-                visited.add(obj);
-
-                if (obj.id && obj.objectDesc && obj.objectDesc.media) {
-                    results.push(obj);
-                }
-
-                for (const key in obj) {
-                    if (obj.hasOwnProperty(key)) {
-                        results = results.concat(findFeedsInObject(obj[key], visited));
-                    }
-                }
-                return results;
-            }
-        } catch (interceptErr) {
-            console.error("[ChannelsSync] Hook interceptors setup failed:", interceptErr);
-        }
-
-        function reportDiag(message) {
-            try {
-                fetch('/__wx_channels_api/log-error', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message: message })
-                }).catch(() => {});
-            } catch (e) {}
-        }
-
-        window.WXU.onAPILoaded((variables) => {
-            if (!variables) return;
-            const keys = Object.keys(variables);
-            for (let i = 0; i < keys.length; i++) {
-                const key = keys[i];
-                const methods = variables[key];
-                if (methods && (typeof methods === "object" || typeof methods === "function")) {
-                    if (typeof methods.finderGetCommentDetail === "function" || 
-                        typeof methods.finderUserPage === "function" ||
-                        typeof methods.finderSearch === "function" ||
-                        typeof methods.finderLiveUserPage === "function" ||
-                        typeof methods.finderGetFollowList === "function") {
-                        if (!API_OBJECTS.includes(methods)) {
-                            API_OBJECTS.push(methods);
-                        }
-                    }
-                }
-            }
-            const ok = typeof WXAPI.finderUserPage === "function";
-            console.log("[ChannelsSync] APILoaded, finderUserPage=" + ok);
-            reportDiag("[ChannelsSync] APILoaded: exportVars=" + keys.length + ", hasFinderUserPage=" + ok + ", keysSample=" + keys.slice(0, 15).join(",") + ", finderUserPageType=" + typeof WXAPI.finderUserPage);
-        });
-
-        function injectFloatingUI() {
-            if (document.getElementById('channels-sync-floating-btn')) return;
-
-            const btn = document.createElement('div');
-            btn.id = 'channels-sync-floating-btn';
-            btn.innerHTML = '📥 同步当前作者作品到系统';
-            btn.style.cssText = `
-                position: fixed;
-                bottom: 25px;
-                right: 25px;
-                background: #07c160;
-                color: white;
-                padding: 12px 24px;
-                border-radius: 24px;
-                box-shadow: 0 4px 16px rgba(0,0,0,0.2);
-                cursor: pointer;
-                z-index: 999999;
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                font-size: 14px;
-                font-weight: bold;
-                transition: all 0.3s;
-                user-select: none;
-            `;
-            btn.onmouseover = () => {
-                btn.style.transform = 'scale(1.05)';
-                btn.style.background = '#06ad53';
-            };
-            btn.onmouseout = () => {
-                btn.style.transform = 'none';
-                btn.style.background = '#07c160';
-            };
-
-            btn.onclick = startSyncProcess;
-            document.body.appendChild(btn);
-        }
-
-        function injectBatchDownloadUI() {
-            if (document.getElementById('channels-batch-download-floating-btn')) return;
-
-            const btn = document.createElement('div');
-            btn.id = 'channels-batch-download-floating-btn';
-            btn.innerHTML = '⚡️ 批量下载当前作者视频';
-            btn.style.cssText = `
-                position: fixed;
-                bottom: 145px;
-                right: 25px;
-                background: #ff9500;
-                color: white;
-                padding: 12px 24px;
-                border-radius: 24px;
-                box-shadow: 0 4px 16px rgba(0,0,0,0.2);
-                cursor: pointer;
-                z-index: 999999;
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                font-size: 14px;
-                font-weight: bold;
-                transition: all 0.3s;
-                user-select: none;
-            `;
-            btn.onmouseover = () => {
-                btn.style.transform = 'scale(1.05)';
-                btn.style.background = '#e08200';
-            };
-            btn.onmouseout = () => {
-                btn.style.transform = 'none';
-                btn.style.background = '#ff9500';
-            };
-
-            btn.onclick = startBatchDownloadProcess;
-            document.body.appendChild(btn);
-        }
-
-        async function startSyncProcess() {
-            const btn = document.getElementById('channels-sync-floating-btn');
-            if (btn.classList.contains('syncing')) return;
-            btn.classList.add('syncing');
-            btn.style.background = '#888';
-            btn.style.cursor = 'default';
-            btn.innerHTML = '⏳ 正在初始化...';
-
-            try {
-                if (!WXAPI.finderUserPage) {
-                    alert('微信视频号 API 未完成初始化，请在微信中重新打开或刷新此页面重试！');
-                    resetButton();
-                    return;
-                }
-
-                const href = window.location.href;
-                const params = new URLSearchParams(href.split('?')[1] || '');
-                let username = params.get('username');
-                if (!username) {
-                    alert('无法从当前页面链接解析出作者 ID，请重新进入作者主页！');
-                    resetButton();
-                    return;
-                }
-                username = decodeURIComponent(username);
-                if (username.indexOf('%') >= 0) {
-                    username = decodeURIComponent(username);
-                }
-
-                let next_marker = "";
-                let has_more = true;
-                let total_synced = 0;
-
-                let my_username = localStorage.getItem('__wx_main_finder_username') || username;
-                my_username = decodeURIComponent(my_username);
-                if (my_username.indexOf('%') >= 0) {
-                    my_username = decodeURIComponent(my_username);
-                }
-                reportDiag("[ChannelsSync] startSyncProcess: username=" + username + ", finderUsername=" + my_username);
-
-                while (has_more) {
-                    btn.innerHTML = `⏳ 正在同步作品... (已同步 ` + total_synced + ` 个)`;
-                    const payload = {
-                        username: username,
-                        finderUsername: my_username,
-                        lastBuffer: next_marker,
-                        needFansCount: 0,
-                        objectId: "0"
-                    };
-
-                    const r = await WXAPI.finderUserPage(payload);
-                    if (!r || r.errCode !== 0) {
-                        alert('拉取视频作品列表失败: ' + (r ? r.errMsg : '未知错误'));
-                        break;
-                    }
-
-                    const feeds = r.data.object || [];
-                    if (feeds.length === 0) {
-                        break;
-                    }
-
-                    const response = await fetch('/__wx_channels_api/sync-feed', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json'
-                        },
-                        body: JSON.stringify({
-                            username: username,
-                            feeds: feeds
-                        })
-                    });
-
-                    if (!response.ok) {
-                        console.error('Failed to sync feeds page to proxy:', response.statusText);
-                    }
-
-                    total_synced += feeds.length;
-
-                    if (!r.data.lastBuffer || feeds.length < 15) {
-                        has_more = false;
-                    } else {
-                        next_marker = r.data.lastBuffer;
-                    }
-                    
-                    await new Promise(resolve => setTimeout(resolve, 300));
-                }
-
-                btn.innerHTML = `✅ 同步成功！共 ` + total_synced + ` 个作品已存入系统`;
-                btn.style.background = '#07c160';
-                setTimeout(() => {
-                    resetButton();
-                }, 3000);
-
-            } catch (err) {
-                alert('同步失败: ' + err.message);
-                resetButton();
-            }
-
-            function resetButton() {
-                btn.classList.remove('syncing');
-                btn.style.background = '#07c160';
-                btn.style.cursor = 'pointer';
-                btn.innerHTML = '📥 同步当前作者作品到系统';
-            }
-        }
-
-        function selectBestSpec(feed) {
-            const media = feed.objectDesc?.media?.[0];
-            if (!media) return null;
-            const specs = media.spec || [];
-            if (specs.length === 0) return null;
-            
-            let bestSpec = specs[0];
-            for (let i = 1; i < specs.length; i++) {
-                const s = specs[i];
-                const currentArea = (bestSpec.width || 0) * (bestSpec.height || 0);
-                const sArea = (s.width || 0) * (s.height || 0);
-                if (sArea > currentArea) {
-                    bestSpec = s;
-                } else if (sArea === currentArea) {
-                    if ((s.codingFormat === 2 || s.codec === 2) && !(bestSpec.codingFormat === 2 || bestSpec.codec === 2)) {
-                        bestSpec = s;
-                    }
-                }
-            }
-            return bestSpec.fileFormat;
-        }
-
-        async function startBatchDownloadProcess() {
-            const btn = document.getElementById('channels-batch-download-floating-btn');
-            if (btn.classList.contains('downloading')) return;
-            btn.classList.add('downloading');
-            btn.style.background = '#888';
-            btn.style.cursor = 'default';
-            btn.innerHTML = '⏳ 正在初始化...';
-
-            try {
-                if (!WXAPI.finderUserPage) {
-                    alert('微信视频号 API 未完成初始化，请在微信中重新打开或刷新此页面重试！');
-                    resetButton();
-                    return;
-                }
-
-                const href = window.location.href;
-                const params = new URLSearchParams(href.split('?')[1] || '');
-                let username = params.get('username');
-                if (!username) {
-                    alert('无法从当前页面链接解析出作者 ID，请重新进入作者主页！');
-                    resetButton();
-                    return;
-                }
-                username = decodeURIComponent(username);
-                if (username.indexOf('%') >= 0) {
-                    username = decodeURIComponent(username);
-                }
-
-                let next_marker = "";
-                let has_more = true;
-                let allFeeds = [];
-
-                let my_username = localStorage.getItem('__wx_main_finder_username') || username;
-                my_username = decodeURIComponent(my_username);
-                if (my_username.indexOf('%') >= 0) {
-                    my_username = decodeURIComponent(my_username);
-                }
-                reportDiag("[ChannelsSync] startBatchDownloadProcess: username=" + username + ", finderUsername=" + my_username);
-
-                while (has_more) {
-                    btn.innerHTML = '⏳ 正在拉取作品列表... (已获取 ' + allFeeds.length + ' 个)';
-                    const payload = {
-                        username: username,
-                        finderUsername: my_username,
-                        lastBuffer: next_marker,
-                        needFansCount: 0,
-                        objectId: "0"
-                    };
-
-                    const r = await WXAPI.finderUserPage(payload);
-                    if (!r || r.errCode !== 0) {
-                        alert('拉取视频作品列表失败: ' + (r ? r.errMsg : '未知错误'));
-                        break;
-                    }
-
-                    const feeds = r.data.object || [];
-                    if (feeds.length === 0) {
-                        break;
-                    }
-
-                    allFeeds = allFeeds.concat(feeds);
-
-                    if (!r.data.lastBuffer || feeds.length < 15) {
-                        has_more = false;
-                    } else {
-                        next_marker = r.data.lastBuffer;
-                    }
-                    
-                    await new Promise(resolve => setTimeout(resolve, 300));
-                }
-
-                if (allFeeds.length === 0) {
-                    alert('未找到任何作品！');
-                    resetButton();
-                    return;
-                }
-
-                let successCount = 0;
-                let failCount = 0;
-
-                for (let i = 0; i < allFeeds.length; i++) {
-                    btn.innerHTML = '⏳ 正在提交下载任务... (' + (i + 1) + '/' + allFeeds.length + ')';
-                    const feed = allFeeds[i];
-                    
-                    try {
-                        const media = feed.objectDesc?.media?.[0];
-                        if (!media || !media.url) {
-                            failCount++;
-                            continue;
-                        }
-
-                        const fileFormat = selectBestSpec(feed);
-                        const video_url = media.url + (media.urlToken || "");
-                        const final_url = fileFormat ? (video_url + (video_url.indexOf('?') >= 0 ? '&' : '?') + 'X-snsvideoflag=' + fileFormat) : video_url;
-
-                        const response = await fetch('/__wx_channels_api/download', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                url: final_url,
-                                description: feed.objectDesc.description || "视频号视频",
-                                createtime: String(feed.createtime || 0),
-                                key: String(media.decodeKey || "")
-                            })
-                        });
-
-                        if (response.ok) {
-                            successCount++;
-                        } else {
-                            failCount++;
-                        }
-                    } catch (e) {
-                        failCount++;
-                    }
-
-                    await new Promise(resolve => setTimeout(resolve, 300));
-                }
-
-                btn.innerHTML = '✅ 成功提交: ' + successCount + '，失败: ' + failCount;
-                btn.style.background = '#07c160';
-                setTimeout(() => {
-                    resetButton();
-                }, 4000);
-
-            } catch (err) {
-                alert('批量下载失败: ' + err.message);
-                resetButton();
-            }
-
-            function resetButton() {
-                btn.classList.remove('downloading');
-                btn.style.background = '#ff9500';
-                btn.style.cursor = 'pointer';
-                btn.innerHTML = '⚡️ 批量下载当前作者视频';
-            }
-        }
-
-        // Floating video download UI
-        function injectVideoDownloadUI() {
-            if (document.getElementById('video-download-floating-btn')) return;
-
-            const btn = document.createElement('div');
-            btn.id = 'video-download-floating-btn';
-            btn.style.cssText = `
-                position: fixed;
-                bottom: 85px;
-                right: 25px;
-                background: #0076ff;
-                color: white;
-                padding: 12px 24px;
-                border-radius: 24px;
-                box-shadow: 0 4px 16px rgba(0,0,0,0.2);
-                cursor: pointer;
-                z-index: 999999;
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-                font-size: 14px;
-                font-weight: bold;
-                transition: all 0.3s;
-                user-select: none;
-                display: none;
-            `;
-            btn.onmouseover = () => {
-                btn.style.transform = 'scale(1.05)';
-                btn.style.background = '#0062d6';
-            };
-            btn.onmouseout = () => {
-                btn.style.transform = 'none';
-                btn.style.background = '#0076ff';
-            };
-
-            document.body.appendChild(btn);
-            
-            setInterval(() => {
-                const videoEl = document.querySelector('video');
-                if (!videoEl || !videoEl.src) {
-                    btn.style.display = 'none';
-                    return;
-                }
-                
-                const src = videoEl.src;
-                const feed = getFeedForVideo(src) || window.__wx_last_video_feed;
-                if (feed && feed.objectDesc && feed.objectDesc.media && feed.objectDesc.media[0]) {
-                    btn.style.display = 'block';
-                    btn.innerHTML = '📥 下载当前播放视频';
-                    btn.onclick = () => {
-                        const specs = feed.objectDesc.media[0].spec || [];
-                        if (specs.length > 1) {
-                            showResolutionSelector(feed);
-                        } else {
-                            triggerVideoDownload(feed, null);
-                        }
-                    };
-                } else {
-                    btn.style.display = 'block';
-                    btn.innerHTML = '📥 下载当前视频 (未提取到密钥)';
-                    btn.onclick = () => triggerDirectVideoDownload(src);
-                }
-            }, 1000);
-        }
-
-        function getFeedForVideo(videoSrc) {
-            if (!videoSrc) return null;
-            
-            if (window.__wx_current_playing_feed) {
-                return window.__wx_current_playing_feed;
-            }
-            
-            const videoEl = document.querySelector('video');
-            const duration = videoEl ? videoEl.duration : 0;
-            
-            // 1. Try matching by path if videoSrc is a direct CDN URL
-            let path = videoSrc.split('?')[0];
-            path = path.replace(/^https?:\/\/[^\/]+/, '');
-            if (path && !videoSrc.startsWith('blob:')) {
-                for (const id in window.capturedFeeds) {
-                    const feed = window.capturedFeeds[id];
-                    const media = feed.objectDesc?.media?.[0];
-                    if (media && media.url) {
-                        let feedPath = media.url.split('?')[0];
-                        feedPath = feedPath.replace(/^https?:\/\/[^\/]+/, '');
-                        if (feedPath && (path.includes(feedPath) || feedPath.includes(path))) {
-                            return feed;
-                        }
-                    }
-                }
-            }
-            
-            // 2. Try duration matching (highest precision, within 1.5 seconds tolerance)
-            let durationMatches = [];
-            if (duration > 0) {
-                for (const id in window.capturedFeeds) {
-                    const feed = window.capturedFeeds[id];
-                    const media = feed.objectDesc?.media?.[0];
-                    if (media) {
-                        let feedDuration = media.videoPlayLen || 0;
-                        if (feedDuration > 1000) {
-                            feedDuration = feedDuration / 1000;
-                        }
-                        if (feedDuration > 0 && Math.abs(feedDuration - duration) < 1.5) {
-                            durationMatches.push(feed);
-                        }
-                    }
-                }
-            }
-            
-            if (durationMatches.length === 1) {
-                return durationMatches[0];
-            }
-            
-            return null; // Eliminate broad DOM text matching which returns false positives on lists
-        }
-
-        function showResolutionSelector(feed) {
-            const media = feed.objectDesc.media[0];
-            const specs = media.spec || [];
-            
-            if (specs.length <= 1) {
-                triggerVideoDownload(feed, null);
-                return;
-            }
-            
-            const overlay = document.createElement('div');
-            overlay.id = 'resolution-selector-overlay';
-            overlay.style.cssText = `
-                position: fixed;
-                top: 0;
-                left: 0;
-                width: 100vw;
-                height: 100vh;
-                background: rgba(0,0,0,0.65);
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                z-index: 2147483647;
-                font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-            `;
-            
-            const modal = document.createElement('div');
-            modal.style.cssText = `
-                background: #ffffff;
-                padding: 24px;
-                border-radius: 16px;
-                width: 320px;
-                box-shadow: 0 10px 40px rgba(0,0,0,0.3);
-                display: flex;
-                flex-direction: column;
-                gap: 12px;
-                box-sizing: border-box;
-                animation: scaleIn 0.2s ease-out;
-            `;
-            
-            if (!document.getElementById('resolution-selector-style')) {
-                const style = document.createElement('style');
-                style.id = 'resolution-selector-style';
-                style.innerHTML = `
-                    @keyframes scaleIn {
-                        from { transform: scale(0.9); opacity: 0; }
-                        to { transform: scale(1); opacity: 1; }
-                    }
-                `;
-                document.head.appendChild(style);
-            }
-            
-            const title = document.createElement('div');
-            title.innerHTML = '选择下载清晰度';
-            title.style.cssText = `
-                font-size: 16px;
-                font-weight: bold;
-                color: #333;
-                text-align: center;
-                margin-bottom: 8px;
-            `;
-            modal.appendChild(title);
-            
-            // Add original quality option at the top
-            const origBtn = document.createElement('button');
-            origBtn.innerHTML = '📥 原始视频质量 (默认)';
-            origBtn.style.cssText = `
-                background: #f5f5f7;
-                border: none;
-                padding: 12px;
-                border-radius: 10px;
-                font-size: 14px;
-                font-weight: 600;
-                color: #0076ff;
-                cursor: pointer;
-                text-align: center;
-                transition: all 0.2s;
-            `;
-            origBtn.onmouseover = () => {
-                origBtn.style.background = '#e1efff';
-                origBtn.style.transform = 'translateY(-1px)';
-            };
-            origBtn.onmouseout = () => {
-                origBtn.style.background = '#f5f5f7';
-                origBtn.style.transform = 'none';
-            };
-            origBtn.onclick = () => {
-                document.body.removeChild(overlay);
-                triggerVideoDownload(feed, null);
-            };
-            modal.appendChild(origBtn);
-            
-            specs.forEach(spec => {
-                const optBtn = document.createElement('button');
-                const w = spec.width || 0;
-                const h = spec.height || 0;
-                const codec = (spec.codingFormat === 2 || spec.codec === 2) ? 'H.265' : 'H.264';
-                const resolutionText = w && h ? (w + 'x' + h + ' (' + codec + ')') : ('格式 ' + spec.fileFormat);
-                
-                optBtn.innerHTML = '📥 ' + resolutionText;
-                optBtn.style.cssText = `
-                    background: #f5f5f7;
-                    border: none;
-                    padding: 12px;
-                    border-radius: 10px;
-                    font-size: 14px;
-                    font-weight: 600;
-                    color: #0076ff;
-                    cursor: pointer;
-                    text-align: center;
-                    transition: all 0.2s;
-                `;
-                optBtn.onmouseover = () => {
-                    optBtn.style.background = '#e1efff';
-                    optBtn.style.transform = 'translateY(-1px)';
-                };
-                optBtn.onmouseout = () => {
-                    optBtn.style.background = '#f5f5f7';
-                    optBtn.style.transform = 'none';
-                };
-                
-                optBtn.onclick = () => {
-                    document.body.removeChild(overlay);
-                    triggerVideoDownload(feed, spec.fileFormat);
-                };
-                modal.appendChild(optBtn);
-            });
-            
-            const cancelBtn = document.createElement('button');
-            cancelBtn.innerHTML = '取消';
-            cancelBtn.style.cssText = `
-                background: transparent;
-                border: 1px solid #d2d2d7;
-                padding: 10px;
-                border-radius: 10px;
-                font-size: 14px;
-                color: #86868b;
-                cursor: pointer;
-                text-align: center;
-                margin-top: 4px;
-                transition: background 0.2s;
-            `;
-            cancelBtn.onmouseover = () => cancelBtn.style.background = '#f5f5f7';
-            cancelBtn.onmouseout = () => cancelBtn.style.background = 'transparent';
-            cancelBtn.onclick = () => {
-                document.body.removeChild(overlay);
-            };
-            modal.appendChild(cancelBtn);
-            
-            overlay.appendChild(modal);
-            document.body.appendChild(overlay);
-        }
-
-        async function triggerVideoDownload(feed, fileFormat) {
-            const btn = document.getElementById('video-download-floating-btn');
-            if (btn.classList.contains('downloading')) return;
-            btn.classList.add('downloading');
-            btn.style.background = '#888';
-            btn.innerHTML = '⏳ 正在提交下载...';
-
-            try {
-                const media = feed.objectDesc.media[0];
-                const video_url = media.url + (media.urlToken || "");
-                const final_url = fileFormat ? (video_url + (video_url.indexOf('?') >= 0 ? '&' : '?') + 'X-snsvideoflag=' + fileFormat) : video_url;
-
-                const response = await fetch('/__wx_channels_api/download', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        url: final_url,
-                        description: feed.objectDesc.description || "视频号视频",
-                        createtime: String(feed.createtime || 0),
-                        key: String(media.decodeKey || "")
-                    })
-                });
-
-                const data = await response.json();
-                if (response.ok) {
-                    btn.innerHTML = '✅ 已提交下载任务';
-                    btn.style.background = '#0076ff';
-                } else {
-                    alert('下载失败: ' + (data.error || '未知错误'));
-                    btn.innerHTML = '📥 下载当前播放视频';
-                    btn.style.background = '#0076ff';
-                }
-            } catch (err) {
-                alert('下载失败: ' + err.message);
-                btn.innerHTML = '📥 下载当前播放视频';
-                btn.style.background = '#0076ff';
-            } finally {
-                setTimeout(() => {
-                    btn.classList.remove('downloading');
-                }, 3000);
-            }
-        }
-
-        async function triggerDirectVideoDownload(src) {
-            if (src && src.startsWith('blob:')) {
-                alert('提示：当前视频采用加密流媒体播放，由于微信视频号 API 未完成初始化，未提取到密钥，暂时无法下载。请尝试在微信中重新打开或刷新此页面以初始化 API 并提取密钥。');
-                return;
-            }
-            const btn = document.getElementById('video-download-floating-btn');
-            if (btn.classList.contains('downloading')) return;
-            btn.classList.add('downloading');
-            btn.style.background = '#888';
-            btn.innerHTML = '⏳ 正在提交下载...';
-
-            try {
-                const response = await fetch('/__wx_channels_api/download', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        url: src,
-                        description: document.title || "视频号视频",
-                        createtime: String(Math.floor(Date.now() / 1000)),
-                        key: ""
-                    })
-                });
-
-                const data = await response.json();
-                if (response.ok) {
-                    btn.innerHTML = '✅ 已提交下载任务';
-                    btn.style.background = '#0076ff';
-                } else {
-                    alert('下载失败: ' + (data.error || '未知错误'));
-                    btn.innerHTML = '📥 下载当前视频';
-                    btn.style.background = '#0076ff';
-                }
-            } catch (err) {
-                alert('下载失败: ' + err.message);
-                btn.innerHTML = '📥 下载当前视频';
-                btn.style.background = '#0076ff';
-            } finally {
-                setTimeout(() => {
-                    btn.classList.remove('downloading');
-                }, 3000);
-            }
-        }
-
-        setInterval(() => {
-            const pathname = window.location.pathname;
-            const href = window.location.href;
-            const params = new URLSearchParams(href.split('?')[1] || '');
-            const hasUsername = !!params.get('username');
-            
-            if (pathname.includes('/web/pages/profile') || pathname.includes('/web/pages/home') || pathname.includes('/web/pages/feed')) {
-                if (hasUsername) {
-                    injectFloatingUI();
-                    injectBatchDownloadUI();
-                } else {
-                    const syncBtn = document.getElementById('channels-sync-floating-btn');
-                    if (syncBtn) syncBtn.remove();
-                    const batchBtn = document.getElementById('channels-batch-download-floating-btn');
-                    if (batchBtn) batchBtn.remove();
-                }
-                injectVideoDownloadUI();
-            }
-        }, 1000);
-    })();
-    """
 
 def get_injected_official_js():
     return r"""
@@ -2192,6 +1087,42 @@ def get_injected_official_js():
     """
 
 
+def cleanup_mitmproxy_logging_handlers():
+    import logging
+    
+    def is_mitm_handler(h):
+        cls = h.__class__
+        if "mitm" in getattr(cls, "__module__", "").lower():
+            return True
+        if "mitm" in cls.__name__.lower():
+            return True
+        for base in getattr(cls, "__mro__", []):
+            if "mitm" in base.__name__.lower() or "mitm" in getattr(base, "__module__", "").lower():
+                return True
+        return False
+
+    # 1. Clean root logger
+    root = logging.getLogger()
+    for h in list(root.handlers):
+        if is_mitm_handler(h):
+            try:
+                root.removeHandler(h)
+                h.close()
+            except Exception:
+                pass
+                
+    # 2. Clean all other loggers
+    for name in list(logging.Logger.manager.loggerDict.keys()):
+        logger = logging.getLogger(name)
+        for h in list(logger.handlers):
+            if is_mitm_handler(h):
+                try:
+                    logger.removeHandler(h)
+                    h.close()
+                except Exception:
+                    pass
+
+
 # ── Proxy Service Manager (代理服务单例管理器) ─────────────────────
 
 class ProxyManager:
@@ -2204,64 +1135,111 @@ class ProxyManager:
         return cls._instance
         
     def __init__(self):
-        self.server_socket = None
         self.running = False
         self.thread = None
+        self.loop = None
+        self.master = None
         self.port = 5202
-        
+
     def start(self):
         if self.running:
             return True
-            
-        ensure_ca_certificates()
-        
-        # 1. Install certificate
-        install_system_cert(CA_CERT_PATH)
-        
-        # 2. Listen on socket
+
+        cleanup_mitmproxy_logging_handlers()
         try:
-            self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.server_socket.bind(("127.0.0.1", self.port))
-            self.server_socket.listen(128)
-        except Exception as e:
-            print(f"Failed to bind proxy server on port {self.port}: {e}")
-            return False
-            
+            from mitmproxy.tools.dump import DumpMaster
+            from mitmproxy import options
+        except ImportError as e:
+            print(f"Error starting ProxyManager: mitmproxy is not installed in this Python environment. {e}")
+            raise RuntimeError("未检测到 mitmproxy 依赖，请确保您是在虚拟环境 venv312 下运行项目（当前 Python 缺少 mitmproxy 库）。")
+
+        ensure_ca_certificates()
+
+        # 1. 安装并信任证书
+        install_system_cert(CA_CERT_PATH)
+
+        # 2. 把我们的 CA 喂给 mitmproxy
+        confdir = prepare_mitm_confdir()
+
+        # 3. 在后台线程里跑 mitmproxy 的 asyncio 事件循环
         self.running = True
-        self.thread = threading.Thread(target=self._run_server, daemon=True)
+        self.thread = threading.Thread(
+            target=self._run_server, args=(str(confdir),), daemon=True
+        )
         self.thread.start()
-        
-        # 3. Enable system proxy
+
+        # 4. 开启系统代理
         set_system_proxy(True, port=self.port)
         print(f"Channels MITM proxy started on 127.0.0.1:{self.port} and system proxy enabled.")
         return True
-        
+
     def stop(self):
         if not self.running:
             return True
-            
+
         self.running = False
-        
-        # Disable system proxy
+
+        # 还原系统代理
         set_system_proxy(False, port=self.port)
-        
-        # Close listening socket
-        if self.server_socket:
+
+        # 关闭 mitmproxy
+        if self.master and self.loop:
             try:
-                self.server_socket.close()
-            except:
+                self.loop.call_soon_threadsafe(self.master.shutdown)
+            except Exception as e:
+                print(f"Error shutting down mitmproxy: {e}")
+
+        # 等待后台线程完全退出以确保关闭完成
+        if self.thread and self.thread.is_alive():
+            try:
+                self.thread.join(timeout=5)
+            except Exception:
                 pass
-            self.server_socket = None
-            
+
+        self.master = None
+        self.loop = None
+        self.thread = None
+
+        cleanup_mitmproxy_logging_handlers()
+
         print("Channels MITM proxy stopped and system proxy disabled.")
         return True
-        
-    def _run_server(self):
-        while self.running:
+
+    def _run_server(self, confdir):
+        import asyncio
+        from mitmproxy.tools.dump import DumpMaster
+        from mitmproxy import options
+
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self.loop = loop
+
+        async def _serve():
+            opts = options.Options(
+                listen_host="127.0.0.1",
+                listen_port=self.port,
+                confdir=confdir,
+                # 只解密这两个域名,其余 CONNECT 直接透传(不碰证书、不碰内容)
+                allow_hosts=[
+                    r"channels\.weixin\.qq\.com",
+                    r"mp\.weixin\.qq\.com",
+                    r"res\.wx\.qq\.com",
+                ],
+            )
+            master = DumpMaster(opts, with_termlog=False, with_dumper=False)
+            master.addons.add(ChannelsAddon())
+            self.master = master
             try:
-                client_sock, addr = self.server_socket.accept()
-                threading.Thread(target=handle_client_connection, args=(client_sock,), daemon=True).start()
+                await master.run()
+            except Exception as e:
+                print(f"[Proxy] mitmproxy run error: {e}")
+
+        try:
+            loop.run_until_complete(_serve())
+        except Exception as e:
+            print(f"[Proxy] event loop error: {e}")
+        finally:
+            try:
+                loop.close()
             except Exception:
-                if not self.running:
-                    break
+                pass

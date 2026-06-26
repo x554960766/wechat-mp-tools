@@ -7,10 +7,33 @@
 
 import os
 import sys
+
+def ensure_virtualenv():
+    """检测当前是否运行在虚拟环境 venv312 中。
+    如果不是，并且检测到本地存在 venv312，则自动使用 venv312 的 python 解释器重载当前脚本！
+    """
+    if getattr(sys, 'frozen', False):
+        return
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    if sys.platform == 'win32':
+        venv_python = os.path.join(project_root, 'venv312', 'Scripts', 'python.exe')
+    else:
+        venv_python = os.path.join(project_root, 'venv312', 'bin', 'python')
+    if os.path.exists(venv_python):
+        current_exe = os.path.abspath(sys.executable)
+        target_exe = os.path.abspath(venv_python)
+        if current_exe != target_exe:
+            print(f"[Env Auto-Switch] 检测到虚拟环境，正在自动切换至: {venv_python}", flush=True)
+            args = [venv_python] + sys.argv
+            os.execv(venv_python, args)
+
+ensure_virtualenv()
+
 import socket
 import threading
 import time
 import multiprocessing
+
 
 from backend.runtime import configure_runtime, log_file, write_startup_error
 
@@ -53,7 +76,13 @@ def wait_for_server(port, timeout=15):
 
 def on_closing():
     """窗口关闭回调，彻底杀死后台线程与整个进程"""
+    try:
+        from backend.mitm_proxy import ProxyManager
+        ProxyManager.get_instance().stop()
+    except Exception as e:
+        print(f"Error stopping proxy on close: {e}")
     os._exit(0)
+
 
 
 # ── 主进程启动 ────────────────────────────────────────────

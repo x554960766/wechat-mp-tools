@@ -9,6 +9,7 @@ project_root = os.path.abspath('.')
 # 收集静态前端文件夹到包中
 datas = [
     (os.path.join(project_root, 'frontend'), 'frontend'),
+    (os.path.join(project_root, 'injection_scripts'), 'injection_scripts'),
 ]
 
 playwright_browsers = os.path.join(project_root, 'ms-playwright')
@@ -24,6 +25,17 @@ if sys.platform == 'win32' and os.path.isfile(webview2_bootstrapper_exe):
 
 # ── binaries 列表（Windows 平台会追加 .NET DLL）──
 binaries = []
+
+# ── mitmproxy：用于视频号/公众号的 TLS 拦截代理，需完整收集其
+#    隐藏子模块、数据文件与原生扩展(mitmproxy_rs 等),否则冻结后启动代理失败 ──
+try:
+    from PyInstaller.utils.hooks import collect_all
+    for _pkg in ('mitmproxy', 'mitmproxy_rs', 'publicsuffix2'):
+        _d, _b, _h = collect_all(_pkg)
+        datas += _d
+        binaries += _b
+except Exception as _e:
+    print(f"[spec] mitmproxy collect_all failed: {_e}")
 
 # ── 依赖配置 ──────────────────────────────────────────────
 hiddenimports = [
@@ -59,6 +71,8 @@ hiddenimports = [
     'sniffio',
     'httpcore',
     'h11',
+    'mitmproxy',
+    'mitmproxy.tools.dump',
     
     # pywebview 核心支持
     'webview',
