@@ -48,6 +48,8 @@ REFERER = "https://www.douyin.com/"
 API_VIDEO_DETAIL = "https://www.douyin.com/aweme/v1/web/aweme/detail/"
 API_MULTI_DETAIL = "https://www.douyin.com/aweme/v1/web/multi/aweme/detail/"
 API_USER_POST = "https://www.douyin.com/aweme/v1/web/aweme/post/"
+API_MIX_AWEME = "https://www.douyin.com/aweme/v1/web/mix/aweme/"
+API_MUSIC_DETAIL = "https://www.douyin.com/aweme/v1/web/music/detail/"
 
 # ── 全局任务状态管理 ──────────────────────────────────────
 
@@ -130,11 +132,23 @@ def generate_verify_fp() -> str:
 
 def add_history_item(title: str, item_type: str, file_path: str, size_bytes: int):
     """保存下载记录到历史记录文件"""
+    # 提取来源（下载目录下的第一级子目录名）
+    source = ""
+    path_str = str(file_path)
+    marker = "douyin_downloads/"
+    idx = path_str.find(marker)
+    if idx >= 0:
+        rest = path_str[idx + len(marker):]
+        parts = rest.split("/")
+        if parts:
+            source = parts[0]
+
     history = load_json(HISTORY_FILE, [])
     history.insert(0, {
         "title": title,
         "type": item_type,
         "path": str(file_path),
+        "source": source,
         "size": f"{size_bytes / (1024 * 1024):.2f} MB" if size_bytes else "未知",
         "time": time.strftime("%Y-%m-%d %H:%M:%S")
     })
@@ -441,7 +455,7 @@ class DouyinClient:
         try:
             data = self.api_get(API_VIDEO_DETAIL, {
                 "aweme_id": aweme_id,
-                "aid": "1128",
+                "aid": "6383",
                 "version_name": "23.5.0",
                 "device_platform": "webapp",
                 "os": "windows",
@@ -456,7 +470,7 @@ class DouyinClient:
         try:
             data = self.api_get(API_VIDEO_DETAIL, {
                 "aweme_id": aweme_id,
-                "aid": "1128",
+                "aid": "6383",
                 "version_name": "23.5.0",
                 "device_platform": "webapp",
                 "os": "windows",
@@ -485,6 +499,73 @@ class DouyinClient:
             pass
 
         raise Exception(f"无法获取作品 {aweme_id} 的详情，可能需要有效的 Cookie 或作品已删除")
+
+    def get_mix_videos(self, mix_id: str, cursor: int = 0, count: int = 20) -> tuple:
+        """获取合集作品列表，返回 (aweme_list, next_cursor, has_more)"""
+        data = self.api_get(API_MIX_AWEME, {
+            "mix_id": mix_id,
+            "cursor": str(cursor),
+            "count": str(count),
+        }, skip_sign=False)
+
+        if data.get("status_code") != 0:
+            msg = data.get("status_msg", "未知错误")
+            raise Exception(f"获取合集作品列表失败: {msg}")
+
+        aweme_list = data.get("aweme_list") or []
+        has_more = data.get("has_more", 0)
+        if isinstance(has_more, bool):
+            has_more = has_more
+        else:
+            has_more = int(has_more) == 1
+        next_cursor = data.get("cursor", 0)
+
+        return aweme_list, next_cursor, has_more
+
+    def get_user_mixes(self, sec_uid: str, cursor: int = 0, count: int = 20) -> tuple:
+        """获取用户的合集列表，返回 (mix_infos, next_cursor, has_more)"""
+        data = self.api_get("https://www.douyin.com/aweme/v1/web/mix/list/", {
+            "sec_user_id": sec_uid,
+            "cursor": str(cursor),
+            "count": str(count),
+        }, skip_sign=False)
+
+        if data.get("status_code") != 0:
+            msg = data.get("status_msg", "未知错误")
+            raise Exception(f"获取合集列表失败: {msg}")
+
+        mix_infos = data.get("mix_infos") or []
+        has_more = data.get("has_more", 0)
+        if isinstance(has_more, bool):
+            has_more = has_more
+        else:
+            has_more = int(has_more) == 1
+        next_cursor = data.get("cursor", 0)
+
+        return mix_infos, next_cursor, has_more
+
+
+    def get_music_detail(self, music_id: str) -> dict:
+        """获取音乐详情，带兜底"""
+        try:
+            data = self.api_get(API_MUSIC_DETAIL, {
+                "music_id": music_id,
+            }, skip_sign=True)
+            if data.get("status_code") == 0 and data.get("music_info"):
+                return data["music_info"]
+        except Exception:
+            pass
+
+        try:
+            data = self.api_get(API_MUSIC_DETAIL, {
+                "music_id": music_id,
+            }, skip_sign=False)
+            if data.get("status_code") == 0 and data.get("music_info"):
+                return data["music_info"]
+        except Exception:
+            pass
+
+        raise Exception(f"无法获取音乐 {music_id} 的详情，可能需要有效的 Cookie 或作品已删除")
 
     # ── 用户作品列表 API ──────────────────────────────────
 
@@ -516,6 +597,35 @@ class DouyinClient:
 
         return aweme_list, next_cursor, has_more
 
+    def get_user_stories(self, sec_uid: str, max_cursor: int = 0, count: int = 18) -> tuple:
+        """获取用户日常列表，返回 (aweme_list, next_cursor, has_more)"""
+        data = self.api_get(API_USER_POST, {
+            "publish_video_strategy_type": "1",
+            "sec_user_id": sec_uid,
+            "max_cursor": str(max_cursor),
+            "locate_query": "false",
+            "show_live_replay_strategy": "1",
+            "need_time_list": "0",
+            "time_list_query": "0",
+            "whale_cut_token": "",
+            "count": str(count),
+        }, skip_sign=True)
+
+        if data.get("status_code") != 0:
+            msg = data.get("status_msg", "未知错误")
+            raise Exception(f"获取用户日常列表失败: {msg}")
+
+        aweme_list = data.get("aweme_list") or []
+        has_more = data.get("has_more", 0)
+        if isinstance(has_more, bool):
+            has_more = has_more
+        else:
+            has_more = int(has_more) == 1
+        next_cursor = data.get("max_cursor", 0)
+
+        return aweme_list, next_cursor, has_more
+
+
     # ── 解析资源信息 ──────────────────────────────────────
 
     @staticmethod
@@ -537,20 +647,46 @@ class DouyinClient:
 
         # 判断类型：images 存在且非空 → 图文；否则 → 视频
         images = detail.get("images")
+        if not images:
+            image_post_info = detail.get("image_post_info")
+            if isinstance(image_post_info, dict):
+                images = image_post_info.get("images")
+
         if images and isinstance(images, list) and len(images) > 0:
             # 图文类型
             urls = []
             for img in images:
                 url_list = img.get("url_list") or []
+                if not url_list and "display_image" in img:
+                    display_image = img.get("display_image")
+                    if isinstance(display_image, dict):
+                        url_list = display_image.get("url_list") or []
+                if not url_list and "owner_watermark_image" in img:
+                    watermark_image = img.get("owner_watermark_image")
+                    if isinstance(watermark_image, dict):
+                        url_list = watermark_image.get("url_list") or []
+
                 if url_list:
                     # 取最后一个（通常是最高清）
                     urls.append(url_list[-1] if len(url_list) > 1 else url_list[0])
+
+            # 提取背景音乐 URL
+            music_url = ""
+            music = detail.get("music")
+            if music and isinstance(music, dict):
+                play_url = music.get("play_url")
+                if play_url and isinstance(play_url, dict):
+                    music_urls = play_url.get("url_list") or []
+                    if music_urls:
+                        music_url = music_urls[0]
+
             return {
                 "type": "image",
                 "title": title,
                 "urls": urls,
                 "aweme_id": aweme_id,
                 "nickname": nickname,
+                "music_url": music_url,
             }
         else:
             # 视频类型 — 从多个地址源中选择最佳无水印版本
@@ -651,7 +787,7 @@ def download_file(url: str, save_path: Path) -> int:
         raise e
 
 
-def download_media(media_info: dict, target_dir: Path) -> dict:
+def download_media(media_info: dict, target_dir: Path, custom_dir: Path = None) -> dict:
     """根据解析的媒体信息执行下载"""
     aweme_id = media_info["aweme_id"]
     title = media_info["title"]
@@ -665,7 +801,7 @@ def download_media(media_info: dict, target_dir: Path) -> dict:
     title_with_id = f"{aweme_id}_{title}"
     total_bytes = 0
 
-    user_dir = target_dir / nickname
+    user_dir = custom_dir if custom_dir else (target_dir / nickname)
     user_dir.mkdir(parents=True, exist_ok=True)
 
     if item_type == "video":
@@ -683,12 +819,55 @@ def download_media(media_info: dict, target_dir: Path) -> dict:
             img_bytes = download_file(img_url, save_file)
             total_bytes += img_bytes
         _add_log(f"✅ 图集全部下载完成! 总大小: {total_bytes / (1024 * 1024):.2f} MB")
+
+        # 下载图文背景音乐 (BGM)
+        music_url = media_info.get("music_url")
+        if music_url:
+            _add_log("🎵 发现图文背景音乐，正在下载...")
+            try:
+                save_music = folder_path / "bgm.mp3"
+                music_bytes = download_file(music_url, save_music)
+                total_bytes += music_bytes
+                _add_log(f"✅ 背景音乐下载成功! 大小: {music_bytes / (1024 * 1024):.2f} MB")
+            except Exception as me:
+                _add_log(f"⚠️ 背景音乐下载失败: {me}")
+
         add_history_item(title, "图文", folder_path, total_bytes)
 
     return {
         "id": aweme_id,
         "title": title,
         "type": item_type,
+        "size_bytes": total_bytes,
+    }
+
+
+def download_music_file(music_info: dict, target_dir: Path) -> dict:
+    """下载音乐原声 mp3 文件"""
+    music_id = str(music_info["id"])
+    title = clean_filename(music_info["title"])
+    author = clean_filename(music_info.get("author", "未知歌手"))
+
+    play_url = music_info.get("play_url", {})
+    urls = play_url.get("url_list", [])
+    if not urls:
+        raise Exception("该音乐没有可用的播放/下载链接")
+
+    user_dir = target_dir / author
+    user_dir.mkdir(parents=True, exist_ok=True)
+
+    save_file = user_dir / f"原声_{music_id}_{title}.mp3"
+    _add_log(f"🎵 正在下载音乐原声: {save_file.name}")
+
+    total_bytes = download_file(urls[0], save_file)
+    _add_log(f"✅ 音乐下载完成! 大小: {total_bytes / (1024 * 1024):.2f} MB")
+
+    add_history_item(title, "音乐", save_file, total_bytes)
+
+    return {
+        "id": music_id,
+        "title": f"原声 - {title}",
+        "type": "music",
         "size_bytes": total_bytes,
     }
 
@@ -702,6 +881,17 @@ def _run_profile_download_task(sec_uid: str, max_pages: int, target_dir: Path):
     client = DouyinClient()
 
     try:
+        nickname = "未知用户"
+        try:
+            user_res = client.get_user_detail(sec_uid)
+            if user_res and user_res.get("user"):
+                nickname = user_res["user"].get("nickname", "未知用户")
+        except Exception:
+            pass
+        nickname = clean_filename(nickname)
+        profile_dir = target_dir / f"{nickname}的作品"
+        profile_dir.mkdir(parents=True, exist_ok=True)
+
         # 第一步：收集所有作品列表
         _add_log("正在通过 API 获取用户作品列表...")
         all_items = []
@@ -771,7 +961,7 @@ def _run_profile_download_task(sec_uid: str, max_pages: int, target_dir: Path):
                     continue
 
                 _add_log(f"[{idx}/{len(all_items)}] 正在下载: {media_info['title'][:30]}...")
-                result = download_media(media_info, target_dir)
+                result = download_media(media_info, target_dir, custom_dir=profile_dir)
                 downloaded += 1
                 _set_task_state(downloaded_count=downloaded, current_title=result["title"])
             except Exception as e:
@@ -785,6 +975,476 @@ def _run_profile_download_task(sec_uid: str, max_pages: int, target_dir: Path):
                 time.sleep(delay)
 
         _add_log(f"🎉 批量下载任务结束! 成功: {downloaded}，失败: {failed}")
+        add_history_item(f"{nickname}的作品", "批量", profile_dir, downloaded)
+        _set_task_state(status="completed")
+
+    except Exception as outer_err:
+        _add_log(f"💥 批量下载任务发生错误: {str(outer_err)}")
+        _set_task_state(status="failed")
+
+
+def _run_mix_download_task(mix_id: str, target_dir: Path):
+    """后台线程：使用 API 获取合集所有视频并下载"""
+    _add_log(f"正在准备抓取合集资源，目标 mix_id: {mix_id}...")
+
+    client = DouyinClient()
+
+    try:
+        # 第一步：收集所有作品列表
+        _add_log("正在通过 API 获取合集作品列表...")
+        all_items = []
+        cursor = 0
+        page = 0
+        mix_name = ""
+
+        # Capture cookies first
+        try:
+            client.session.get("https://www.douyin.com/", timeout=10)
+        except Exception:
+            pass
+
+        while True:
+            # 检查是否取消
+            if _task_cancel_event.is_set():
+                _add_log("⚠️ 用户取消了任务")
+                _set_task_state(status="cancelled")
+                return
+
+            page += 1
+            _add_log(f"正在获取第 {page} 页合集数据 (cursor={cursor})...")
+
+            try:
+                aweme_list, next_cursor, has_more = client.get_mix_videos(mix_id, cursor)
+            except Exception as e:
+                _add_log(f"⚠️ 获取第 {page} 页数据失败: {str(e)}，尝试继续...")
+                break
+
+            if not aweme_list:
+                _add_log(f"第 {page} 页返回空数据，已到达最后一页")
+                break
+
+            # Extract mix name if not already done
+            if not mix_name and aweme_list[0].get("mix_info"):
+                mix_name = aweme_list[0]["mix_info"].get("mix_name", "")
+
+            all_items.extend(aweme_list)
+            _add_log(f"第 {page} 页获取到 {len(aweme_list)} 个作品，累计 {len(all_items)} 个")
+
+            if not has_more:
+                _add_log("已获取全部合集作品数据")
+                break
+
+            cursor = next_cursor
+            # 随机延迟避免风控
+            delay = random.uniform(1.5, 4.0)
+            _add_log(f"休眠 {delay:.1f} 秒规避频率风控...")
+            time.sleep(delay)
+
+        if not all_items:
+            _set_task_state(status="failed")
+            _add_log("❌ 未能获取到任何合集作品数据，请确认合集 ID 正确")
+            return
+
+        mix_name = clean_filename(mix_name or f"合集_{mix_id}")
+        _add_log(f"🚀 合集列表获取完成！合集名称: {mix_name}，共 {len(all_items)} 个作品待处理")
+        _reset_task_state(total=len(all_items))
+
+        # 第二步：逐个下载
+        downloaded = 0
+        failed = 0
+
+        # 获取作者昵称
+        first_author = all_items[0].get("author", {})
+        nickname = "未知用户"
+        if isinstance(first_author, dict):
+            nickname = first_author.get("nickname", "未知用户")
+        nickname = clean_filename(nickname)
+
+        mix_dir = target_dir / nickname / f"合集_{mix_name}"
+        mix_dir.mkdir(parents=True, exist_ok=True)
+
+        for idx, item in enumerate(all_items, 1):
+            # 检查是否取消
+            if _task_cancel_event.is_set():
+                _add_log("⚠️ 用户取消了任务")
+                _set_task_state(status="cancelled")
+                return
+
+            _set_task_state(current_index=idx)
+
+            try:
+                media_info = DouyinClient.parse_media_info(item)
+                if not media_info["urls"]:
+                    _add_log(f"⚠️ 第 {idx} 项无可用资源链接，跳过")
+                    failed += 1
+                    _set_task_state(failed_count=failed)
+                    continue
+
+                _add_log(f"[{idx}/{len(all_items)}] 正在下载: {media_info['title'][:30]}...")
+                result = download_media(media_info, target_dir, custom_dir=mix_dir)
+                downloaded += 1
+                _set_task_state(downloaded_count=downloaded, current_title=result["title"])
+            except Exception as e:
+                failed += 1
+                _set_task_state(failed_count=failed)
+                _add_log(f"❌ 第 {idx} 项下载失败: {str(e)}")
+
+            # 每个作品之间的间隔
+            if idx < len(all_items):
+                delay = random.uniform(1.0, 3.0)
+                time.sleep(delay)
+
+        _add_log(f"🎉 批量下载合集任务结束! 成功: {downloaded}，失败: {failed}")
+        add_history_item(mix_name, "合集", mix_dir, 0)
+        _set_task_state(status="completed")
+
+    except Exception as outer_err:
+        _add_log(f"💥 批量下载合集任务发生错误: {str(outer_err)}")
+        _set_task_state(status="failed")
+
+
+def _run_user_download_task(sec_uid: str, types: list, max_pages: int, target_dir: Path):
+    """后台线程：下载博主的作品、喜欢或合集（支持组合）"""
+    _add_log(f"正在准备抓取博主资源，目标 sec_uid: {sec_uid[:20]}...")
+    client = DouyinClient()
+
+    try:
+        # Capture cookies first
+        try:
+            client.session.get("https://www.douyin.com/", timeout=10)
+        except Exception:
+            pass
+
+        # 解析昵称
+        _add_log("正在获取博主资料...")
+        nickname = "未知用户"
+        try:
+            user_res = client.get_user_detail(sec_uid)
+            if user_res and user_res.get("user"):
+                nickname = user_res["user"].get("nickname", "未知用户")
+        except Exception:
+            pass
+        nickname = clean_filename(nickname)
+        _add_log(f"当前博主: {nickname}")
+
+        # 1. 下载作品 (Post)
+        if "post" in types:
+            if _task_cancel_event.is_set():
+                _add_log("⚠️ 用户取消了任务")
+                _set_task_state(status="cancelled")
+                return
+
+            _add_log(f"🚀 [1/4] 开始抓取博主作品列表...")
+            all_items = []
+            cursor = 0
+            page = 0
+            while page < max_pages if max_pages > 0 else True:
+                if _task_cancel_event.is_set():
+                    _add_log("⚠️ 用户取消了任务")
+                    _set_task_state(status="cancelled")
+                    return
+                page += 1
+                _add_log(f"正在获取作品第 {page} 页 (cursor={cursor})...")
+                try:
+                    aweme_list, next_cursor, has_more = client.get_user_videos(sec_uid, cursor)
+                except Exception as e:
+                    _add_log(f"⚠️ 获取作品第 {page} 页失败: {e}")
+                    break
+                if not aweme_list:
+                    break
+                all_items.extend(aweme_list)
+                if not has_more:
+                    break
+                cursor = next_cursor
+                time.sleep(random.uniform(1.0, 2.5))
+
+            if all_items:
+                _add_log(f"作品列表获取完成！共 {len(all_items)} 个作品待下载。")
+                _reset_task_state(total=len(all_items))
+                downloaded = 0
+                failed = 0
+                for idx, item in enumerate(all_items, 1):
+                    if _task_cancel_event.is_set():
+                        _add_log("⚠️ 用户取消了任务")
+                        _set_task_state(status="cancelled")
+                        return
+                    _set_task_state(current_index=idx)
+                    try:
+                        media_info = DouyinClient.parse_media_info(item)
+                        _add_log(f"[{idx}/{len(all_items)}] 正在下载作品: {media_info['title'][:30]}")
+                        result = download_media(media_info, target_dir, custom_dir=target_dir / nickname)
+                        downloaded += 1
+                        _set_task_state(downloaded_count=downloaded, current_title=result["title"])
+                    except Exception as e:
+                        failed += 1
+                        _set_task_state(failed_count=failed)
+                        _add_log(f"❌ 第 {idx} 项作品下载失败: {e}")
+                    time.sleep(random.uniform(0.5, 1.5))
+                _add_log(f"🎉 博主作品下载结束! 成功: {downloaded}，失败: {failed}")
+                add_history_item(f"{nickname}的作品", "批量", target_dir / nickname, downloaded)
+            else:
+                _add_log("该博主作品列表为空或获取失败。")
+
+        # 2. 下载喜欢 (Like)
+        if "like" in types:
+            if _task_cancel_event.is_set():
+                _add_log("⚠️ 用户取消了任务")
+                _set_task_state(status="cancelled")
+                return
+
+            _add_log(f"🚀 [2/4] 开始抓取博主喜欢列表...")
+            all_items = []
+            cursor = 0
+            page = 0
+            while page < max_pages if max_pages > 0 else True:
+                if _task_cancel_event.is_set():
+                    _add_log("⚠️ 用户取消了任务")
+                    _set_task_state(status="cancelled")
+                    return
+                page += 1
+                _add_log(f"正在获取喜欢第 {page} 页 (cursor={cursor})...")
+                try:
+                    res = client.get_liked_videos(sec_uid, cursor)
+                    if res.get("status_code") != 0:
+                        _add_log(f"⚠️ 获取喜欢失败: {res.get('status_msg')}")
+                        break
+                    aweme_list = res.get("aweme_list") or []
+                    next_cursor = res.get("max_cursor", 0)
+                    has_more = res.get("has_more", 0)
+                    has_more_bool = has_more if isinstance(has_more, bool) else (int(has_more) == 1)
+                except Exception as e:
+                    _add_log(f"⚠️ 获取喜欢第 {page} 页失败: {e}")
+                    break
+                if not aweme_list:
+                    break
+                all_items.extend(aweme_list)
+                if not has_more_bool:
+                    break
+                cursor = next_cursor
+                time.sleep(random.uniform(1.0, 2.5))
+
+            if all_items:
+                _add_log(f"喜欢列表获取完成！共 {len(all_items)} 个作品待下载。")
+                _reset_task_state(total=len(all_items))
+                downloaded = 0
+                failed = 0
+                for idx, item in enumerate(all_items, 1):
+                    if _task_cancel_event.is_set():
+                        _add_log("⚠️ 用户取消了任务")
+                        _set_task_state(status="cancelled")
+                        return
+                    _set_task_state(current_index=idx)
+                    try:
+                        media_info = DouyinClient.parse_media_info(item)
+                        _add_log(f"[{idx}/{len(all_items)}] 正在下载喜欢: {media_info['title'][:30]}")
+                        result = download_media(media_info, target_dir, custom_dir=target_dir / f"{nickname}的喜欢")
+                        downloaded += 1
+                        _set_task_state(downloaded_count=downloaded, current_title=result["title"])
+                    except Exception as e:
+                        failed += 1
+                        _set_task_state(failed_count=failed)
+                        _add_log(f"❌ 第 {idx} 项喜欢下载失败: {e}")
+                    time.sleep(random.uniform(0.5, 1.5))
+                _add_log(f"🎉 博主喜欢下载结束! 成功: {downloaded}，失败: {failed}")
+                add_history_item(f"{nickname}的喜欢", "批量", target_dir / f"{nickname}的喜欢", downloaded)
+            else:
+                _add_log("该博主未公开喜欢列表，或喜欢列表为空。")
+
+        # 3. 下载合集 (Mix)
+        if "mix" in types:
+            if _task_cancel_event.is_set():
+                _add_log("⚠️ 用户取消了任务")
+                _set_task_state(status="cancelled")
+                return
+
+            _add_log(f"🚀 [3/4] 开始抓取博主创建的合集列表...")
+            mix_infos = []
+            try:
+                mix_infos, _, _ = client.get_user_mixes(sec_uid)
+            except Exception as e:
+                _add_log(f"⚠️ 获取合集列表失败: {e}")
+
+            if mix_infos:
+                _add_log(f"已获取到 {len(mix_infos)} 个合集，开始逐个下载...")
+                for m_idx, m_info in enumerate(mix_infos, 1):
+                    if _task_cancel_event.is_set():
+                        _add_log("⚠️ 用户取消了任务")
+                        _set_task_state(status="cancelled")
+                        return
+                    mix_id = m_info.get("mix_id")
+                    mix_name = m_info.get("mix_name", f"合集_{mix_id}")
+                    _add_log(f"📦 正在处理第 {m_idx}/{len(mix_infos)} 个合集: 「{mix_name}」")
+
+                    mix_items = []
+                    cursor = 0
+                    while True:
+                        if _task_cancel_event.is_set():
+                            _add_log("⚠️ 用户取消了任务")
+                            _set_task_state(status="cancelled")
+                            return
+                        try:
+                            aweme_list, next_cursor, has_more = client.get_mix_videos(mix_id, cursor)
+                            if not aweme_list:
+                                break
+                            mix_items.extend(aweme_list)
+                            if not has_more:
+                                break
+                            cursor = next_cursor
+                            time.sleep(random.uniform(1.0, 2.5))
+                        except Exception as e:
+                            _add_log(f"⚠️ 获取合集 {mix_name} 列表失败: {e}")
+                            break
+
+                    if mix_items:
+                        _reset_task_state(total=len(mix_items))
+                        downloaded = 0
+                        failed = 0
+                        mix_dir = target_dir / nickname / f"合集_{clean_filename(mix_name)}"
+                        mix_dir.mkdir(parents=True, exist_ok=True)
+                        for idx, item in enumerate(mix_items, 1):
+                            if _task_cancel_event.is_set():
+                                _add_log("⚠️ 用户取消了任务")
+                                _set_task_state(status="cancelled")
+                                return
+                            _set_task_state(current_index=idx)
+                            try:
+                                media_info = DouyinClient.parse_media_info(item)
+                                _add_log(f"[{idx}/{len(mix_items)}] 正在下载合集视频: {media_info['title'][:30]}")
+                                result = download_media(media_info, target_dir, custom_dir=mix_dir)
+                                downloaded += 1
+                                _set_task_state(downloaded_count=downloaded, current_title=result["title"])
+                            except Exception as e:
+                                failed += 1
+                                _set_task_state(failed_count=failed)
+                                _add_log(f"❌ 下载失败: {e}")
+                            time.sleep(random.uniform(0.5, 1.5))
+                        _add_log(f"🎉 合集 「{mix_name}」 下载结束! 成功: {downloaded}，失败: {failed}")
+                        add_history_item(mix_name, "合集", mix_dir, downloaded)
+            else:
+                _add_log("该博主未创建任何合集。")
+
+        # 4. 下载日常 (Story)
+        if "story" in types:
+            if _task_cancel_event.is_set():
+                _add_log("⚠️ 用户取消了任务")
+                _set_task_state(status="cancelled")
+                return
+
+            _add_log(f"🚀 [4/4] 开始抓取博主日常列表...")
+            all_items = []
+            cursor = 0
+            page = 0
+            while page < max_pages if max_pages > 0 else True:
+                if _task_cancel_event.is_set():
+                    _add_log("⚠️ 用户取消了任务")
+                    _set_task_state(status="cancelled")
+                    return
+                page += 1
+                _add_log(f"正在获取日常第 {page} 页 (cursor={cursor})...")
+                try:
+                    aweme_list, next_cursor, has_more = client.get_user_stories(sec_uid, cursor)
+                except Exception as e:
+                    _add_log(f"⚠️ 获取日常第 {page} 页失败: {e}")
+                    break
+                if not aweme_list:
+                    break
+                all_items.extend(aweme_list)
+                if not has_more:
+                    break
+                cursor = next_cursor
+                time.sleep(random.uniform(1.0, 2.5))
+
+            if all_items:
+                _add_log(f"日常列表获取完成！共 {len(all_items)} 个日常待下载。")
+                _reset_task_state(total=len(all_items))
+                downloaded = 0
+                failed = 0
+                for idx, item in enumerate(all_items, 1):
+                    if _task_cancel_event.is_set():
+                        _add_log("⚠️ 用户取消了任务")
+                        _set_task_state(status="cancelled")
+                        return
+                    _set_task_state(current_index=idx)
+                    try:
+                        media_info = DouyinClient.parse_media_info(item)
+                        _add_log(f"[{idx}/{len(all_items)}] 正在下载日常: {media_info['title'][:30]}")
+                        result = download_media(media_info, target_dir, custom_dir=target_dir / f"{nickname}的日常")
+                        downloaded += 1
+                        _set_task_state(downloaded_count=downloaded, current_title=result["title"])
+                    except Exception as e:
+                        failed += 1
+                        _set_task_state(failed_count=failed)
+                        _add_log(f"❌ 第 {idx} 项日常下载失败: {e}")
+                    time.sleep(random.uniform(0.5, 1.5))
+                _add_log(f"🎉 博主日常下载结束! 成功: {downloaded}，失败: {failed}")
+                add_history_item(f"{nickname}的日常", "批量", target_dir / f"{nickname}的日常", downloaded)
+            else:
+                _add_log("该博主日常列表为空或获取失败。")
+
+        # 5. 下载收藏 (Collect)
+        if "collect" in types:
+            if _task_cancel_event.is_set():
+                _add_log("⚠️ 用户取消了任务")
+                _set_task_state(status="cancelled")
+                return
+
+            _add_log(f"🚀 开始抓取您的个人收藏列表...")
+            all_items = []
+            cursor = 0
+            page = 0
+            while page < max_pages if max_pages > 0 else True:
+                if _task_cancel_event.is_set():
+                    _add_log("⚠️ 用户取消了任务")
+                    _set_task_state(status="cancelled")
+                    return
+                page += 1
+                _add_log(f"正在获取收藏第 {page} 页 (cursor={cursor})...")
+                try:
+                    res = client.get_collected_videos(cursor)
+                    aweme_list = res.get("aweme_list") or []
+                    next_cursor = res.get("cursor") if res.get("cursor") is not None else res.get("max_cursor", 0)
+                    has_more = res.get("has_more", False)
+                except Exception as e:
+                    _add_log(f"⚠️ 获取收藏第 {page} 页失败: {e}")
+                    break
+                if not aweme_list:
+                    break
+                all_items.extend(aweme_list)
+                if not has_more:
+                    break
+                cursor = next_cursor
+                time.sleep(random.uniform(1.0, 2.5))
+
+            if all_items:
+                _add_log(f"收藏列表获取完成！共 {len(all_items)} 个作品待下载。")
+                _reset_task_state(total=len(all_items))
+                downloaded = 0
+                failed = 0
+                collect_dir = target_dir / f"{nickname}的收藏"
+                collect_dir.mkdir(parents=True, exist_ok=True)
+                for idx, item in enumerate(all_items, 1):
+                    if _task_cancel_event.is_set():
+                        _add_log("⚠️ 用户取消了任务")
+                        _set_task_state(status="cancelled")
+                        return
+                    _set_task_state(current_index=idx)
+                    try:
+                        media_info = DouyinClient.parse_media_info(item)
+                        _add_log(f"[{idx}/{len(all_items)}] 正在下载收藏: {media_info['title'][:30]}")
+                        result = download_media(media_info, target_dir, custom_dir=collect_dir)
+                        downloaded += 1
+                        _set_task_state(downloaded_count=downloaded, current_title=result["title"])
+                    except Exception as e:
+                        failed += 1
+                        _set_task_state(failed_count=failed)
+                        _add_log(f"❌ 第 {idx} 项收藏下载失败: {e}")
+                    time.sleep(random.uniform(0.5, 1.5))
+                _add_log(f"🎉 个人收藏下载结束! 成功: {downloaded}，失败: {failed}")
+                add_history_item(f"{nickname}的收藏", "批量", collect_dir, downloaded)
+            else:
+                _add_log("您的收藏列表为空。")
+
+        _add_log(f"🎉 博主 「{nickname}」 的所有抓取下载任务已全部完成！")
         _set_task_state(status="completed")
 
     except Exception as outer_err:
@@ -806,6 +1466,19 @@ def _run_liked_download_task(sec_uid: str, max_pages: int, target_dir: Path):
             if not sec_uid:
                 raise Exception("未登录或获取个人信息失败，请先扫码登录获取 Cookie")
             _add_log(f"成功获取当前登录用户 sec_uid: {sec_uid[:20]}...")
+
+        # 解析昵称
+        _add_log("正在获取点赞用户资料...")
+        nickname = "未知用户"
+        try:
+            user_res = client.get_user_detail(sec_uid)
+            if user_res and user_res.get("user"):
+                nickname = user_res["user"].get("nickname", "未知用户")
+        except Exception:
+            pass
+        nickname = clean_filename(nickname)
+        liked_dir = target_dir / f"{nickname}的喜欢"
+        liked_dir.mkdir(parents=True, exist_ok=True)
 
         # 第一步：收集所有作品列表
         _add_log("正在通过 API 获取用户点赞作品列表...")
@@ -886,7 +1559,7 @@ def _run_liked_download_task(sec_uid: str, max_pages: int, target_dir: Path):
                     continue
 
                 _add_log(f"[{idx}/{len(all_items)}] 正在下载: {media_info['title'][:30]}...")
-                result = download_media(media_info, target_dir)
+                result = download_media(media_info, target_dir, custom_dir=liked_dir)
                 downloaded += 1
                 _set_task_state(downloaded_count=downloaded, current_title=result["title"])
             except Exception as e:
@@ -900,6 +1573,7 @@ def _run_liked_download_task(sec_uid: str, max_pages: int, target_dir: Path):
                 time.sleep(delay)
 
         _add_log(f"🎉 批量下载点赞任务结束! 成功: {downloaded}，失败: {failed}")
+        add_history_item(f"{nickname}的喜欢", "批量", liked_dir, downloaded)
         _set_task_state(status="completed")
 
     except Exception as outer_err:
@@ -907,7 +1581,7 @@ def _run_liked_download_task(sec_uid: str, max_pages: int, target_dir: Path):
         _set_task_state(status="failed")
 
 
-def _run_batch_items_download_task(items: list, target_dir: Path):
+def _run_batch_items_download_task(items: list, target_dir: Path, source_name: str = ""):
     """后台线程：下载指定的作品列表"""
     _add_log(f"正在准备批量下载选中的 {len(items)} 个作品...")
     _reset_task_state(total=len(items))
@@ -933,7 +1607,8 @@ def _run_batch_items_download_task(items: list, target_dir: Path):
                 continue
 
             _add_log(f"[{idx}/{len(items)}] 正在下载: {media_info['title'][:30]}...")
-            result = download_media(media_info, target_dir)
+            custom_dir = target_dir / source_name if source_name else None
+            result = download_media(media_info, target_dir, custom_dir=custom_dir)
             downloaded += 1
             _set_task_state(downloaded_count=downloaded, current_title=result["title"])
         except Exception as e:
@@ -947,6 +1622,8 @@ def _run_batch_items_download_task(items: list, target_dir: Path):
             time.sleep(delay)
 
     _add_log(f"🎉 批量下载任务结束! 成功: {downloaded}，失败: {failed}")
+    if source_name:
+        add_history_item(source_name, "批量", target_dir / source_name, downloaded)
     _set_task_state(status="completed")
 
 
@@ -971,6 +1648,51 @@ def download_single():
         final_url = client.resolve_share_url(raw_url)
         _add_log(f"链接解析完成: {final_url}")
 
+        # Check if it is a mix/collection
+        mix_match = re.search(r"(?:collection|mix)/(\d+)", final_url)
+        if not mix_match:
+            mix_match = re.search(r"mix_id=(\d+)", final_url)
+
+        # Check if it is a music track
+        music_match = re.search(r"music/(\d+)", final_url)
+        if not music_match:
+            music_match = re.search(r"music_id=(\d+)", final_url)
+
+        if mix_match:
+            mix_id = mix_match.group(1)
+            # Check if there is already a running task
+            if _task_state["status"] == "running":
+                return jsonify({"error": "当前已有正在运行的批量下载任务，请等待完成"}), 400
+
+            global _task_cancel_event
+            _task_cancel_event.clear()
+            _set_task_state(status="running")
+
+            # Asynchronously start background task
+            thread = threading.Thread(
+                target=_run_mix_download_task,
+                args=(mix_id, DOUYIN_DIR)
+            )
+            thread.daemon = True
+            thread.start()
+
+            return jsonify({
+                "message": "已启动合集批量下载",
+                "task_started": True
+            })
+
+        elif music_match:
+            music_id = music_match.group(1)
+            # Fetch music details
+            music_info = client.get_music_detail(music_id)
+            # Download music
+            result = download_music_file(music_info, DOUYIN_DIR)
+            return jsonify({
+                "message": "下载成功",
+                "data": result,
+                "title": result["title"]
+            })
+
         # 2. 提取 aweme_id
         aweme_id = DouyinClient.extract_aweme_id(final_url)
         if not aweme_id:
@@ -991,11 +1713,163 @@ def download_single():
 
         return jsonify({
             "message": "下载成功",
-            "data": result
+            "data": result,
+            "title": media_info["title"]
         })
 
     except Exception as e:
         return jsonify({"error": f"下载失败: {str(e)}"}), 500
+
+
+@douyin_bp.route("/detect-url", methods=["POST"])
+def detect_url():
+    """检测并解析抖音链接类型"""
+    data = request.get_json() or {}
+    raw_url = data.get("url", "").strip()
+
+    if not raw_url:
+        return jsonify({"error": "请输入有效的链接"}), 400
+
+    ensure_douyin_dirs()
+
+    try:
+        client = DouyinClient()
+
+        # 1. 链接预解析
+        final_url = client.resolve_share_url(raw_url)
+
+        # 2. 类型识别
+        # Check User Profile
+        user_match = re.search(r"user/([A-Za-z0-9_\-]+)", final_url)
+        if not user_match:
+            user_match = re.search(r"sec_user_id=([A-Za-z0-9_\-]+)", final_url)
+
+        if user_match:
+            sec_uid = user_match.group(1)
+            nickname = "未知用户"
+            try:
+                # Try to fetch user profile details
+                user_res = client.get_user_detail(sec_uid)
+                if user_res and user_res.get("user"):
+                    nickname = user_res["user"].get("nickname", "未知用户")
+            except Exception:
+                pass
+            return jsonify({
+                "type": "user",
+                "id": sec_uid,
+                "nickname": nickname,
+                "resolved_url": final_url,
+                "message": f"博主 「{nickname}」 的主页"
+            })
+
+        # Check Mix/Collection
+        mix_match = re.search(r"(?:collection|mix)/(\d+)", final_url)
+        if not mix_match:
+            mix_match = re.search(r"mix_id=(\d+)", final_url)
+
+        if mix_match:
+            mix_id = mix_match.group(1)
+            mix_name = ""
+            try:
+                aweme_list, _, _ = client.get_mix_videos(mix_id, cursor=0, count=1)
+                if aweme_list and aweme_list[0].get("mix_info"):
+                    mix_name = aweme_list[0]["mix_info"].get("mix_name", "")
+            except Exception:
+                pass
+            name_str = f"「{mix_name}」" if mix_name else ""
+            return jsonify({
+                "type": "mix",
+                "id": mix_id,
+                "title": mix_name,
+                "resolved_url": final_url,
+                "message": f"视频合集 {name_str}"
+            })
+
+        # Check Music
+        music_match = re.search(r"music/(\d+)", final_url)
+        if not music_match:
+            music_match = re.search(r"music_id=(\d+)", final_url)
+
+        if music_match:
+            music_id = music_match.group(1)
+            music_title = ""
+            try:
+                music_info = client.get_music_detail(music_id)
+                music_title = music_info.get("title", "")
+            except Exception:
+                pass
+            name_str = f"「{music_title}」" if music_title else ""
+            return jsonify({
+                "type": "music",
+                "id": music_id,
+                "title": music_title,
+                "resolved_url": final_url,
+                "message": f"音乐原声 {name_str}"
+            })
+
+        # Check Single Video/Note
+        aweme_id = DouyinClient.extract_aweme_id(final_url)
+        if aweme_id:
+            title = ""
+            item_type = "video"
+            try:
+                detail = client.get_video_detail(aweme_id)
+                media_info = DouyinClient.parse_media_info(detail)
+                title = media_info.get("title", "")
+                item_type = media_info.get("type", "video")
+            except Exception:
+                pass
+            type_name = "图文" if item_type == "image" else "视频"
+            name_str = f"「{title}」" if title else ""
+            return jsonify({
+                "type": "single",
+                "id": aweme_id,
+                "title": title,
+                "item_type": item_type,
+                "resolved_url": final_url,
+                "message": f"单个{type_name} {name_str}"
+            })
+
+        return jsonify({"error": "无法识别此链接类型，请检查输入"}), 400
+
+    except Exception as e:
+        return jsonify({"error": f"链接检测失败: {str(e)}"}), 500
+
+
+@douyin_bp.route("/download-user", methods=["POST"])
+def download_user():
+    """解析并批量下载博主的主页内容 (作品/喜欢/合集)"""
+    if _task_state["status"] == "running":
+        return jsonify({"error": "当前已有正在运行的批量下载任务，请等待完成"}), 400
+
+    data = request.get_json() or {}
+    sec_uid = data.get("sec_uid", "").strip()
+    types = data.get("types", []) # ["post", "like", "mix"]
+    max_pages = int(data.get("max_pages", 10))
+
+    if not sec_uid:
+        return jsonify({"error": "参数错误，缺失博主 ID"}), 400
+    if not types:
+        return jsonify({"error": "请至少选择一项要下载的内容"}), 400
+
+    ensure_douyin_dirs()
+
+    global _task_cancel_event
+    _task_cancel_event.clear()
+    _set_task_state(status="running")
+
+    # Asynchronously start background task
+    thread = threading.Thread(
+        target=_run_user_download_task,
+        args=(sec_uid, types, max_pages, DOUYIN_DIR)
+    )
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({
+        "message": "已启动博主主页批量下载任务",
+        "task_started": True
+    })
 
 
 @douyin_bp.route("/download-profile", methods=["POST"])
@@ -1075,6 +1949,7 @@ def download_batch():
 
     data = request.get_json() or {}
     items = data.get("items", [])
+    source_name = data.get("source_name", "")
 
     if not items:
         return jsonify({"error": "没有选中任何视频"}), 400
@@ -1085,7 +1960,7 @@ def download_batch():
     _task_cancel_event.clear()
     thread = threading.Thread(
         target=_run_batch_items_download_task,
-        args=(items, DOUYIN_DIR),
+        args=(items, DOUYIN_DIR, source_name),
         daemon=True
     )
     thread.start()
@@ -1124,9 +1999,20 @@ def get_history():
 
 @douyin_bp.route("/history", methods=["DELETE"])
 def clear_history():
-    """清除抖音下载历史记录"""
+    """清除抖音下载历史记录及下载的文件"""
+    import shutil
     save_json(HISTORY_FILE, [])
-    return jsonify({"message": "历史记录已清空"})
+    # 清空下载文件夹中的所有文件和文件夹
+    if DOUYIN_DIR.exists():
+        for item in DOUYIN_DIR.iterdir():
+            try:
+                if item.is_file():
+                    item.unlink()
+                elif item.is_dir():
+                    shutil.rmtree(item)
+            except Exception as e:
+                _add_log(f"⚠️ 清理文件 {item.name} 失败: {e}")
+    return jsonify({"message": "历史记录和已下载的文件已清空"})
 
 
 @douyin_bp.route("/open-folder", methods=["POST"])
@@ -1183,7 +2069,48 @@ def api_search():
         return jsonify({"error": "关键字不能为空"}), 400
     try:
         api = DouyinClient()
+        
+        # 1. 自动检测是否为 raw sec_uid 或分享/主页链接
+        sec_uid = None
+        is_direct = False
+        kw_strip = keyword.strip()
+        
+        if kw_strip.startswith("MS4wLjAB") and len(kw_strip) > 40:
+            sec_uid = kw_strip
+            is_direct = True
+        elif kw_strip.startswith("http://") or kw_strip.startswith("https://") or "douyin.com" in kw_strip:
+            try:
+                final_url = api.resolve_share_url(kw_strip)
+                user_match = re.search(r"user/([A-Za-z0-9_\-]+)", final_url)
+                if not user_match:
+                    user_match = re.search(r"sec_user_id=([A-Za-z0-9_\-]+)", final_url)
+                if user_match:
+                    sec_uid = user_match.group(1)
+                    is_direct = True
+            except Exception as e:
+                _add_log(f"⚠️ 解析搜索链接失败: {e}")
+
+        if is_direct and sec_uid:
+            try:
+                detail = api.get_user_detail(sec_uid)
+                if detail and detail.get("user"):
+                    return jsonify({
+                        "status_code": 0,
+                        "user_list": [{
+                            "user_info": detail["user"]
+                        }],
+                        "has_more": 0
+                    })
+            except Exception as e:
+                return jsonify({"error": f"直接获取博主详情失败: {str(e)}"}), 500
+
+        # 2. 模糊搜索并处理验证拦截 fallback
         res = api.search_user(keyword, offset)
+        if isinstance(res, dict) and res.get("search_nil_info", {}).get("search_nil_type") == "verify_check":
+            return jsonify({
+                "error": "由于抖音安全验证拦截，无法进行模糊搜索。请直接复制该博主的「主页链接」或「sec_uid」在此搜索，我们将自动解析并跳转！"
+            }), 400
+            
         return jsonify(res)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1197,6 +2124,9 @@ def api_user_detail():
     try:
         api = DouyinClient()
         res = api.get_user_detail(sec_uid)
+        if isinstance(res, dict) and "user" in res:
+            self_sec_uid = api.get_self_sec_uid()
+            res["user"]["is_self"] = (sec_uid == self_sec_uid)
         return jsonify(res)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -1239,6 +2169,45 @@ def api_user_videos():
         aweme_list, next_cursor, has_more = api.get_user_videos(sec_uid, max_cursor, count)
         return jsonify({
             "aweme_list": aweme_list,
+            "max_cursor": next_cursor,
+            "has_more": has_more
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@douyin_bp.route("/user-stories", methods=["GET"])
+def api_user_stories():
+    sec_uid = request.args.get("sec_uid", "")
+    max_cursor = int(request.args.get("max_cursor", 0))
+    count = int(request.args.get("count", 18))
+    if not sec_uid:
+        return jsonify({"error": "sec_uid不能为空"}), 400
+    try:
+        api = DouyinClient()
+        aweme_list, next_cursor, has_more = api.get_user_stories(sec_uid, max_cursor, count)
+        return jsonify({
+            "aweme_list": aweme_list,
+            "max_cursor": next_cursor,
+            "has_more": has_more
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+
+@douyin_bp.route("/user-mixes", methods=["GET"])
+def api_user_mixes():
+    sec_uid = request.args.get("sec_uid", "")
+    cursor = int(request.args.get("cursor", 0))
+    count = int(request.args.get("count", 20))
+    if not sec_uid:
+        return jsonify({"error": "sec_uid不能为空"}), 400
+    try:
+        api = DouyinClient()
+        mix_infos, next_cursor, has_more = api.get_user_mixes(sec_uid, cursor, count)
+        return jsonify({
+            "mix_infos": mix_infos,
             "max_cursor": next_cursor,
             "has_more": has_more
         })

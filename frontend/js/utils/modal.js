@@ -27,8 +27,14 @@ const Modal = {
     open(options = {}) {
         if (!this.overlay) this.init();
 
-        const { title = '', content = '', footer = '', onClose = null, preventClose = false } = options;
+        const { title = '', content = '', footer = '', onClose = null, preventClose = false, theme = '' } = options;
         this.preventClose = preventClose;
+
+        // Clean up theme classes
+        this.dialog.classList.remove('theme-white');
+        if (theme === 'white' || document.body.classList.contains('dy-theme')) {
+            this.dialog.classList.add('theme-white');
+        }
 
         this.dialog.innerHTML = `
             <div class="modal-header">
@@ -46,18 +52,21 @@ const Modal = {
     close() {
         if (!this.overlay) return;
         this.overlay.classList.remove('active');
+        this.dialog.classList.remove('theme-white');
         if (this._onClose) this._onClose();
     },
 
-    confirm(title, message, onConfirm) {
+    confirm(title, message, onConfirm, options = {}) {
         this._onConfirm = onConfirm;
+        const isWhite = options.theme === 'white' || document.body.classList.contains('dy-theme');
         this.open({
             title,
-            content: `<p style="color: var(--text-secondary)">${message}</p>`,
+            content: `<p style="color: ${isWhite ? '#475569' : 'var(--text-secondary)'}">${message}</p>`,
             footer: `
                 <button class="btn btn-secondary" onclick="Modal.close()">取消</button>
                 <button class="btn btn-primary" onclick="Modal.handleConfirm()">确定</button>
             `,
+            theme: isWhite ? 'white' : (options.theme || ''),
         });
     },
 

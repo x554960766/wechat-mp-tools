@@ -1642,3 +1642,110 @@ body {
 .animate-stagger > *:nth-child(6) { animation-delay: 0.3s; }
 .animate-stagger > *:nth-child(7) { animation-delay: 0.35s; }
 .animate-stagger > *:nth-child(8) { animation-delay: 0.4s; }
+
+/* ── 白色主题模态框 ────────────────────────────────────── */
+.modal-dialog.theme-white {
+    background: #ffffff !important;
+    border: 1px solid #e2e8f0 !important;
+    color: #1e293b !important;
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1) !important;
+}
+
+.modal-dialog.theme-white .modal-title {
+    color: #0f172a !important;
+}
+
+.modal-dialog.theme-white .modal-close {
+    color: #64748b !important;
+}
+
+.modal-dialog.theme-white .modal-close:hover {
+    background: rgba(0, 0, 0, 0.05) !important;
+    color: #0f172a !important;
+}
+
+.modal-dialog.theme-white .btn-secondary {
+    background: #f1f5f9 !important;
+    color: #475569 !important;
+    border: 1px solid #cbd5e1 !important;
+}
+
+.modal-dialog.theme-white .btn-secondary:hover {
+    background: #e2e8f0 !important;
+}
+
+/* ── 选项卡片组件 ──────────────────────────────────────── */
+.option-card {
+    background: var(--bg-glass);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: var(--spacing-md);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-xs);
+    user-select: none;
+}
+
+.option-card:hover {
+    border-color: var(--color-primary);
+    background: var(--bg-glass-hover);
+    transform: translateY(-2px);
+}
+
+.option-card.active {
+    border-color: var(--color-primary);
+    box-shadow: 0 0 12px rgba(102, 126, 234, 0.2);
+    background: rgba(102, 126, 234, 0.05);
+}
+
+.option-card-header {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+}
+
+.option-card-title {
+    font-size: 1.05rem;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.option-card-desc {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+/* User Profile Tab Switcher */
+.dy-user-tabs {
+    display: flex;
+    gap: 8px;
+    background: var(--bg-glass);
+    padding: 6px;
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+}
+
+.tab-item {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    cursor: pointer;
+    padding: 8px 20px;
+    border-radius: 8px;
+    transition: all var(--transition-fast);
+}
+
+.tab-item:hover {
+    color: var(--text-primary);
+    background: var(--bg-glass-hover);
+}
+
+.tab-item.active {
+    color: #ffffff;
+    background: var(--gradient-primary);
+    box-shadow: 0 4px 12px var(--primary-glow);
+}
+
+
