@@ -414,6 +414,53 @@ class ChannelsAddon:
                     pass
                 self._local_json(flow, 200, b'{"success":true}')
                 return
+            if path == "/__wx_channels_api/synced-usernames":
+                # 返回已同步过作品的作者 username 列表，供「一键采集全部关注」断点续采跳过。
+                # 包成 {code:0,data:[...]} 以匹配前端 WXU.request 的约定。
+                try:
+                    from backend.config import load_json
+                    from backend.channels import CHANNELS_FEEDS_FILE
+                    feeds_db = load_json(CHANNELS_FEEDS_FILE, {})
+                    body = json.dumps(
+                        {"code": 0, "data": list(feeds_db.keys())}, ensure_ascii=False
+                    ).encode("utf-8")
+                    self._local_json(flow, 200, body)
+                except Exception as ex:
+                    print(f"Error handling synced-usernames: {ex}")
+                    self._local_json(flow, 200, b'{"code":0,"data":[]}')
+                return
+            if path == "/__wx_channels_api/synced-feed-ids":
+                # 返回 {username: [已同步的作品 id, ...]}，供「检查更新」客户端比对出新作品。
+                # 包成 {code:0,data:{...}} 以匹配前端 WXU.request 的约定。
+                try:
+                    from backend.config import load_json
+                    from backend.channels import CHANNELS_FEEDS_FILE
+                    feeds_db = load_json(CHANNELS_FEEDS_FILE, {})
+                    id_map = {
+                        u: [it.get("id") for it in items if it.get("id")]
+                        for u, items in feeds_db.items()
+                    }
+                    body = json.dumps(
+                        {"code": 0, "data": id_map}, ensure_ascii=False
+                    ).encode("utf-8")
+                    self._local_json(flow, 200, body)
+                except Exception as ex:
+                    print(f"Error handling synced-feed-ids: {ex}")
+                    self._local_json(flow, 200, b'{"code":0,"data":{}}')
+                return
+            if path == "/__wx_channels_api/call-log":
+                # 采集脚本的调用埋点：每次 finder API 调用追加一行 jsonl，
+                # 供「测风控概率」单变量扫描分析（errCode 非 0 占比、限流出现的累计请求数等）。
+                try:
+                    payload = json.loads(flow.request.get_text())
+                    payload["ts"] = int(time.time() * 1000)
+                    log_file = DATA_DIR / "channels_call_log.jsonl"
+                    with open(log_file, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                except Exception as ex:
+                    print(f"Error handling call-log: {ex}")
+                self._local_json(flow, 200, b'{"code":0,"data":true}')
+                return
             if path == "/__wx_channels_api/download":
                 self._forward_to_flask(
                     flow, "http://127.0.0.1:5200/api/channels/download"
@@ -527,10 +574,12 @@ class ChannelsAddon:
                 path_only = flow.request.path.split("?", 1)[0]
                 if path_only == "/web/pages/home":
                     parts.append(f"<script>{_read_injection('src/home.js')}</script>")
+                    parts.append(f"<script>{_read_injection('src/automation.js')}</script>")
                 elif path_only == "/web/pages/feed":
                     parts.append(f"<script>{_read_injection('src/feed.js')}</script>")
                 elif path_only == "/web/pages/profile":
                     parts.append(f"<script>{_read_injection('src/profile.js')}</script>")
+                    parts.append(f"<script>{_read_injection('src/automation.js')}</script>")
                 
                 inject_script = "\n".join(parts)
             except Exception as ex:
