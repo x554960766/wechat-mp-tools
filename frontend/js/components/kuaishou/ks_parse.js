@@ -2,35 +2,16 @@ const KsParsePage = {
     render() {
         return `
             <div class="page-header">
-                <h2 class="page-title">解析与下载</h2>
-                <p class="page-description">粘贴快手作品链接或用户主页链接进行下载（用户主页批量需先扫码登录）</p>
+                <h2 class="page-title">解析链接</h2>
+                <p class="page-description">粘贴单个快手作品链接，下载无水印视频或图集（批量下载作者作品请用「用户主页」）</p>
             </div>
 
             <div class="card" style="margin-bottom: var(--spacing-lg);">
                 <div class="form-group">
-                    <label class="form-label">链接类型</label>
-                    <div style="display: flex; gap: var(--spacing-md); margin-bottom: var(--spacing-md);">
-                        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                            <input type="radio" name="ks-parse-type" value="single" checked onchange="KsParsePage.toggleType()"> 单个视频/图集
-                        </label>
-                        <label style="display: flex; align-items: center; gap: 8px; cursor: pointer;">
-                            <input type="radio" name="ks-parse-type" value="profile" onchange="KsParsePage.toggleType()"> 用户主页批量下载
-                        </label>
-                    </div>
-                </div>
-
-                <div class="form-group">
-                    <label class="form-label">快手链接</label>
+                    <label class="form-label">快手作品链接</label>
                     <div style="display: flex; gap: var(--spacing-md);">
                         <input type="text" id="ks-url-input" class="form-input" placeholder="请粘贴快手分享链接 (https://v.kuaishou.com/...)" style="flex: 1;">
                         <button class="btn btn-primary" onclick="KsParsePage.startDownload()" id="ks-parse-btn">开始下载</button>
-                    </div>
-                </div>
-
-                <div id="ks-profile-options" style="display: none; margin-top: var(--spacing-md); border-top: 1px solid var(--border-color); padding-top: var(--spacing-md);">
-                    <div class="form-group">
-                        <label class="form-label">最大抓取页数（每页约12条，填0不限制）</label>
-                        <input type="number" id="ks-max-pages" class="form-input" value="5" min="0" style="width: 200px;">
                     </div>
                 </div>
             </div>
@@ -53,10 +34,10 @@ const KsParsePage = {
             </div>
         `;
     },
+
     async init() {
         try {
             const data = await API.kuaishou.progress();
-
             if (data && data.status === 'running') {
                 document.getElementById('ks-download-status').style.display = 'block';
                 const logContainer = document.getElementById('ks-log-container');
@@ -79,31 +60,20 @@ const KsParsePage = {
                     progressText.textContent = pct + '%';
                 }
 
-                const cancelBtn = document.getElementById('ks-cancel-btn');
-                if (data.status === 'running') {
-                    cancelBtn.style.display = 'flex';
-                    this.startProgressPolling();
-                } else {
-                    cancelBtn.style.display = 'none';
-                }
-            } else {
-                document.getElementById('ks-download-status').style.display = 'none';
+                document.getElementById('ks-cancel-btn').style.display = 'flex';
+                this.startProgressPolling();
             }
         } catch (e) {
             console.error('检查下载进度失败:', e);
         }
     },
+
     onShow() {
         this.init();
     },
-    toggleType() {
-        const isProfile = document.querySelector('input[name="ks-parse-type"]:checked').value === 'profile';
-        document.getElementById('ks-profile-options').style.display = isProfile ? 'block' : 'none';
-    },
+
     async startDownload() {
         const url = document.getElementById('ks-url-input').value.trim();
-        const isProfile = document.querySelector('input[name="ks-parse-type"]:checked').value === 'profile';
-
         if (!url) {
             Toast.show('请填写链接', 'warning');
             return;
@@ -114,17 +84,9 @@ const KsParsePage = {
         btn.textContent = '请求中...';
 
         try {
-            if (isProfile) {
-                const maxPages = parseInt(document.getElementById('ks-max-pages').value) || 0;
-                const data = await API.kuaishou.downloadProfile(url, maxPages);
-                if (data.error) throw new Error(data.error);
-                Toast.show('批量下载已启动', 'success');
-                this.startProgressPolling();
-            } else {
-                const data = await API.kuaishou.downloadSingle(url);
-                if (data.error) throw new Error(data.error);
-                Toast.show(`下载完成: ${data.title}`, 'success');
-            }
+            const data = await API.kuaishou.downloadSingle(url);
+            if (data.error) throw new Error(data.error);
+            Toast.show(`下载完成: ${data.title}`, 'success');
         } catch (err) {
             Toast.show(err.message, 'error');
         } finally {
@@ -132,6 +94,7 @@ const KsParsePage = {
             btn.textContent = '开始下载';
         }
     },
+
     startProgressPolling() {
         document.getElementById('ks-download-status').style.display = 'block';
         const logContainer = document.getElementById('ks-log-container');
@@ -183,6 +146,7 @@ const KsParsePage = {
             } catch (e) {}
         }, 1000);
     },
+
     async cancelDownload() {
         const cancelBtn = document.getElementById('ks-cancel-btn');
         if (cancelBtn) cancelBtn.style.display = 'none';
@@ -194,6 +158,7 @@ const KsParsePage = {
             Toast.show(err.message, 'error');
         }
     },
+
     destroy() {
         if (this.pollTimer) clearInterval(this.pollTimer);
     }

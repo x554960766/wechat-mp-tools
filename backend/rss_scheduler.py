@@ -37,6 +37,10 @@ MAX_UPLOAD_LOG = 100
 # 并发抓取的最大线程数（I/O 密集型，线程大部分时间在等网络响应和延时）
 MAX_FETCH_WORKERS = 50
 
+# 全局兜底上传的间隔（分钟）：扫描所有账号的待传文章，兜住因账号不属于
+# 当前启用订阅（改名/退订/禁用/手动下载）而永远不会被按账号触发上传的文章
+GLOBAL_UPLOAD_SWEEP_MINUTES = 30
+
 
 class RssScheduler:
     """RSS 自动抓取调度器"""
@@ -49,6 +53,7 @@ class RssScheduler:
         self._executor = ThreadPoolExecutor(max_workers=MAX_FETCH_WORKERS, thread_name_prefix="rss-fetch")
         self._fetching: set[str] = set()       # 正在抓取中的 fakeid，防重复提交
         self._fetching_lock = threading.Lock() # 保护 _fetching 集合
+        self._last_upload_response: str | None = None  # 最近一次网关响应摘要（排查静默丢弃用）
 
     # ── 订阅管理 ──────────────────────────────────────────
 
@@ -237,12 +242,16 @@ class RssScheduler:
             "articles": articles,
             "deviceId": settings.get("device_id") or "公众号_caiji100",
         }
+        self._last_upload_response = None
         try:
             resp = requests.post(
                 upload_url, json=payload,
                 headers={"Content-Type": "application/json"},
                 proxies=get_proxies_dict(), timeout=30,
             )
+            # 记录网关响应（状态码+正文），用于排查「已标记上传但服务器没有」的静默丢弃
+            self._last_upload_response = f"HTTP {resp.status_code} | {(resp.text or '')[:500]}"
+            logger.info("RSS 上传响应[%d篇]: %s", len(articles), self._last_upload_response[:300])
             resp.raise_for_status()
             try:
                 data = resp.json()
@@ -252,6 +261,9 @@ class RssScheduler:
                 pass
             return True, None
         except Exception as e:
+            # 已拿到响应体（如 4xx/5xx）则保留它，否则记录连接异常
+            if self._last_upload_response is None:
+                self._last_upload_response = f"ERROR | {e}"
             return False, str(e)
 
     @staticmethod
@@ -270,16 +282,17 @@ class RssScheduler:
 
     @staticmethod
     def _is_size_related_error(error: str | None) -> bool:
-        """判断上传失败是否可能由数据量过大导致"""
+        """判断上传失败是否由数据量过大导致（仅限真正的体积类错误）。
+
+        注意：超时/连接重置等瞬时网络错误**不**计入此处——它们是可重试的，
+        若误判为「数据过大」会在单篇批次时被永久隔离，造成文章漏上传。
+        """
         if not error:
             return False
         err_lower = error.lower()
         indicators = [
             "413", "too large", "payload too large", "entity too large",
             "request entity too large", "content length",
-            "timeout", "timed out", "read timed out",
-            "connection reset", "connection aborted", "broken pipe",
-            "远程主机强迫关闭", "连接被重置",
         ]
         return any(ind in err_lower for ind in indicators)
 
@@ -418,6 +431,7 @@ class RssScheduler:
             "quarantined": quarantined,
             "success": failed == 0,
             "error": last_error,
+            "response": self._last_upload_response,
             "items": [
                 {
                     "url": item.get("link", ""),
@@ -447,15 +461,61 @@ class RssScheduler:
         })
         return result
 
+    def _revive_quarantined(self, history: list, account: str | None = None) -> int:
+        """解除隔离：把（指定账号的）已隔离文章重置为可重试状态，返回恢复数量。
+
+        隔离一旦发生便没有自动恢复出口，瞬时故障误隔离的文章会永久漏传；
+        强制上传时调用本方法，给这些文章再来一次机会。
+        """
+        revived = 0
+        for item in history:
+            if not isinstance(item, dict) or not item.get("upload_quarantined"):
+                continue
+            if account is not None and item.get("account") != account:
+                continue
+            item["upload_quarantined"] = False
+            item["upload_attempts"] = 0
+            item["upload_error"] = None
+            revived += 1
+        return revived
+
     def force_upload_all(self, nickname: str) -> dict:
-        """强制上传该公众号所有待上传（未上传/未隔离）的文章（同步）"""
+        """强制上传该公众号所有待上传的文章（含此前被隔离的，同步）"""
         from backend.config import load_json as _load_json, save_json as _save_json, DOWNLOAD_HISTORY_FILE
 
         with self._history_lock:
             history = _load_json(DOWNLOAD_HISTORY_FILE, [])
+            revived = self._revive_quarantined(history, nickname)
+            if revived:
+                logger.info("RSS 强制上传[%s]: 解除隔离 %d 篇，重新尝试上传", nickname, revived)
             result = self._run_upload(history, trigger="manual", account=nickname)
             _save_json(DOWNLOAD_HISTORY_FILE, history)
+        if revived:
+            result["revived"] = revived
         return result
+
+    def upload_all_pending(self, trigger: str = "sweep") -> dict:
+        """全局兜底上传：扫描所有账号(account=None)的待传文章并上传。
+
+        捞回那些 account 不属于当前启用订阅、因而永远不会被按账号触发上传的文章。
+        """
+        from backend.config import load_json as _load_json, save_json as _save_json, DOWNLOAD_HISTORY_FILE
+
+        with self._history_lock:
+            history = _load_json(DOWNLOAD_HISTORY_FILE, [])
+            result = self._run_upload(history, trigger=trigger, account=None)
+            _save_json(DOWNLOAD_HISTORY_FILE, history)
+        return result
+
+    def _global_upload_sweep(self):
+        """周期性兜底上传（仅在上传开启且处于抓取窗口内时执行）"""
+        from backend.config import get_settings
+
+        if not get_settings().get("rss_upload_enabled", False):
+            return
+        if not self.is_in_fetch_window():
+            return
+        self.upload_all_pending(trigger="sweep")
 
     # ── 抓取逻辑 ──────────────────────────────────────────
 
@@ -700,9 +760,14 @@ class RssScheduler:
 
     def _run_loop(self):
         logger.info("RSS 调度器已启动")
+        last_sweep = 0.0
         while not self._stop_event.is_set():
             try:
                 self._tick()
+                now = time.time()
+                if now - last_sweep >= GLOBAL_UPLOAD_SWEEP_MINUTES * 60:
+                    last_sweep = now
+                    self._global_upload_sweep()
             except Exception as e:
                 logger.error("RSS 调度器异常: %s", e)
             # 每 30 秒检查一次是否有订阅需要执行

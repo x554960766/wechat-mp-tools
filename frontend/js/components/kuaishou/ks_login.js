@@ -189,7 +189,21 @@ const KsLoginComponent = {
                     clearInterval(this.statusTimer);
                     this.statusTimer = null;
                 }
-            } else if (data.status === 'error' || data.status === 'expired') {
+            } else if (data.status === 'expired') {
+                this.loginHint.style.display = 'none';
+                this.statusText.innerHTML = `<div style="background: rgba(255,152,0,0.12); border: 1px solid rgba(255,152,0,0.4); border-radius: 8px; padding: 16px; text-align: center;">
+                    <p style="color: #ff9800; font-weight: 600; font-size: 1.15rem; margin: 0 0 6px 0;">⚠️ 登录已失效</p>
+                    <p style="color: var(--text-secondary); margin: 0; font-size: 0.95rem;">${data.message || '快手 Cookie 已过期，请点击下方按钮重新扫码登录'}</p>
+                </div>`;
+                this.startBtn.disabled = false;
+                this.startBtn.textContent = "重新扫码登录";
+                this.cancelBtn.style.display = 'none';
+
+                if (this.statusTimer) {
+                    clearInterval(this.statusTimer);
+                    this.statusTimer = null;
+                }
+            } else if (data.status === 'error') {
                 this.loginHint.style.display = 'none';
                 this.statusText.textContent = `❌ ${data.message}`;
                 this.statusText.style.color = "var(--error)";

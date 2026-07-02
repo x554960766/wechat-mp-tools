@@ -176,6 +176,8 @@ const API = {
             status: () => API.get('/api/kuaishou/auth/status', { showError: false })
         },
         downloadSingle(url) { return API.post('/api/kuaishou/download-single', { url }); },
+        userFeed(url, pcursor) { return API.post('/api/kuaishou/user-feed', { url, pcursor }); },
+        downloadSelected(items) { return API.post('/api/kuaishou/download-selected', { items }); },
         downloadProfile(url, max_pages) { return API.post('/api/kuaishou/download-profile', { url, max_pages }); },
         cancelDownload() { return API.post('/api/kuaishou/cancel-download'); },
         progress() { return API.get('/api/kuaishou/progress', { showError: false }); },

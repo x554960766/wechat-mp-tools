@@ -38,6 +38,7 @@ const Router = {
             
             // 快手子系统页面
             'ks_login': typeof KsLoginComponent !== 'undefined' ? KsLoginComponent : null,
+            'ks_user': typeof KsUserPage !== 'undefined' ? KsUserPage : null,
             'ks_parse': typeof KsParsePage !== 'undefined' ? KsParsePage : null,
             'ks_downloads': typeof KsDownloadsPage !== 'undefined' ? KsDownloadsPage : null,
 

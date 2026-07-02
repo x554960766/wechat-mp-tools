@@ -22,6 +22,16 @@ _login_lock = threading.Lock()
 _active_browser = None
 _cancel_event = threading.Event()
 
+# 已登录 Cookie 被服务端拒绝(如 result=109)时置 True，登录页据此提示"登录已失效"
+_login_expired = False
+
+
+def set_login_expired(expired: bool = True):
+    """由数据接口在检测到 Cookie 失效/有效时调用"""
+    global _login_expired
+    _login_expired = expired
+
+
 # 登录标记 Cookie 名称（任一出现即视为已登录）
 LOGIN_MARKER_KEYS = {"passToken", "kuaishou.web.cp.api_st", "kuaishou.server.web_st"}
 
@@ -105,6 +115,12 @@ def check_status():
     settings = get_settings()
     cookie = settings.get("kuaishou_cookie", "")
     if cookie and any(k in cookie for k in LOGIN_MARKER_KEYS):
+        if _login_expired:
+            return jsonify({
+                "status": "expired",
+                "message": "登录已失效，请重新扫码登录",
+                "cookie": cookie,
+            })
         return jsonify({
             "status": "success",
             "message": "登录有效",
@@ -192,6 +208,7 @@ def _do_login():
                 settings["kuaishou_cookie"] = cookie_str
                 save_settings(settings)
 
+                set_login_expired(False)
                 _set_state("success", "登录完成！Cookie 已保存", cookie=cookie_str)
                 time.sleep(2)
             else:

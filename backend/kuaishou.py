@@ -9,7 +9,9 @@
 说明：
 - 单作品接口无需签名，但 feedbyid 必须同时提供 photoId 与 principalId(作者ID)。
   App 分享链接（fw/photo?userId=&photoId=）天然带作者ID；裸 short-video 链接需登录后解析。
-- 用户主页列表接口当前需要登录 Cookie，否则返回空列表(result!=1)。
+- 用户主页作品列表走 www.kuaishou.com/rest/v/profile/feed（POST JSON），必须登录 Cookie；
+  匿名访问一律被风控拦截(result=109)。响应顶层含 feeds(作品数组) 与 pcursor(下一页游标)。
+  注意：旧的 live_api/profile/public 返回的是直播间信息，并不含作品列表。
 """
 
 import re
@@ -41,9 +43,11 @@ USER_AGENT = (
     "Chrome/126.0.0.0 Safari/537.36"
 )
 
-# 快手 API 端点（live_api 无需签名）
+# 快手 API 端点
+# 单作品详情（live_api 无需签名，需 photoId + principalId）
 API_DETAIL = "https://live.kuaishou.com/live_api/profile/feedbyid"
-API_PROFILE = "https://live.kuaishou.com/live_api/profile/public"
+# 作者主页作品列表（POST JSON，需登录 Cookie）
+API_USER_FEED = "https://www.kuaishou.com/rest/v/profile/feed"
 
 # ── 全局任务状态管理 ──────────────────────────────────────
 
@@ -122,6 +126,15 @@ def add_history_item(title: str, item_type: str, file_path, size_bytes: int):
         "time": time.strftime("%Y-%m-%d %H:%M:%S")
     })
     save_json(HISTORY_FILE, history[:150])
+
+
+def _notify_login_expired(expired: bool):
+    """通知登录模块 Cookie 是否已失效（延迟导入避免循环依赖）"""
+    try:
+        from backend import kuaishou_auth
+        kuaishou_auth.set_login_expired(expired)
+    except Exception:
+        pass
 
 
 # ── 快手 API 客户端 ──────────────────────────────────────
@@ -219,7 +232,8 @@ class KuaishouClient:
     def extract_user_id(url: str) -> str:
         """从用户主页链接中提取 user_id（作者ID）"""
         url = url.strip()
-        m = re.search(r"/profile/([A-Za-z0-9_-]+)", url)
+        # 兼容多种主页路径：/profile/<id>、/fw/user/<id>(c.kuaishou.com 分享跳转)、/u/<id>
+        m = re.search(r"/(?:profile|fw/user|u)/([A-Za-z0-9_-]+)", url)
         if m:
             return m.group(1)
         m = re.search(r"[?&](?:userId|authorId|principalId)=([A-Za-z0-9_-]+)", url)
@@ -254,63 +268,116 @@ class KuaishouClient:
             raise Exception(f"获取作品详情失败 (result={result})。{hint}")
         return work
 
-    def get_user_feed(self, user_id: str, pcursor: str = "", count: int = 12):
-        """获取用户公开作品列表，返回 (list, next_pcursor)"""
-        self._prime(f"https://live.kuaishou.com/profile/{user_id}")
-        headers = {"Referer": f"https://live.kuaishou.com/profile/{user_id}"}
-        params = {"principalId": user_id, "pcursor": pcursor, "count": count}
-        resp = self.session.get(API_PROFILE, params=params, headers=headers, timeout=15)
+    def get_user_feed(self, user_id: str, pcursor: str = ""):
+        """获取用户公开作品列表，返回 (list, next_pcursor)
+
+        接口为 www.kuaishou.com/rest/v/profile/feed（POST JSON），需登录 Cookie。
+        响应顶层含 feeds(作品数组) 与 pcursor(下一页游标)。
+        """
+        self._prime(f"https://www.kuaishou.com/profile/{user_id}")
+        headers = {
+            "Content-Type": "application/json",
+            "Origin": "https://www.kuaishou.com",
+            "Referer": f"https://www.kuaishou.com/profile/{user_id}",
+        }
+        payload = {"user_id": user_id, "pcursor": pcursor, "page": "profile"}
+        resp = self.session.post(API_USER_FEED, json=payload, headers=headers, timeout=15)
         resp.raise_for_status()
-        data = (resp.json() or {}).get("data") or {}
-        items = data.get("list") or []
-        next_pcursor = data.get("pcursor") or ""
+        data = resp.json() or {}
         result = data.get("result")
-        if not items and result not in (1, None):
+        if "feeds" not in data and result not in (1, None):
+            if result == 109 or data.get("loginUrl"):
+                _notify_login_expired(True)
+                raise Exception("登录已失效，请先在左侧「扫码登录」重新登录快手后重试。")
             raise Exception(
-                f"获取用户作品列表失败 (result={result})。请确认已在左侧「扫码登录」快手，且该主页作品公开。"
+                f"获取用户作品列表失败 (result={result})。请确认已扫码登录，且该主页作品公开。"
             )
+        _notify_login_expired(False)
+        items = data.get("feeds") or []
+        next_pcursor = data.get("pcursor") or ""
         return items, next_pcursor
 
     # ── 资源解析 ──────────────────────────────────────────
 
     @staticmethod
     def parse_media_info(work: dict) -> dict:
-        """从作品 JSON 中解析下载信息，兼容 feedbyid / profile 两种结构"""
-        photo_id = str(work.get("id") or work.get("photoId") or "")
+        """从作品 JSON 中解析下载信息。
+
+        兼容两种结构：
+        - feedbyid 的 currentWork（字段多在顶层，视频直链在 playUrl/mp4Url）
+        - rest/v/profile/feed 的列表项（核心字段在嵌套 photo 内；视频直链在 photo.photoUrls[{cdn,url}]，
+          兜底为 photo.manifest.adaptationSet[].representation[].url；图集在 photo.ext_params.atlas）
+        """
+        def _pick_url(seq):
+            for it in (seq or []):
+                if isinstance(it, str) and it:
+                    return it
+                if isinstance(it, dict) and it.get("url"):
+                    return it["url"]
+            return ""
+
+        photo = work.get("photo") if isinstance(work.get("photo"), dict) else {}
         author = work.get("author") or {}
+
+        # 作品 ID：顶层 id/photoId → photo.id → photo.share_info 内的 photoId
+        photo_id = str(work.get("id") or work.get("photoId") or photo.get("id") or "")
+        if not photo_id and photo.get("share_info"):
+            qs = urllib.parse.parse_qs(photo["share_info"])
+            photo_id = (qs.get("photoId") or [""])[0]
+
         nickname = (
-            author.get("name") or work.get("userName")
-            or work.get("userEid") or "快手用户"
+            photo.get("userName") or author.get("name") or work.get("userName")
+            or photo.get("userEid") or work.get("userEid") or "快手用户"
         )
-        caption = (work.get("caption") or work.get("title") or "").strip()
+        caption = (work.get("caption") or photo.get("caption") or work.get("title") or "").strip()
         title = clean_filename(caption or nickname or photo_id)
 
-        # 视频直链候选
-        video_url = work.get("playUrl") or work.get("mp4Url") or work.get("photoUrl") or ""
+        # 视频直链候选：
+        # feedbyid → playUrl/mp4Url/photoUrl；rest feed → photo.photoUrls[{cdn,url}]，兜底 DASH manifest
+        video_url = (
+            work.get("mp4Url") or work.get("playUrl") or work.get("photoUrl")
+            or photo.get("photoUrl")
+            or _pick_url(photo.get("photoUrls"))
+            or _pick_url(work.get("mainMvUrls") or work.get("main_mv_urls"))
+        )
         if not video_url:
-            mv = work.get("mainMvUrls") or work.get("main_mv_urls") or []
-            if isinstance(mv, list) and mv:
-                first = mv[0]
-                video_url = first.get("url") if isinstance(first, dict) else first
+            try:
+                reps = photo["manifest"]["adaptationSet"][0]["representation"]
+                video_url = _pick_url(reps)
+            except (KeyError, IndexError, TypeError):
+                pass
 
         # 图集直链候选
         norm_imgs = []
-        for it in (work.get("imgUrls") or []):
+        for it in (work.get("imgUrls") or photo.get("imgUrls") or []):
             if isinstance(it, str):
                 norm_imgs.append(it)
             elif isinstance(it, dict):
                 u = it.get("url") or it.get("cdnUrl")
                 if u:
                     norm_imgs.append(u)
+        # 图集 atlas：feedbyid 在 ext_params.atlas；rest feed 在 photo.ext_params.atlas / photo.atlas
         if not norm_imgs:
-            atlas = (work.get("ext_params") or {}).get("atlas") or {}
+            atlas = (
+                work.get("atlas") or photo.get("atlas")
+                or (work.get("ext_params") or {}).get("atlas")
+                or (photo.get("ext_params") or {}).get("atlas") or {}
+            )
             cdn = atlas.get("cdn")
             lst = atlas.get("list") or []
             if cdn and lst:
                 cdn0 = cdn[0] if isinstance(cdn, list) else cdn
                 norm_imgs = [f"https://{cdn0}{p}" for p in lst]
 
-        work_type = str(work.get("workType") or work.get("photoType") or "").upper()
+        # 封面（网格缩略图用）
+        cover = (
+            photo.get("coverUrl") or work.get("coverUrl")
+            or _pick_url(photo.get("coverUrls")) or _pick_url(work.get("coverUrls"))
+        )
+
+        work_type = str(
+            work.get("workType") or work.get("photoType") or photo.get("photoType") or ""
+        ).upper()
         is_atlas = "ATLAS" in work_type or (norm_imgs and not video_url)
 
         if is_atlas and norm_imgs:
@@ -328,6 +395,7 @@ class KuaishouClient:
             "urls": urls,
             "photo_id": photo_id,
             "nickname": clean_filename(nickname),
+            "cover": cover,
         }
 
 
@@ -402,6 +470,53 @@ def download_media(media_info: dict, target_dir: Path) -> dict:
 
 # ── 后台批处理执行器 ──────────────────────────────────────
 
+def _download_media_items(media_infos: list, target_dir: Path):
+    """后台下载一批已解析的 media_info；复用全局进度/取消状态。"""
+    total = len(media_infos)
+    _reset_task_state(total=total)
+
+    downloaded = 0
+    failed = 0
+    for idx, media_info in enumerate(media_infos, 1):
+        if _task_cancel_event.is_set():
+            _add_log("⚠️ 用户取消了任务")
+            _set_task_state(status="cancelled")
+            return
+
+        _set_task_state(current_index=idx)
+
+        try:
+            if not media_info.get("urls"):
+                _add_log(f"⚠️ 第 {idx} 项无可用资源链接，跳过")
+                failed += 1
+                _set_task_state(failed_count=failed)
+                continue
+
+            _add_log(f"[{idx}/{total}] 正在下载: {media_info['title'][:30]}...")
+            result = download_media(media_info, target_dir)
+            downloaded += 1
+            _set_task_state(downloaded_count=downloaded, current_title=result["title"])
+        except Exception as e:
+            failed += 1
+            _set_task_state(failed_count=failed)
+            _add_log(f"❌ 第 {idx} 项下载失败: {str(e)}")
+
+        if idx < total:
+            time.sleep(random.uniform(1.0, 3.0))
+
+    _add_log(f"🎉 下载任务结束! 成功: {downloaded}，失败: {failed}")
+    _set_task_state(status="completed")
+
+
+def _run_selected_download_task(media_infos: list, target_dir: Path):
+    """后台线程：下载前端传回的选中作品列表"""
+    try:
+        _download_media_items(media_infos, target_dir)
+    except Exception as outer_err:
+        _add_log(f"💥 下载任务发生错误: {str(outer_err)}")
+        _set_task_state(status="failed")
+
+
 def _run_profile_download_task(user_id: str, max_pages: int, target_dir: Path):
     """后台线程：获取用户所有公开作品并下载"""
     _add_log(f"正在准备抓取主页资源，目标 user_id: {user_id}...")
@@ -454,41 +569,8 @@ def _run_profile_download_task(user_id: str, max_pages: int, target_dir: Path):
             return
 
         _add_log(f"🚀 作品列表获取完成！共 {len(all_items)} 个作品待处理")
-        _reset_task_state(total=len(all_items))
-
-        downloaded = 0
-        failed = 0
-
-        for idx, item in enumerate(all_items, 1):
-            if _task_cancel_event.is_set():
-                _add_log("⚠️ 用户取消了任务")
-                _set_task_state(status="cancelled")
-                return
-
-            _set_task_state(current_index=idx)
-
-            try:
-                media_info = KuaishouClient.parse_media_info(item)
-                if not media_info["urls"]:
-                    _add_log(f"⚠️ 第 {idx} 项无可用资源链接，跳过")
-                    failed += 1
-                    _set_task_state(failed_count=failed)
-                    continue
-
-                _add_log(f"[{idx}/{len(all_items)}] 正在下载: {media_info['title'][:30]}...")
-                result = download_media(media_info, target_dir)
-                downloaded += 1
-                _set_task_state(downloaded_count=downloaded, current_title=result["title"])
-            except Exception as e:
-                failed += 1
-                _set_task_state(failed_count=failed)
-                _add_log(f"❌ 第 {idx} 项下载失败: {str(e)}")
-
-            if idx < len(all_items):
-                time.sleep(random.uniform(1.0, 3.0))
-
-        _add_log(f"🎉 批量下载任务结束! 成功: {downloaded}，失败: {failed}")
-        _set_task_state(status="completed")
+        media_infos = [KuaishouClient.parse_media_info(it) for it in all_items]
+        _download_media_items(media_infos, target_dir)
 
     except Exception as outer_err:
         _add_log(f"💥 批量下载任务发生错误: {str(outer_err)}")
@@ -565,6 +647,70 @@ def download_profile():
     thread.start()
 
     return jsonify({"message": "已在后台启动主页批量解析下载任务", "user_id": user_id})
+
+
+@kuaishou_bp.route("/user-feed", methods=["POST"])
+def user_feed():
+    """获取用户主页作品列表（分页，不下载）"""
+    data = request.get_json() or {}
+    profile_url = data.get("url", "").strip()
+    pcursor = data.get("pcursor", "") or ""
+
+    if not profile_url:
+        return jsonify({"error": "请输入有效的主页链接"}), 400
+
+    try:
+        client = KuaishouClient()
+        resolved = client.resolve_share_url(profile_url)
+        user_id = KuaishouClient.extract_user_id(resolved)
+        if not user_id:
+            return jsonify({"error": "未能从链接解析出用户ID，请确认是快手用户主页链接"}), 400
+
+        raw_items, next_pcursor = client.get_user_feed(user_id, pcursor)
+        items = [KuaishouClient.parse_media_info(it) for it in raw_items]
+
+        author = {}
+        for it in raw_items:
+            a = it.get("author") or {}
+            if a.get("name") or a.get("headerUrl"):
+                author = {"name": a.get("name", ""), "avatar": a.get("headerUrl", "")}
+                break
+
+        has_more = bool(next_pcursor and next_pcursor not in ("no_more", "NO_MORE"))
+        return jsonify({
+            "user_id": user_id,
+            "author": author,
+            "items": items,
+            "pcursor": next_pcursor,
+            "has_more": has_more,
+        })
+    except Exception as e:
+        return jsonify({"error": f"获取作品列表失败: {str(e)}"}), 500
+
+
+@kuaishou_bp.route("/download-selected", methods=["POST"])
+def download_selected():
+    """下载前端选中的作品列表（items 为 user-feed 返回的条目，自带 urls）"""
+    if _task_state["status"] == "running":
+        return jsonify({"error": "当前已有正在运行的批量下载任务，请等待完成"}), 400
+
+    data = request.get_json() or {}
+    items = [it for it in (data.get("items") or []) if isinstance(it, dict) and it.get("urls")]
+    if not items:
+        return jsonify({"error": "没有可下载的作品"}), 400
+
+    ensure_kuaishou_dirs()
+
+    _set_task_state(status="running")
+    _task_cancel_event.clear()
+    thread = threading.Thread(
+        target=_run_selected_download_task,
+        args=(items, KUAISHOU_DIR),
+        daemon=True,
+    )
+    thread.start()
+
+    return jsonify({"message": f"已在后台启动下载任务，共 {len(items)} 项", "count": len(items)})
 
 
 @kuaishou_bp.route("/cancel-download", methods=["POST"])
