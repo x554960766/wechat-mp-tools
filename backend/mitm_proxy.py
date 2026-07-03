@@ -11,6 +11,7 @@ import json
 import time
 import threading
 import subprocess
+import contextlib
 from pathlib import Path
 from backend.config import DATA_DIR
 
@@ -131,6 +132,33 @@ def prepare_mitm_confdir():
     return MITM_CONFDIR
 
 
+@contextlib.contextmanager
+def _safe_windows_subprocess():
+    """
+    On Windows, when running inside a PyInstaller package, the DLL search path is modified
+    to sys._MEIPASS. This can cause spawned system subprocesses (like certutil) to fail to
+    initialize their DLLs, yielding error 0xc0000142.
+    This context manager temporarily resets the DLL search directory to default before running
+    a subprocess, and restores it afterwards.
+    """
+    if sys.platform == "win32" and hasattr(sys, "_MEIPASS"):
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetDllDirectoryW(None)
+        except Exception:
+            pass
+        try:
+            yield
+        finally:
+            try:
+                import ctypes
+                ctypes.windll.kernel32.SetDllDirectoryW(sys._MEIPASS)
+            except Exception:
+                pass
+    else:
+        yield
+
+
 def check_cert_trusted():
     if sys.platform == "darwin":
         try:
@@ -168,7 +196,8 @@ def check_cert_trusted():
             return False
     elif sys.platform == "win32":
         try:
-            out = subprocess.run(["certutil", "-verifystore", "-user", "root", "Channels Interceptor CA"], capture_output=True)
+            with _safe_windows_subprocess():
+                out = subprocess.run(["certutil", "-verifystore", "-user", "root", "Channels Interceptor CA"], capture_output=True)
             return out.returncode == 0
         except Exception:
             return False
@@ -214,7 +243,8 @@ def install_system_cert(ca_cert_path):
                 return False
     elif sys.platform == "win32":
         try:
-            subprocess.run(["certutil", "-addstore", "-user", "root", str(ca_cert_path)], check=True)
+            with _safe_windows_subprocess():
+                subprocess.run(["certutil", "-addstore", "-user", "root", str(ca_cert_path)], check=True)
             return True
         except Exception as e:
             print(f"Failed to install Win cert: {e}")
@@ -258,7 +288,8 @@ def uninstall_system_cert():
         return not still_trusted
     elif sys.platform == "win32":
         try:
-            subprocess.run(["certutil", "-delstore", "-user", "root", "Channels Interceptor CA"], check=True)
+            with _safe_windows_subprocess():
+                subprocess.run(["certutil", "-delstore", "-user", "root", "Channels Interceptor CA"], check=True)
             return True
         except Exception as e:
             print(f"Failed to delete Win cert: {e}")
