@@ -11,7 +11,6 @@ import json
 import time
 import threading
 import subprocess
-import contextlib
 from pathlib import Path
 from backend.config import DATA_DIR
 
@@ -132,31 +131,36 @@ def prepare_mitm_confdir():
     return MITM_CONFDIR
 
 
-@contextlib.contextmanager
-def _safe_windows_subprocess():
+def _run_certutil(args, check=False):
     """
-    On Windows, when running inside a PyInstaller package, the DLL search path is modified
-    to sys._MEIPASS. This can cause spawned system subprocesses (like certutil) to fail to
-    initialize their DLLs, yielding error 0xc0000142.
-    This context manager temporarily resets the DLL search directory to default before running
-    a subprocess, and restores it afterwards.
+    Spawn certutil safely, even inside a PyInstaller onefile package.
+
+    PyInstaller prepends sys._MEIPASS to the process PATH, so a spawned certutil.exe
+    resolves its dependent DLLs from the bundle dir and fails to initialize with
+    STATUS_DLL_INIT_FAILED (0xc0000142). The previous fix used a process-global
+    SetDllDirectoryW hack, which is racy when several subprocesses run concurrently
+    (e.g. on shutdown: restore-proxy + uninstall-cert), explaining the intermittent crash.
+
+    Instead we give the child a sanitized, per-process environment: absolute certutil
+    path under System32, PATH stripped of _MEIPASS, and cwd=System32. No global state.
     """
-    if sys.platform == "win32" and hasattr(sys, "_MEIPASS"):
-        try:
-            import ctypes
-            ctypes.windll.kernel32.SetDllDirectoryW(None)
-        except Exception:
-            pass
-        try:
-            yield
-        finally:
-            try:
-                import ctypes
-                ctypes.windll.kernel32.SetDllDirectoryW(sys._MEIPASS)
-            except Exception:
-                pass
-    else:
-        yield
+    if sys.platform == "win32":
+        system_root = os.environ.get("SystemRoot", r"C:\Windows")
+        system32 = os.path.join(system_root, "System32")
+        certutil = os.path.join(system32, "certutil.exe")
+        env = os.environ.copy()
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            mp = os.path.normcase(os.path.normpath(meipass))
+            env["PATH"] = os.pathsep.join(
+                p for p in env.get("PATH", "").split(os.pathsep)
+                if p and os.path.normcase(os.path.normpath(p)) != mp
+            )
+        return subprocess.run(
+            [certutil] + list(args),
+            capture_output=True, check=check, env=env, cwd=system32,
+        )
+    return subprocess.run(["certutil"] + list(args), capture_output=True, check=check)
 
 
 def check_cert_trusted():
@@ -196,8 +200,7 @@ def check_cert_trusted():
             return False
     elif sys.platform == "win32":
         try:
-            with _safe_windows_subprocess():
-                out = subprocess.run(["certutil", "-verifystore", "-user", "root", "Channels Interceptor CA"], capture_output=True)
+            out = _run_certutil(["-verifystore", "-user", "root", "Channels Interceptor CA"])
             return out.returncode == 0
         except Exception:
             return False
@@ -243,8 +246,7 @@ def install_system_cert(ca_cert_path):
                 return False
     elif sys.platform == "win32":
         try:
-            with _safe_windows_subprocess():
-                subprocess.run(["certutil", "-addstore", "-user", "root", str(ca_cert_path)], check=True)
+            _run_certutil(["-addstore", "-user", "root", str(ca_cert_path)], check=True)
             return True
         except Exception as e:
             print(f"Failed to install Win cert: {e}")
@@ -288,8 +290,7 @@ def uninstall_system_cert():
         return not still_trusted
     elif sys.platform == "win32":
         try:
-            with _safe_windows_subprocess():
-                subprocess.run(["certutil", "-delstore", "-user", "root", "Channels Interceptor CA"], check=True)
+            _run_certutil(["-delstore", "-user", "root", "Channels Interceptor CA"], check=True)
             return True
         except Exception as e:
             print(f"Failed to delete Win cert: {e}")
@@ -425,6 +426,13 @@ class ChannelsAddon:
                     payload = json.loads(flow.request.get_text())
                     msg = payload.get('message') or payload.get('msg')
                     print(f"[FRONTEND ERROR] {msg}", flush=True)
+                    # Persist to file so Windows packaged builds can retrieve JS errors
+                    try:
+                        err_log = DATA_DIR / "frontend_errors.log"
+                        with open(err_log, "a", encoding="utf-8") as _ef:
+                            _ef.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+                    except Exception:
+                        pass
                 except Exception as ex:
                     print(f"[FRONTEND ERROR LOG FAILED] {ex}", flush=True)
                 self._local_json(flow, 200, b'{"success":true}')
@@ -523,16 +531,20 @@ class ChannelsAddon:
                 js_content = flow.response.get_text(strict=False)
                 if js_content:
                     modified = _hook_wx_bundle(pathname, js_content)
-                    # DIAG: dump raw+hooked for virtual_svg bundle to locate syntax break
-                    if "virtual_svg-icons-register.publish" in pathname:
-                        try:
-                            with open("/tmp/wx_bundle_raw.js", "w") as _f:
-                                _f.write(js_content)
-                            with open("/tmp/wx_bundle_hooked.js", "w") as _f:
-                                _f.write(modified)
-                            print("[DIAG] dumped virtual_svg bundle raw+hooked", flush=True)
-                        except Exception as _e:
-                            print(f"[DIAG] dump failed: {_e}", flush=True)
+                    # DIAG: dump raw+hooked bundles to DATA_DIR for cross-platform debugging
+                    _diag_bundles = ("virtual_svg-icons-register.publish", "connect.publish", "applyMic.publish")
+                    for _db in _diag_bundles:
+                        if _db in pathname:
+                            try:
+                                _tag = _db.replace(".", "_")
+                                _dump_dir = DATA_DIR / "diag_bundles"
+                                _dump_dir.mkdir(parents=True, exist_ok=True)
+                                (_dump_dir / f"{_tag}_raw.js").write_text(js_content, encoding="utf-8")
+                                (_dump_dir / f"{_tag}_hooked.js").write_text(modified, encoding="utf-8")
+                                print(f"[DIAG] dumped {_db} bundle raw+hooked to {_dump_dir}", flush=True)
+                            except Exception as _e:
+                                print(f"[DIAG] dump failed: {_e}", flush=True)
+                            break
                     flow.response.text = modified
             except Exception as ex:
                 print(f"[Proxy] Error hooking JS bundle: {ex}", flush=True)
@@ -818,6 +830,125 @@ def _read_injection(relpath):
     with open(os.path.join(_injection_base(), relpath), "r", encoding="utf-8") as f:
         return f.read()
 
+def _extract_function_body(js, open_brace_pos):
+    """Extract a JS function body using brace balancing, starting right after the '{' at open_brace_pos.
+
+    Skips single/double/template-literal strings and // / /* */ comments so that
+    braces inside them don't break balancing.
+
+    Returns (body_str, end_pos) where end_pos is the index of the closing '}',
+    or None if balancing fails (e.g. truncated bundle).
+    """
+    i = open_brace_pos + 1  # skip the opening '{'
+    depth = 1
+    n = len(js)
+    while i < n and depth > 0:
+        ch = js[i]
+        if ch in ('"', "'"):
+            # Skip string literal
+            quote = ch
+            i += 1
+            while i < n and js[i] != quote:
+                if js[i] == '\\':
+                    i += 1  # skip escaped char
+                i += 1
+            i += 1  # skip closing quote
+            continue
+        if ch == '`':
+            # Skip template literal (handle ${...} by tracking nested depth within)
+            i += 1
+            while i < n and js[i] != '`':
+                if js[i] == '\\':
+                    i += 1
+                elif js[i] == '$' and i + 1 < n and js[i + 1] == '{':
+                    # Template expression: track nested braces within ${...}
+                    i += 2  # skip '${'
+                    tdepth = 1
+                    while i < n and tdepth > 0:
+                        tc = js[i]
+                        if tc == '{':
+                            tdepth += 1
+                        elif tc == '}':
+                            tdepth -= 1
+                        elif tc in ('"', "'", '`'):
+                            # skip nested string inside template expression
+                            tq = tc
+                            i += 1
+                            while i < n and js[i] != tq:
+                                if js[i] == '\\':
+                                    i += 1
+                                i += 1
+                        i += 1
+                    continue  # tdepth closed the '}' of ${...}
+                i += 1
+            i += 1  # skip closing backtick
+            continue
+        if ch == '/' and i + 1 < n:
+            next_ch = js[i + 1]
+            if next_ch == '/':
+                # Line comment
+                i += 2
+                while i < n and js[i] != '\n':
+                    i += 1
+                continue
+            if next_ch == '*':
+                # Block comment
+                i += 2
+                while i < n and not (js[i] == '*' and i + 1 < n and js[i + 1] == '/'):
+                    i += 1
+                i += 2  # skip '*/'
+                continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return (js[open_brace_pos + 1 : i], i)
+        i += 1
+    return None  # balancing failed
+
+
+def _hook_async_method(js_script, func_name, wrapper_template, has_param=True):
+    """Hook an async method by name using brace-balanced extraction.
+
+    func_name:        e.g. "finderInit" or "finderPcFlow"
+    wrapper_template: a format string with {param} and {body} placeholders, e.g.
+                      "var result=await(async()=>{{ {body} }})();...;return result;"
+    has_param:        True if the function has one parameter, False if zero-arg.
+
+    Returns (modified_js, matched) where matched indicates if the hook was applied.
+    """
+    if has_param:
+        pattern = re.compile(r'async\s+' + re.escape(func_name) + r'\s*\(\s*(\w+)\s*\)\s*\{')
+    else:
+        pattern = re.compile(r'async\s+' + re.escape(func_name) + r'\s*\(\s*\)\s*\{')
+
+    m = pattern.search(js_script)
+    if not m:
+        return js_script, False
+
+    open_brace = m.end() - 1  # position of '{'
+    result = _extract_function_body(js_script, open_brace)
+    if result is None:
+        print(f"[Bundle Hook] WARNING: brace balancing failed for {func_name}, skipping hook", flush=True)
+        return js_script, False
+
+    body, close_brace_pos = result
+    param = m.group(1) if has_param else ""
+
+    # Build the replacement function body
+    new_body = wrapper_template.format(param=param, body=body)
+
+    # Reconstruct: everything before '{' + '{' + new_body + '}' + everything after '}'
+    if has_param:
+        func_sig = f"async {func_name}({param})"
+    else:
+        func_sig = f"async {func_name}()"
+    replacement = func_sig + "{" + new_body + "}"
+    js_script = js_script[:m.start()] + replacement + js_script[close_brace_pos + 1:]
+    return js_script, True
+
+
 def _hook_wx_bundle(pathname, js_script):
     v = "?t=local"
     
@@ -829,90 +960,72 @@ def _hook_wx_bundle(pathname, js_script):
 
     if "virtual_svg-icons-register.publish" in pathname:
         print("[Bundle Hook] Hooking virtual_svg-icons-register.publish", flush=True)
-        # 1. finderInit
-        js_script = re.sub(
-            r'async finderInit\(\)\{(.*?)\}async',
-            r'async finderInit(){var result=await(async()=>{\1})();var data=result.data;WXU.emit(WXU.Events.Init,data);return result;}async',
-            js_script
-        )
-        
+        hook_report = {}
+
+        # 1. finderInit (no param)
+        js_script, ok = _hook_async_method(js_script, "finderInit",
+            "var result=await(async()=>{{ {body} }})();var data=result.data;WXU.emit(WXU.Events.Init,data);return result;",
+            has_param=False)
+        hook_report["finderInit"] = ok
+
         # 2. finderPcFlow
-        js_script = re.sub(
-            r'async finderPcFlow\((\w+)\)\{(.*?)\}async',
-            r'async finderPcFlow(\1){var result=await(async()=>{\2})();var feeds=result.data.object;WXU.emit(WXU.Events.PCFlowLoaded,feeds);return result;}async',
-            js_script
-        )
-        
+        js_script, ok = _hook_async_method(js_script, "finderPcFlow",
+            "var result=await(async()=>{{ {body} }})();var feeds=result.data.object;WXU.emit(WXU.Events.PCFlowLoaded,feeds);return result;")
+        hook_report["finderPcFlow"] = ok
+
         # 3. finderGetRecommend
-        js_script = re.sub(
-            r'async finderGetRecommend\((\w+)\)\{(.*?)\}async',
-            r'async finderGetRecommend(\1){var result=await(async()=>{\2})();var feeds=result.data.object;WXU.emit(WXU.Events.RecommendFeedsLoaded,feeds);return result;}async',
-            js_script
-        )
-        
+        js_script, ok = _hook_async_method(js_script, "finderGetRecommend",
+            "var result=await(async()=>{{ {body} }})();var feeds=result.data.object;WXU.emit(WXU.Events.RecommendFeedsLoaded,feeds);return result;")
+        hook_report["finderGetRecommend"] = ok
+
         # 4. finderGetCommentDetail
-        js_script = re.sub(
-            r'async finderGetCommentDetail\((\w+)\)\{(.*?)\}async',
-            r'async finderGetCommentDetail(\1){var result=await(async()=>{\2})();var feed=result.data.object;WXU.emit(WXU.Events.FeedProfileLoaded,feed);return result;}async',
-            js_script
-        )
-        
+        js_script, ok = _hook_async_method(js_script, "finderGetCommentDetail",
+            "var result=await(async()=>{{ {body} }})();var feed=result.data.object;WXU.emit(WXU.Events.FeedProfileLoaded,feed);return result;")
+        hook_report["finderGetCommentDetail"] = ok
+
         # 5. finderGetCommentList
-        js_script = re.sub(
-            r'async finderGetCommentList\((\w+)\)\{(.*?)\}async',
-            r'async finderGetCommentList(\1){var result=await(async()=>{\2})();WXU.emit(WXU.Events.FeedCommentListLoaded,result.data);return result;}async',
-            js_script
-        )
-        
+        js_script, ok = _hook_async_method(js_script, "finderGetCommentList",
+            "var result=await(async()=>{{ {body} }})();WXU.emit(WXU.Events.FeedCommentListLoaded,result.data);return result;")
+        hook_report["finderGetCommentList"] = ok
+
         # 6. finderPCSearch
-        js_script = re.sub(
-            r'async finderPCSearch\((\w+)\)\{(.*?)\}async',
-            r'async finderPCSearch(\1){var result=await(async()=>{\2})();return result;}async',
-            js_script
-        )
-        
+        js_script, ok = _hook_async_method(js_script, "finderPCSearch",
+            "var result=await(async()=>{{ {body} }})();return result;")
+        hook_report["finderPCSearch"] = ok
+
         # 7. finderSearch
-        js_script = re.sub(
-            r'async finderSearch\((\w+)\)\{(.*?)\}async',
-            r'async finderSearch(\1){var result=await(async()=>{\2})();return result;}async',
-            js_script
-        )
-        
+        js_script, ok = _hook_async_method(js_script, "finderSearch",
+            "var result=await(async()=>{{ {body} }})();return result;")
+        hook_report["finderSearch"] = ok
+
         # 8. finderGetInteractionedFeedList
-        js_script = re.sub(
-            r'async finderGetInteractionedFeedList\((\w+)\)\{(.*?)\}\}const',
-            r'async finderGetInteractionedFeedList(\1){var result=await(async()=>{\2})();var feeds=result.data.object;WXU.emit(WXU.Events.InteractionedFeedsLoaded,feeds);return result;}}const',
-            js_script
-        )
-        
+        js_script, ok = _hook_async_method(js_script, "finderGetInteractionedFeedList",
+            "var result=await(async()=>{{ {body} }})();var feeds=result.data.object;WXU.emit(WXU.Events.InteractionedFeedsLoaded,feeds);return result;")
+        hook_report["finderGetInteractionedFeedList"] = ok
+
         # 9. finderUserPage
-        js_script = re.sub(
-            r'async finderUserPage\((\w+)\)\{(.*?)\}async',
-            r'async finderUserPage(\1){var result=await(async()=>{\2})();var feeds=result.data.object;WXU.emit(WXU.Events.UserFeedsLoaded,{feeds:feeds,lastBuffer:result.data.lastBuffer,raw:result.data});return result;}async',
-            js_script
-        )
-        
+        js_script, ok = _hook_async_method(js_script, "finderUserPage",
+            "var result=await(async()=>{{ {body} }})();var feeds=result.data.object;WXU.emit(WXU.Events.UserFeedsLoaded,{{feeds:feeds,lastBuffer:result.data.lastBuffer,raw:result.data}});return result;")
+        hook_report["finderUserPage"] = ok
+
         # 10. finderLiveUserPage
-        js_script = re.sub(
-            r'async finderLiveUserPage\((\w+)\)\{(.*?)\}async',
-            r'async finderLiveUserPage(\1){var result=await(async()=>{\2})();var feeds=result.data.object;WXU.emit(WXU.Events.LiveUserFeedsLoaded,feeds);return result;}async',
-            js_script
-        )
-        
+        js_script, ok = _hook_async_method(js_script, "finderLiveUserPage",
+            "var result=await(async()=>{{ {body} }})();var feeds=result.data.object;WXU.emit(WXU.Events.LiveUserFeedsLoaded,feeds);return result;")
+        hook_report["finderLiveUserPage"] = ok
+
         # 11. finderGetLiveInfo
-        js_script = re.sub(
-            r'async finderGetLiveInfo\((\w+)\)\{(.*?)\}async',
-            r'async finderGetLiveInfo(\1){var result=await(async()=>{\2})();var live=result.data;WXU.emit(WXU.Events.LiveProfileLoaded,live);return result;}async',
-            js_script
-        )
-        
+        js_script, ok = _hook_async_method(js_script, "finderGetLiveInfo",
+            "var result=await(async()=>{{ {body} }})();var live=result.data;WXU.emit(WXU.Events.LiveProfileLoaded,live);return result;")
+        hook_report["finderGetLiveInfo"] = ok
+
         # 12. joinLive
-        js_script = re.sub(
-            r'async joinLive\((\w+)\)\{(.*?)\}async',
-            r'async joinLive(\1){var result=await(async()=>{\2})();var data=result.data;WXU.emit(WXU.Events.JoinLive,data);return result;}async',
-            js_script
-        )
-        
+        js_script, ok = _hook_async_method(js_script, "joinLive",
+            "var result=await(async()=>{{ {body} }})();var data=result.data;WXU.emit(WXU.Events.JoinLive,data);return result;")
+        hook_report["joinLive"] = ok
+
+        hit = sum(1 for v in hook_report.values() if v)
+        print(f"[Bundle Hook] Hook report: {hit}/12 applied — {hook_report}", flush=True)
+
         # 13. Export hooks (APILoaded)
         export_match = re.search(r'exports?\s*\{([^}]+)\}', js_script)
         api_methods = "{}"
@@ -932,9 +1045,11 @@ def _hook_wx_bundle(pathname, js_script):
             if locals_list:
                 api_methods = "{" + ",".join(locals_list) + "}"
         
-        api_methods_escaped = api_methods
+        api_methods_escaped = api_methods.replace('\\', '\\\\')
         js_wxapi = f";WXU.emit(WXU.Events.APILoaded,{api_methods_escaped});export{{"
-        js_script = re.sub(r'exports?\s*\{', js_wxapi, js_script, count=1)
+        js_script, n_subs = re.subn(r'exports?\s*\{', js_wxapi, js_script, count=1)
+        if n_subs == 0:
+            print("[Bundle Hook] WARNING: export{} pattern not found in virtual_svg bundle", flush=True)
 
     elif "connect.publish" in pathname or "applyMic.publish" in pathname:
         print(f"[Bundle Hook] Hooking {pathname}", flush=True)

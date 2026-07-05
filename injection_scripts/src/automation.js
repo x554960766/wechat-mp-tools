@@ -195,7 +195,7 @@
       }
       if (hitKnown || capped) break; // 增量命中 或 达上限，停止翻页
       marker = (r.data && r.data.lastBuffer) || "";
-      if (!(marker && raw.length >= 15)) break; // 没有更多
+      if (!marker || raw.length === 0) break; // 没有更多（以 lastBuffer 为主要翻页依据）
       await jitterSleep(PAGE_JITTER_MS);
     }
     // 作者汇总行：直接自证增量（new 少/0）与上限（capped），errCode=null 不计入成功率统计
