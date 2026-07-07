@@ -6,7 +6,7 @@
 
 > [!TIP]
 > **无需配置本地开发环境，开箱即用！**
-> 本项目已通过 GitHub Actions 自动构建出 Windows 与 macOS 的可执行客户端。请直接前往 [👉 GitHub Releases 1.5.2 下载页面](https://github.com/x554960766/wechat-mp-tools/releases/tag/v1.5.2) 下载最新版本。
+> 本项目已通过 GitHub Actions 自动构建出 Windows 与 macOS 的可执行客户端。请直接前往 [👉 GitHub Releases 1.5.3 下载页面](https://github.com/x554960766/wechat-mp-tools/releases/tag/v1.5.3) 下载最新版本。
 
 ---
 

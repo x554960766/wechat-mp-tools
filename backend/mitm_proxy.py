@@ -35,6 +35,9 @@ CERTS_DIR.mkdir(parents=True, exist_ok=True)
 
 PROXY_SESSION_ID = str(int(time.time()))
 
+# 保存 MITM 启动前的 NO_PROXY 环境变量，用于停止时还原
+_original_no_proxy = None
+
 # ── 证书管理 (Certificate Management) ──────────────────────────
 
 def ensure_ca_certificates():
@@ -1318,6 +1321,34 @@ def cleanup_mitmproxy_logging_handlers():
                     pass
 
 
+def _set_no_proxy():
+    """设置 NO_PROXY=* 使 Python 的 requests/urllib3/curl_cffi 绕过系统代理。
+
+    MITM 代理会通过 networksetup（macOS）/ 注册表（Windows）设置系统级代理，
+    浏览器读取系统代理来走 MITM 拦截，但 Python 后端代码不需要走 MITM。
+    设置 NO_PROXY=* 后，Python 的 HTTP 库不再自动使用系统代理，
+    而用户在应用设置中配置的显式代理（通过 proxies= 参数传递）不受影响。
+    """
+    global _original_no_proxy
+    _original_no_proxy = os.environ.get("NO_PROXY")
+    os.environ["NO_PROXY"] = "*"
+    os.environ["no_proxy"] = "*"
+    print("NO_PROXY=* set: Python HTTP clients will bypass system proxy.")
+
+
+def _restore_no_proxy():
+    """还原 MITM 启动前的 NO_PROXY 环境变量。"""
+    global _original_no_proxy
+    if _original_no_proxy is not None:
+        os.environ["NO_PROXY"] = _original_no_proxy
+        os.environ["no_proxy"] = _original_no_proxy
+    else:
+        os.environ.pop("NO_PROXY", None)
+        os.environ.pop("no_proxy", None)
+    _original_no_proxy = None
+    print("NO_PROXY restored to original.")
+
+
 # ── Proxy Service Manager (代理服务单例管理器) ─────────────────────
 
 class ProxyManager:
@@ -1363,7 +1394,10 @@ class ProxyManager:
         )
         self.thread.start()
 
-        # 4. 开启系统代理
+        # 4. 设置 NO_PROXY=* 使 Python 后端代码绕过系统代理（仅浏览器需走 MITM）
+        _set_no_proxy()
+
+        # 5. 开启系统代理（浏览器/微信客户端会走此代理）
         set_system_proxy(True, port=self.port)
         print(f"Channels MITM proxy started on 127.0.0.1:{self.port} and system proxy enabled.")
         return True
@@ -1396,6 +1430,9 @@ class ProxyManager:
         self.thread = None
 
         cleanup_mitmproxy_logging_handlers()
+
+        # 还原 NO_PROXY 环境变量
+        _restore_no_proxy()
 
         print("Channels MITM proxy stopped and system proxy disabled.")
         return True

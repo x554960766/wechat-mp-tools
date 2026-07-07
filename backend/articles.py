@@ -805,15 +805,16 @@ def _do_range_download(
                 with _download_lock:
                     _download_tasks[task_id]["scanned"] += len(articles)
 
+                out_of_range_count = 0
                 for article in articles:
                     article_time = article.get("update_time") or 0
-                    if article_time > end_time:
-                        continue
-                    if article_time < start_time:
-                        stop = True
-                        with _download_lock:
-                            _download_tasks[task_id]["stop_reason"] = "已到达所选时间范围之前的文章"
-                        break
+                    # update_time 为 0 表示时间未知，不做时间过滤（宁多勿漏）
+                    if article_time > 0:
+                        if article_time > end_time:
+                            continue
+                        if article_time < start_time:
+                            out_of_range_count += 1
+                            continue
 
                     with _download_lock:
                         task = _download_tasks.get(task_id, {})
@@ -829,6 +830,12 @@ def _do_range_download(
                     _download_article_into_task(task_id, article, account_name, history, downloaded_index)
                     downloaded_index += 1
                     time.sleep(delay)
+
+                # 当前页所有文章都早于 start_time，说明后续页也不会有范围内的文章了
+                if out_of_range_count > 0 and out_of_range_count >= len(articles):
+                    stop = True
+                    with _download_lock:
+                        _download_tasks[task_id]["stop_reason"] = "已到达所选时间范围之前的文章"
 
                 begin += page_size
                 if total_count and begin >= total_count:
