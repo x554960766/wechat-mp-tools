@@ -234,62 +234,64 @@ https://www.bilibili.com/video/BV1G3HEz5ETU
     },
 
     async downloadParsedSelection() {
-        const checkboxes = document.querySelectorAll('.bili-preview-check:checked');
-        if (checkboxes.length === 0) {
-            Toast.error('请至少选择一个视频进行下载');
-            return;
-        }
-
-        const items = [];
-        checkboxes.forEach(cb => {
-            const pageIdx = parseInt(cb.dataset.page);
-            const bvid = cb.dataset.bvid;
-            const title = cb.dataset.title;
-            const cid = cb.dataset.cid || '';
-            const isBangumi = cb.dataset.bangumi === 'true';
-            const bangumiTitle = cb.dataset.bangumiTitle || '';
-            
-            items.push({
-                bvid: bvid,
-                page_num: pageIdx,
-                title: title,
-                is_bangumi: isBangumi,
-                cid: cid,
-                p_title: title,
-                bangumi_title: bangumiTitle
-            });
-        });
-
-        // Prompt quality first
-        this.promptQuality(items, async (quality) => {
-            const btn = document.getElementById('btn-bili-download-parsed');
-            if (btn) {
-                btn.disabled = true;
-                btn.innerHTML = '<div class="spinner" style="width: 16px; height: 16px; border-width: 2px;"></div> 正在启动...';
+        App.ensureFFmpeg(async () => {
+            const checkboxes = document.querySelectorAll('.bili-preview-check:checked');
+            if (checkboxes.length === 0) {
+                Toast.error('请至少选择一个视频进行下载');
+                return;
             }
 
-            try {
-                const res = await API.bili.downloadBatch(items, quality);
-                if (res.task_started) {
-                    this.closePreview();
-                    this.showProgressModal();
-                } else {
-                    throw new Error(res.error || '无法启动任务');
+            const items = [];
+            checkboxes.forEach(cb => {
+                const pageIdx = parseInt(cb.dataset.page);
+                const bvid = cb.dataset.bvid;
+                const title = cb.dataset.title;
+                const cid = cb.dataset.cid || '';
+                const isBangumi = cb.dataset.bangumi === 'true';
+                const bangumiTitle = cb.dataset.bangumiTitle || '';
+                
+                items.push({
+                    bvid: bvid,
+                    page_num: pageIdx,
+                    title: title,
+                    is_bangumi: isBangumi,
+                    cid: cid,
+                    p_title: title,
+                    bangumi_title: bangumiTitle
+                });
+            });
+
+            // Prompt quality first
+            this.promptQuality(items, async (quality) => {
+                const btn = document.getElementById('btn-bili-download-parsed');
+                if (btn) {
+                    btn.disabled = true;
+                    btn.innerHTML = '<div class="spinner" style="width: 16px; height: 16px; border-width: 2px;"></div> 正在启动...';
                 }
-            } catch (err) {
-                Toast.error('启动下载失败: ' + err.message);
-            } finally {
+
+                try {
+                    const res = await API.bili.downloadBatch(items, quality);
+                    if (res.task_started) {
+                        this.closePreview();
+                        this.showProgressModal();
+                    } else {
+                        throw new Error(res.error || '无法启动任务');
+                    }
+                } catch (err) {
+                    Toast.error('启动下载失败: ' + err.message);
+                } finally {
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.innerHTML = `📥 开始下载所选 (\${checkboxes.length}项)`;
+                    }
+                }
+            }, () => {
+                const btn = document.getElementById('btn-bili-download-parsed');
                 if (btn) {
                     btn.disabled = false;
-                    btn.innerHTML = `📥 开始下载所选 (${checkboxes.length}项)`;
+                    btn.innerHTML = `📥 开始下载所选 (\${checkboxes.length}项)`;
                 }
-            }
-        }, () => {
-            const btn = document.getElementById('btn-bili-download-parsed');
-            if (btn) {
-                btn.disabled = false;
-                btn.innerHTML = `📥 开始下载所选 (${checkboxes.length}项)`;
-            }
+            });
         });
     },
 
@@ -310,72 +312,74 @@ https://www.bilibili.com/video/BV1G3HEz5ETU
     },
 
     async startDownload() {
-        const text = document.getElementById('bili-urls-input').value.trim();
-        if (!text) {
-            Toast.error('请输入B站链接');
-            return;
-        }
-
-        const btn = document.getElementById('btn-bili-start-download');
-        if (btn) {
-            btn.disabled = true;
-            btn.innerHTML = '<div class="spinner" style="width: 16px; height: 16px; border-width: 2px;"></div> 提交任务中...';
-        }
-
-        try {
-            const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
-            const items = [];
-            for (let line of lines) {
-                const bvMatch = line.match(/(BV[A-Za-z0-9]{10})/i);
-                const avMatch = line.match(/av(\d+)/i);
-                if (bvMatch) {
-                    items.push({ bvid: bvMatch[1], page_num: 1, title: bvMatch[1] });
-                } else if (avMatch) {
-                    items.push({ bvid: `av${avMatch[1]}`, page_num: 1, title: `av${avMatch[1]}` });
-                }
+        App.ensureFFmpeg(async () => {
+            const text = document.getElementById('bili-urls-input').value.trim();
+            if (!text) {
+                Toast.error('请输入B站链接');
+                return;
             }
 
-            if (items.length === 0) {
-                const detail = await API.bili.detectUrl(text);
-                if (detail && detail.id) {
-                    items.push({ bvid: detail.id, page_num: 1, title: detail.title });
-                }
+            const btn = document.getElementById('btn-bili-start-download');
+            if (btn) {
+                btn.disabled = true;
+                btn.innerHTML = '<div class="spinner" style="width: 16px; height: 16px; border-width: 2px;"></div> 提交任务中...';
             }
 
-            if (items.length === 0) {
-                throw new Error('未能在输入文本中提取到有效的 BV/AV 号');
-            }
-
-            this.promptQuality(items, async (quality) => {
-                try {
-                    const res = await API.bili.downloadBatch(items, quality);
-                    if (res.task_started) {
-                        this.closePreview();
-                        this.showProgressModal();
-                    } else {
-                        throw new Error(res.error || '无法启动任务');
+            try {
+                const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+                const items = [];
+                for (let line of lines) {
+                    const bvMatch = line.match(/(BV[A-Za-z0-9]{10})/i);
+                    const avMatch = line.match(/av(\d+)/i);
+                    if (bvMatch) {
+                        items.push({ bvid: bvMatch[1], page_num: 1, title: bvMatch[1] });
+                    } else if (avMatch) {
+                        items.push({ bvid: `av\${avMatch[1]}`, page_num: 1, title: `av\${avMatch[1]}` });
                     }
-                } catch (err) {
-                    Toast.error('启动下载失败: ' + err.message);
-                } finally {
+                }
+
+                if (items.length === 0) {
+                    const detail = await API.bili.detectUrl(text);
+                    if (detail && detail.id) {
+                        items.push({ bvid: detail.id, page_num: 1, title: detail.title });
+                    }
+                }
+
+                if (items.length === 0) {
+                    throw new Error('未能在输入文本中提取到有效的 BV/AV 号');
+                }
+
+                this.promptQuality(items, async (quality) => {
+                    try {
+                        const res = await API.bili.downloadBatch(items, quality);
+                        if (res.task_started) {
+                            this.closePreview();
+                            this.showProgressModal();
+                        } else {
+                            throw new Error(res.error || '无法启动任务');
+                        }
+                    } catch (err) {
+                        Toast.error('启动下载失败: ' + err.message);
+                    } finally {
+                        if (btn) {
+                            btn.disabled = false;
+                            btn.innerHTML = '📥 开始批量下载';
+                        }
+                    }
+                }, () => {
                     if (btn) {
                         btn.disabled = false;
                         btn.innerHTML = '📥 开始批量下载';
                     }
-                }
-            }, () => {
+                });
+            } catch (err) {
+                Toast.error('启动下载失败: ' + err.message);
                 if (btn) {
                     btn.disabled = false;
                     btn.innerHTML = '📥 开始批量下载';
                 }
-            });
-        } catch (err) {
-            Toast.error('启动下载失败: ' + err.message);
-            if (btn) {
-                btn.disabled = false;
-                btn.innerHTML = '📥 开始批量下载';
             }
-        }
+        });
     },
 
     showProgressModal() {

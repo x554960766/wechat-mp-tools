@@ -992,6 +992,131 @@ def check_ffmpeg():
         "available": has_ffmpeg and has_ffprobe
     })
 
+# ── FFmpeg 下载与安装状态 ────────────────────────────────────
+ffmpeg_download_status = {
+    "status": "idle",       # idle, downloading, unzipping, completed, failed
+    "progress": 0,          # 0 - 100
+    "error": None
+}
+ffmpeg_download_lock = threading.Lock()
+
+def download_ffmpeg_worker():
+    global ffmpeg_download_status
+    
+    # ffbinaries static urls
+    platform = sys.platform
+    plat_key = None
+    if platform == "win32":
+        plat_key = "win-64"
+    elif platform == "darwin":
+        plat_key = "osx-64"
+    elif "linux" in platform:
+        plat_key = "linux-64"
+        
+    if not plat_key:
+        with ffmpeg_download_lock:
+            ffmpeg_download_status = {"status": "failed", "progress": 0, "error": f"不支持的系统平台: {platform}"}
+        return
+
+    from backend.runtime import app_dir
+    dest_dir = app_dir() / "ffmpeg"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    
+    components = ["ffmpeg", "ffprobe"]
+    
+    try:
+        import requests
+        import zipfile
+        import stat
+        
+        for idx, comp in enumerate(components):
+            download_url = f"https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/{comp}-4.4.1-{plat_key}.zip"
+            zip_path = app_dir() / f"{comp}_temp.zip"
+            
+            with ffmpeg_download_lock:
+                ffmpeg_download_status = {
+                    "status": "downloading",
+                    "progress": int((idx / len(components)) * 100),
+                    "error": None
+                }
+                
+            r = requests.get(download_url, stream=True, timeout=30)
+            r.raise_for_status()
+            
+            total_size = int(r.headers.get('content-length', 0))
+            downloaded = 0
+            
+            with open(zip_path, 'wb') as f:
+                for chunk in r.iter_content(chunk_size=128 * 1024):
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total_size > 0:
+                            comp_percent = (downloaded / total_size) * 100
+                            overall_percent = int(((idx + (comp_percent / 100)) / len(components)) * 100)
+                            with ffmpeg_download_lock:
+                                ffmpeg_download_status["progress"] = overall_percent
+
+            with ffmpeg_download_lock:
+                ffmpeg_download_status = {
+                    "status": "unzipping",
+                    "progress": int(((idx + 0.9) / len(components)) * 100),
+                    "error": None
+                }
+                
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(dest_dir)
+                
+            if zip_path.exists():
+                zip_path.unlink()
+
+        # Set executable permissions (macOS / Linux)
+        for item in dest_dir.iterdir():
+            if item.is_file() and not item.name.endswith(".zip"):
+                try:
+                    st = os.stat(item)
+                    os.chmod(item, st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+                except Exception:
+                    pass
+                    
+        # Update current process PATH
+        path_env = os.environ.get("PATH", "")
+        paths = path_env.split(os.pathsep) if path_env else []
+        dest_dir_str = str(dest_dir.resolve())
+        if dest_dir_str not in paths:
+            os.environ["PATH"] = os.pathsep.join([dest_dir_str] + paths)
+            
+        with ffmpeg_download_lock:
+            ffmpeg_download_status = {"status": "completed", "progress": 100, "error": None}
+            
+    except Exception as e:
+        for comp in components:
+            zip_path = app_dir() / f"{comp}_temp.zip"
+            if zip_path.exists():
+                try:
+                    zip_path.unlink()
+                except Exception:
+                    pass
+        with ffmpeg_download_lock:
+            ffmpeg_download_status = {"status": "failed", "progress": 0, "error": str(e)}
+
+@transcode_bp.route("/download-ffmpeg", methods=["POST"])
+def start_download_ffmpeg():
+    global ffmpeg_download_status
+    with ffmpeg_download_lock:
+        if ffmpeg_download_status["status"] in ("downloading", "unzipping"):
+            return jsonify({"success": True, "message": "正在下载中..."})
+        ffmpeg_download_status = {"status": "downloading", "progress": 0, "error": None}
+        
+    t = threading.Thread(target=download_ffmpeg_worker, daemon=True)
+    t.start()
+    return jsonify({"success": True, "message": "下载已启动"})
+
+@transcode_bp.route("/download-ffmpeg-status", methods=["GET"])
+def get_download_ffmpeg_status():
+    with ffmpeg_download_lock:
+        return jsonify(ffmpeg_download_status)
+
 # ── 垃圾清理 (临时上传文件) ───────────────────────────────────
 def cleanup_temp_uploads():
     """启动时或定时清理临时上传文件夹"""

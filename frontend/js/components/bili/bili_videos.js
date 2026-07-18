@@ -358,29 +358,31 @@ const BiliVideosPage = {
     },
 
     async downloadFromPreview(bvid, totalPages) {
-        const pages = [];
-        if (totalPages > 1) {
-            for (let i = 1; i <= totalPages; i++) {
-                const cb = document.getElementById(`bili-part-check-${i}`);
-                if (cb && cb.checked) {
-                    pages.push(i);
+        App.ensureFFmpeg(async () => {
+            const pages = [];
+            if (totalPages > 1) {
+                for (let i = 1; i <= totalPages; i++) {
+                    const cb = document.getElementById(`bili-part-check-\${i}`);
+                    if (cb && cb.checked) {
+                        pages.push(i);
+                    }
+                }
+                if (pages.length === 0) {
+                    Toast.warning('请至少勾选一个分P进行下载');
+                    return;
                 }
             }
-            if (pages.length === 0) {
-                Toast.warning('请至少勾选一个分P进行下载');
-                return;
+            
+            Modal.close();
+            
+            try {
+                await API.bili.downloadSingle(`https://www.bilibili.com/video/\${bvid}`, pages.length > 0 ? pages : null);
+                Toast.success('下载任务已提交到后台');
+                this.showProgressModal();
+            } catch (err) {
+                Toast.error('提交下载失败: ' + err.message);
             }
-        }
-        
-        Modal.close();
-        
-        try {
-            await API.bili.downloadSingle(`https://www.bilibili.com/video/${bvid}`, pages.length > 0 ? pages : null);
-            Toast.success('下载任务已提交到后台');
-            this.showProgressModal();
-        } catch (err) {
-            Toast.error('提交下载失败: ' + err.message);
-        }
+        });
     },
 
     promptQuality(items, onConfirm, onCancel) {
@@ -448,38 +450,42 @@ const BiliVideosPage = {
     },
 
     async downloadSingle(bvid, title) {
-        this.promptQuality([{ bvid, title }], async (quality) => {
-            try {
-                await API.bili.downloadSingle(`https://www.bilibili.com/video/${bvid}`, null, quality);
-                Toast.success(`正在下载: ${title}`);
-                this.showProgressModal();
-            } catch (err) {
-                Toast.error('提交下载失败: ' + err.message);
-            }
+        App.ensureFFmpeg(() => {
+            this.promptQuality([{ bvid, title }], async (quality) => {
+                try {
+                    await API.bili.downloadSingle(`https://www.bilibili.com/video/\${bvid}`, null, quality);
+                    Toast.success(`正在下载: \${title}`);
+                    this.showProgressModal();
+                } catch (err) {
+                    Toast.error('提交下载失败: ' + err.message);
+                }
+            });
         });
     },
 
     async downloadSelected() {
-        const list = Array.from(this._selectedItems).map(bvid => {
-            const vid = this._videos.find(v => v.bvid === bvid);
-            return {
-                bvid: bvid,
-                title: vid ? vid.title : bvid,
-                page_num: 1
-            };
-        });
+        App.ensureFFmpeg(() => {
+            const list = Array.from(this._selectedItems).map(bvid => {
+                const vid = this._videos.find(v => v.bvid === bvid);
+                return {
+                    bvid: bvid,
+                    title: vid ? vid.title : bvid,
+                    page_num: 1
+                };
+            });
 
-        if (list.length === 0) return;
+            if (list.length === 0) return;
 
-        this.promptQuality(list, async (quality) => {
-            try {
-                await API.bili.downloadBatch(list, quality);
-                Toast.success('批量下载任务已启动');
-                this.toggleMultiSelect(); // Reset multi selection
-                this.showProgressModal();
-            } catch (err) {
-                Toast.error('启动批量下载失败: ' + err.message);
-            }
+            this.promptQuality(list, async (quality) => {
+                try {
+                    await API.bili.downloadBatch(list, quality);
+                    Toast.success('批量下载任务已启动');
+                    this.toggleMultiSelect(); // Reset multi selection
+                    this.showProgressModal();
+                } catch (err) {
+                    Toast.error('启动批量下载失败: ' + err.message);
+                }
+            });
         });
     },
 

@@ -547,6 +547,101 @@ const App = {
         }
     },
 
+    async ensureFFmpeg(onSuccess) {
+        try {
+            const check = await API.transcode.checkFFmpeg();
+            if (check && check.available) {
+                if (onSuccess) onSuccess();
+                return;
+            }
+        } catch (e) {
+            console.error('Check FFmpeg failed', e);
+        }
+
+        Modal.open({
+            title: '⚠️ 缺少 FFmpeg 运行环境',
+            preventClose: false,
+            content: `
+                <div style="padding: 10px 0;">
+                    <p style="font-size: 0.92rem; color: var(--text-secondary); line-height: 1.5; margin-bottom: var(--spacing-md);">
+                        系统未检测到 FFmpeg 环境。B站视频下载、音频合并和视频转码需要本地安装有 FFmpeg 才能正常运行。
+                    </p>
+                    <p style="font-size: 0.92rem; color: var(--text-secondary); line-height: 1.5; margin-bottom: 20px;">
+                        为了保持软件打包体积轻量化，我们不默认捆绑 FFmpeg。您可以点击下方按钮<strong>一键下载并配置静态 FFmpeg 环境</strong>（大小约 15MB）。
+                    </p>
+                    <div id="ffmpeg-dl-progress-container" style="display: none; margin-bottom: 12px;">
+                        <div style="font-size: 0.88rem; margin-bottom: 6px; color: var(--text-primary); font-weight: 500;" id="ffmpeg-dl-status-text">正在初始化下载...</div>
+                        <div style="background: var(--border-color); border-radius: 6px; height: 12px; overflow: hidden; position: relative;">
+                            <div id="ffmpeg-dl-bar" style="background: var(--primary); height: 100%; width: 0%; transition: width 0.3s; border-radius: 6px;"></div>
+                        </div>
+                    </div>
+                </div>
+            `,
+            footer: `
+                <button class="btn btn-secondary" id="btn-ffmpeg-dl-cancel" onclick="Modal.close()">暂不配置</button>
+                <button class="btn btn-primary" id="btn-ffmpeg-dl-start">一键下载配置</button>
+            `,
+            onOpen: () => {
+                const btnStart = document.getElementById('btn-ffmpeg-dl-start');
+                const btnCancel = document.getElementById('btn-ffmpeg-dl-cancel');
+                if (btnStart) {
+                    btnStart.onclick = async () => {
+                        btnStart.disabled = true;
+                        btnCancel.disabled = true;
+                        document.getElementById('ffmpeg-dl-progress-container').style.display = 'block';
+                        
+                        try {
+                            await API.transcode.downloadFFmpeg();
+                            this.pollFFmpegDownloadProgress(onSuccess);
+                        } catch (err) {
+                            Toast.error('启动下载失败: ' + err.message);
+                            btnStart.disabled = false;
+                            btnCancel.disabled = false;
+                        }
+                    };
+                }
+            }
+        });
+    },
+
+    pollFFmpegDownloadProgress(onSuccess) {
+        const text = document.getElementById('ffmpeg-dl-status-text');
+        const bar = document.getElementById('ffmpeg-dl-bar');
+        const btnStart = document.getElementById('btn-ffmpeg-dl-start');
+        const btnCancel = document.getElementById('btn-ffmpeg-dl-cancel');
+        
+        let pollId = setInterval(async () => {
+            try {
+                const st = await API.transcode.downloadFFmpegStatus();
+                
+                if (st.status === 'downloading') {
+                    if (text) text.textContent = `正在下载 FFmpeg / FFprobe ... ${st.progress}%`;
+                    if (bar) bar.style.width = `${st.progress}%`;
+                } else if (st.status === 'unzipping') {
+                    if (text) text.textContent = `正在解压缩并配置环境...`;
+                    if (bar) bar.style.width = `95%`;
+                } else if (st.status === 'completed') {
+                    clearInterval(pollId);
+                    if (text) text.textContent = `配置成功！`;
+                    if (bar) bar.style.width = `100%`;
+                    Toast.success('FFmpeg 环境下载并配置成功！');
+                    setTimeout(() => {
+                        Modal.close();
+                        if (onSuccess) onSuccess();
+                    }, 1200);
+                } else if (st.status === 'failed') {
+                    clearInterval(pollId);
+                    if (text) text.textContent = `配置失败: ${st.error || '未知错误'}`;
+                    Toast.error('配置 FFmpeg 失败: ' + (st.error || '网络超时'));
+                    if (btnStart) btnStart.disabled = false;
+                    if (btnCancel) btnCancel.disabled = false;
+                }
+            } catch (err) {
+                console.error('Poll FFmpeg progress failed', err);
+            }
+        }, 1000);
+    },
+
     showDisclaimer() {
         Modal.open({
             title: '免责声明',

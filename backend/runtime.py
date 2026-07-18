@@ -63,6 +63,13 @@ def configure_runtime():
             if p not in paths and os.path.exists(p):
                 extra_paths.append(p)
                 
+    # Detect user-downloaded ffmpeg folder (created by one-click installer)
+    downloaded_ffmpeg_dir = app_dir() / "ffmpeg"
+    if downloaded_ffmpeg_dir.exists():
+        downloaded_path_str = str(downloaded_ffmpeg_dir.resolve())
+        if downloaded_path_str not in paths:
+            extra_paths.append(downloaded_path_str)
+
     # Detect bundled ffmpeg folder in subtitle_remover (if it exists)
     ffmpeg_base = Path(__file__).resolve().parent / "subtitle_remover" / "backend" / "ffmpeg"
     bundled_ffmpeg_dir = None
