@@ -59,6 +59,14 @@ const App = {
             } catch (e) {
                 // ignore
             }
+
+            // B站登录状态
+            let biliData = { logged_in: false };
+            try {
+                biliData = await API.bili.auth.status();
+            } catch (e) {
+                // ignore
+            }
             
             const prevLoggedIn = this.isDouyinLoggedIn;
             this.isDouyinLoggedIn = !!dyData.logged_in;
@@ -68,7 +76,8 @@ const App = {
                 wechatData.logged_in, 
                 wechatData.expired || wechatData.may_expired,
                 this.isDouyinLoggedIn,
-                !!xhsData.logged_in
+                !!xhsData.logged_in,
+                !!biliData.logged_in
             );
 
             if (this.isDouyinLoggedIn && !prevLoggedIn) {
@@ -113,7 +122,7 @@ const App = {
         }
     },
 
-    updateLoginStatus(loggedIn, mayExpired = false, dyLoggedIn = false, xhsLoggedIn = false) {
+    updateLoginStatus(loggedIn, mayExpired = false, dyLoggedIn = false, xhsLoggedIn = false, biliLoggedIn = false) {
         const wechatDot = document.getElementById('login-status-dot');
         const wechatIndicator = document.getElementById('status-indicator');
         const wechatText = document.getElementById('status-text');
@@ -123,6 +132,9 @@ const App = {
 
         const xhsIndicator = document.getElementById('xhs-status-indicator');
         const xhsText = document.getElementById('xhs-status-text');
+
+        const biliIndicator = document.getElementById('bili-status-indicator');
+        const biliText = document.getElementById('bili-status-text');
 
         // 更新微信状态显示
         if (loggedIn) {
@@ -158,6 +170,15 @@ const App = {
             if (xhsIndicator) xhsIndicator.className = 'status-dot warning';
             if (xhsText) xhsText.textContent = '需要登录 Cookie';
         }
+
+        // 更新B站状态显示
+        if (biliLoggedIn) {
+            if (biliIndicator) biliIndicator.className = 'status-dot online';
+            if (biliText) biliText.textContent = 'Cookie 已配置';
+        } else {
+            if (biliIndicator) biliIndicator.className = 'status-dot warning';
+            if (biliText) biliText.textContent = '需要登录 Cookie';
+        }
     },
 
     initSidebarAccordion() {
@@ -173,7 +194,7 @@ const App = {
     },
 
     toggleNavGroup(targetGroup) {
-        const groups = ['wechat', 'wechat_channels', 'douyin', 'xiaohongshu', 'kuaishou', 'common'];
+        const groups = ['wechat', 'wechat_channels', 'douyin', 'xiaohongshu', 'kuaishou', 'bilibili', 'common'];
         groups.forEach(g => {
             const itemsEl = document.getElementById(`items-${g}`);
             const titleEl = document.querySelector(`.nav-group-title[data-group="${g}"]`);

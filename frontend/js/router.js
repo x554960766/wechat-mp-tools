@@ -48,6 +48,13 @@ const Router = {
             'xhs_notes': typeof XhsNotesPage !== 'undefined' ? XhsNotesPage : null,
             'xhs_download': typeof XhsDownloadPage !== 'undefined' ? XhsDownloadPage : null,
             'xhs_history': typeof XhsHistoryPage !== 'undefined' ? XhsHistoryPage : null,
+
+            // B站页面
+            'bili_login': typeof BiliLoginPage !== 'undefined' ? BiliLoginPage : null,
+            'bili_accounts': typeof BiliAccountsPage !== 'undefined' ? BiliAccountsPage : null,
+            'bili_videos': typeof BiliVideosPage !== 'undefined' ? BiliVideosPage : null,
+            'bili_download': typeof BiliDownloadPage !== 'undefined' ? BiliDownloadPage : null,
+            'bili_history': typeof BiliHistoryPage !== 'undefined' ? BiliHistoryPage : null,
         };
 
         // 监听 hash 变化
@@ -85,7 +92,7 @@ const Router = {
         if (pageKey.startsWith('dy_')) {
             document.body.classList.add('dy-theme');
             document.body.classList.remove('wechat-theme');
-        } else if (['login', 'accounts', 'articles', 'download', 'history', 'channels'].includes(pageKey) || pageKey.startsWith('channels_') || pageKey.startsWith('xhs_') || pageKey.startsWith('ks_')) {
+        } else if (['login', 'accounts', 'articles', 'download', 'history', 'channels'].includes(pageKey) || pageKey.startsWith('channels_') || pageKey.startsWith('xhs_') || pageKey.startsWith('ks_') || pageKey.startsWith('bili_')) {
             document.body.classList.remove('dy-theme');
             document.body.classList.add('wechat-theme');
         } else if (!document.body.classList.contains('dy-theme') && !document.body.classList.contains('wechat-theme')) {
@@ -272,7 +279,6 @@ const Router = {
             }
         });
 
-        // 依据当前激活页，自动展开对应侧边栏分组，收起其他分组
         let activeGroup = 'wechat'; // 默认微信
         if (activeKey.startsWith('dy_')) {
             activeGroup = 'douyin';
@@ -280,13 +286,15 @@ const Router = {
             activeGroup = 'xiaohongshu';
         } else if (activeKey.startsWith('ks_')) {
             activeGroup = 'kuaishou';
+        } else if (activeKey.startsWith('bili_')) {
+            activeGroup = 'bilibili';
         } else if (activeKey.startsWith('channels_') || activeKey === 'channels') {
             activeGroup = 'wechat_channels';
         } else if (['transcode', 'proxy', 'settings'].includes(activeKey)) {
             activeGroup = 'common';
         }
 
-        const groups = ['wechat', 'wechat_channels', 'douyin', 'xiaohongshu', 'kuaishou', 'common'];
+        const groups = ['wechat', 'wechat_channels', 'douyin', 'xiaohongshu', 'kuaishou', 'bilibili', 'common'];
         groups.forEach(g => {
             const itemsEl = document.getElementById(`items-${g}`);
             const titleEl = document.querySelector(`.nav-group-title[data-group="${g}"]`);

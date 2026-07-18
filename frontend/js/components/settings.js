@@ -107,6 +107,36 @@ const SettingsPage = {
                     </div>
                 </div>
 
+                <!-- B站下载配置 -->
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">📺 Bilibili 下载配置</h3>
+                    </div>
+                    <div class="card-body" style="padding: 0 var(--spacing-md) var(--spacing-md);">
+                        <div class="form-group" style="margin-top: var(--spacing-md);">
+                            <label class="form-label" for="setting-bili-quality">默认视频分辨率</label>
+                            <select class="form-input" id="setting-bili-quality">
+                                <option value="vip">1080P 高码率 / 4K (需要登录大会员账号)</option>
+                                <option value="1080p">1080P 普通 (需要登录普通账号)</option>
+                                <option value="720p">720P 高清 (未登录默认)</option>
+                                <option value="360p">360P 标清 (省流/防卡顿)</option>
+                            </select>
+                            <div class="form-hint">未登录状态下，即便选择 1080P/4K，B站 接口也会降级返回 720P。</div>
+                        </div>
+
+                        <div class="form-group" style="display: flex; gap: 24px; margin-top: var(--spacing-md);">
+                            <label class="form-checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
+                                <input type="checkbox" id="setting-bili-danmaku" style="width: 18px; height: 18px; accent-color: var(--primary);" />
+                                <span>下载弹幕并转为 ASS 轴</span>
+                            </label>
+                            <label class="form-checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
+                                <input type="checkbox" id="setting-bili-subtitle" style="width: 18px; height: 18px; accent-color: var(--primary);" />
+                                <span>下载内置字幕并转为 SRT</span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- RSS 订阅配置 -->
                 <div class="card">
                     <div class="card-header">
@@ -226,6 +256,10 @@ const SettingsPage = {
         const rssEndMinute = document.getElementById('setting-rss-end-minute');
         const rssUploadEnabled = document.getElementById('setting-rss-upload-enabled');
         const rssUploadUrl = document.getElementById('setting-rss-upload-url');
+        
+        const biliQuality = document.getElementById('setting-bili-quality');
+        const biliDanmaku = document.getElementById('setting-bili-danmaku');
+        const biliSubtitle = document.getElementById('setting-bili-subtitle');
 
         if (dirInput) dirInput.value = data.download_dir || '';
         if (concurrentInput) concurrentInput.value = data.concurrent_downloads || 1;
@@ -244,6 +278,10 @@ const SettingsPage = {
         if (rssEndMinute) rssEndMinute.value = data.rss_end_minute !== undefined ? data.rss_end_minute : 0;
         if (rssUploadEnabled) rssUploadEnabled.checked = data.rss_upload_enabled !== undefined ? !!data.rss_upload_enabled : false;
         if (rssUploadUrl) rssUploadUrl.value = data.rss_upload_url || '';
+        
+        if (biliQuality) biliQuality.value = data.bili_video_quality || '1080p';
+        if (biliDanmaku) biliDanmaku.checked = data.bili_download_danmaku !== undefined ? !!data.bili_download_danmaku : true;
+        if (biliSubtitle) biliSubtitle.checked = data.bili_download_subtitle !== undefined ? !!data.bili_download_subtitle : true;
         this.toggleRssUpload();
         this.syncRssEndMinute();
     },
@@ -289,6 +327,10 @@ const SettingsPage = {
         const rssEndMinute = document.getElementById('setting-rss-end-minute');
         const rssUploadEnabled = document.getElementById('setting-rss-upload-enabled');
         const rssUploadUrl = document.getElementById('setting-rss-upload-url');
+        
+        const biliQuality = document.getElementById('setting-bili-quality');
+        const biliDanmaku = document.getElementById('setting-bili-danmaku');
+        const biliSubtitle = document.getElementById('setting-bili-subtitle');
 
         const request_delay = parseFloat(delayInput.value);
         if (isNaN(request_delay) || request_delay < 0.1) {
@@ -314,6 +356,9 @@ const SettingsPage = {
             rss_end_minute: rssEndMinute && !rssEndMinute.disabled ? parseInt(rssEndMinute.value) : 0,
             rss_upload_enabled: rssUploadEnabled ? rssUploadEnabled.checked : false,
             rss_upload_url: rssUploadUrl ? rssUploadUrl.value.trim() : '',
+            bili_video_quality: biliQuality ? biliQuality.value : '1080p',
+            bili_download_danmaku: biliDanmaku ? biliDanmaku.checked : true,
+            bili_download_subtitle: biliSubtitle ? biliSubtitle.checked : true,
         };
 
         try {
@@ -345,6 +390,9 @@ const SettingsPage = {
                 rss_end_minute: 0,
                 rss_upload_enabled: false,
                 rss_upload_url: '',
+                bili_video_quality: '1080p',
+                bili_download_danmaku: true,
+                bili_download_subtitle: true,
             };
             try {
                 await API.settings.save(defaults);

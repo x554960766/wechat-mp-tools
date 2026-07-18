@@ -47,13 +47,18 @@ const Modal = {
 
         this._onClose = onClose;
         this.overlay.classList.add('active');
+        if (options.onOpen) {
+            options.onOpen();
+        }
     },
 
-    close() {
+    close(isConfirmed = false) {
         if (!this.overlay) return;
         this.overlay.classList.remove('active');
         this.dialog.classList.remove('theme-white');
-        if (this._onClose) this._onClose();
+        const onClose = this._onClose;
+        this._onClose = null;
+        if (!isConfirmed && onClose) onClose();
     },
 
     confirm(title, message, onConfirm, options = {}) {

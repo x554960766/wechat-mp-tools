@@ -284,5 +284,32 @@ const API = {
         download(url)   { return API.post('/api/version/download', { url }); },
         progress()      { return API.get('/api/version/download-progress', { showError: false }); },
         openFolder()    { return API.post('/api/version/open-update-folder'); },
+    },
+
+    // ── Bilibili Downloader API ──────────────────────────
+    bili: {
+        auth: {
+            status()            { return API.get('/api/bilibili-auth/status', { showError: false }); },
+            generateQrcode()    { return API.get('/api/bilibili-auth/qrcode/generate'); },
+            pollQrcode(key)     { return API.post('/api/bilibili-auth/qrcode/poll', { qrcode_key: key }); },
+            saveCookie(c)       { return API.post('/api/bilibili-auth/save-cookie', { cookie: c }); },
+            logout()            { return API.post('/api/bilibili-auth/logout'); },
+        },
+        detectUrl(url)          { return API.post('/api/bilibili/detect-url', { url }); },
+        downloadSingle(url, p, quality)  { return API.post('/api/bilibili/download-single', { url, pages: p, quality }); },
+        listAccounts()          { return API.get('/api/bilibili/accounts'); },
+        parseUser(url)          { return API.post('/api/bilibili/accounts/parse', { url }); },
+        addAccount(user)        { return API.post('/api/bilibili/accounts', user); },
+        removeAccount(mid)      { return API.delete(`/api/bilibili/accounts/${mid}`); },
+        listVideos(mid, page=1) { return API.get(`/api/bilibili/accounts/${mid}/videos?page=${page}`); },
+        downloadBatch(items, quality)    { return API.post('/api/bilibili/download-batch', { items, quality }); },
+        progress()              { return API.get('/api/bilibili/progress', { showError: false }); },
+        cancelDownload()        { return API.post('/api/bilibili/cancel-download'); },
+        getHistory()            { return API.get('/api/bilibili/history'); },
+        clearHistory()          { return API.delete('/api/bilibili/history'); },
+        deleteHistory(index)    { return API.delete(`/api/bilibili/history/${index}`); },
+        openFolder()            { return API.post('/api/bilibili/open-folder'); },
+        openFile(path)          { return API.post('/api/bilibili/open-file', { path }); },
+        openParent(path)        { return API.post('/api/bilibili/open-parent', { path }); },
     }
 };

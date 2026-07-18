@@ -60,6 +60,8 @@ from backend.channels import channels_bp
 from backend.transcode import transcode_bp
 from backend.xiaohongshu import xhs_bp
 from backend.xiaohongshu_login import xhs_login_bp
+from backend.bilibili import bilibili_bp
+from backend.bilibili_login import bilibili_login_bp
 from backend.updater import updater_bp
 
 # ── Flask 应用 ────────────────────────────────────────────
@@ -87,6 +89,8 @@ app.register_blueprint(channels_bp)
 app.register_blueprint(transcode_bp)
 app.register_blueprint(xhs_bp)
 app.register_blueprint(xhs_login_bp)
+app.register_blueprint(bilibili_bp)
+app.register_blueprint(bilibili_login_bp)
 app.register_blueprint(updater_bp)
 
 
