@@ -1003,26 +1003,48 @@ ffmpeg_download_lock = threading.Lock()
 def download_ffmpeg_worker():
     global ffmpeg_download_status
     
-    # ffbinaries static urls
-    platform = sys.platform
-    plat_key = None
-    if platform == "win32":
-        plat_key = "win-64"
-    elif platform == "darwin":
-        plat_key = "osx-64"
-    elif "linux" in platform:
-        plat_key = "linux-64"
+    import platform as plat_mod
+    
+    sys_platform = sys.platform
+    machine = plat_mod.machine().lower()  # arm64, x86_64, AMD64, etc.
+    
+    # Determine download URLs per platform + architecture
+    download_urls = None
+    
+    if sys_platform == "darwin":
+        if machine in ("arm64", "aarch64"):
+            # Apple Silicon: use martin-riedl.de native ARM64 builds
+            download_urls = {
+                "ffmpeg": "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/snapshot/ffmpeg.zip",
+                "ffprobe": "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/snapshot/ffprobe.zip",
+            }
+        else:
+            # Intel Mac: use ffbinaries
+            download_urls = {
+                "ffmpeg": "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-osx-64.zip",
+                "ffprobe": "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffprobe-4.4.1-osx-64.zip",
+            }
+    elif sys_platform == "win32":
+        download_urls = {
+            "ffmpeg": "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-win-64.zip",
+            "ffprobe": "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffprobe-4.4.1-win-64.zip",
+        }
+    elif "linux" in sys_platform:
+        download_urls = {
+            "ffmpeg": "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffmpeg-4.4.1-linux-64.zip",
+            "ffprobe": "https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/ffprobe-4.4.1-linux-64.zip",
+        }
         
-    if not plat_key:
+    if not download_urls:
         with ffmpeg_download_lock:
-            ffmpeg_download_status = {"status": "failed", "progress": 0, "error": f"不支持的系统平台: {platform}"}
+            ffmpeg_download_status = {"status": "failed", "progress": 0, "error": f"不支持的系统平台: {sys_platform} ({machine})"}
         return
 
     from backend.runtime import app_dir
     dest_dir = app_dir() / "ffmpeg"
     dest_dir.mkdir(parents=True, exist_ok=True)
     
-    components = ["ffmpeg", "ffprobe"]
+    components = list(download_urls.keys())
     
     try:
         import requests
@@ -1030,7 +1052,7 @@ def download_ffmpeg_worker():
         import stat
         
         for idx, comp in enumerate(components):
-            download_url = f"https://github.com/ffbinaries/ffbinaries-prebuilt/releases/download/v4.4.1/{comp}-4.4.1-{plat_key}.zip"
+            download_url = download_urls[comp]
             zip_path = app_dir() / f"{comp}_temp.zip"
             
             with ffmpeg_download_lock:
@@ -1040,7 +1062,7 @@ def download_ffmpeg_worker():
                     "error": None
                 }
                 
-            r = requests.get(download_url, stream=True, timeout=30)
+            r = requests.get(download_url, stream=True, timeout=(15, 120), allow_redirects=True)
             r.raise_for_status()
             
             total_size = int(r.headers.get('content-length', 0))
@@ -1078,6 +1100,17 @@ def download_ffmpeg_worker():
                     os.chmod(item, st.st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
                 except Exception:
                     pass
+        
+        # macOS: remove quarantine extended attribute to bypass Gatekeeper
+        if sys_platform == "darwin":
+            try:
+                import subprocess
+                subprocess.run(
+                    ["xattr", "-dr", "com.apple.quarantine", str(dest_dir)],
+                    capture_output=True, timeout=10
+                )
+            except Exception:
+                pass
                     
         # Update current process PATH
         path_env = os.environ.get("PATH", "")

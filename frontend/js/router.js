@@ -84,7 +84,9 @@ const Router = {
         }
 
         if ((pageKey === 'transcode' || pageKey === 'dy_transcode') && App.ffmpegAvailable === false) {
-            window.location.hash = '#login';
+            App.ensureFFmpeg(() => {
+                window.location.hash = '#' + pageKey;
+            });
             return;
         }
 

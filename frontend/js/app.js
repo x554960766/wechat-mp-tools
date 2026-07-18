@@ -625,6 +625,8 @@ const App = {
                     if (text) text.textContent = `配置成功！`;
                     if (bar) bar.style.width = `100%`;
                     Toast.success('FFmpeg 环境下载并配置成功！');
+                    // Refresh global FFmpeg state: show transcode nav & enable related buttons
+                    await this.checkFFmpegStatus();
                     setTimeout(() => {
                         Modal.close();
                         if (onSuccess) onSuccess();
