@@ -140,25 +140,19 @@ def _run_certutil(args, check=False):
 
     PyInstaller prepends sys._MEIPASS to the process PATH, so a spawned certutil.exe
     resolves its dependent DLLs from the bundle dir and fails to initialize with
-    STATUS_DLL_INIT_FAILED (0xc0000142). The previous fix used a process-global
-    SetDllDirectoryW hack, which is racy when several subprocesses run concurrently
-    (e.g. on shutdown: restore-proxy + uninstall-cert), explaining the intermittent crash.
-
-    Instead we give the child a sanitized, per-process environment: absolute certutil
-    path under System32, PATH stripped of _MEIPASS, and cwd=System32. No global state.
+    STATUS_DLL_INIT_FAILED (0xc0000142). To resolve this robustly, we isolate the
+    child process by setting its PATH environment variable to ONLY contain Windows
+    system directories (System32 and SystemRoot), preventing any third-party or
+    packaged DLLs from polluting the search path.
     """
     if sys.platform == "win32":
         system_root = os.environ.get("SystemRoot", r"C:\Windows")
         system32 = os.path.join(system_root, "System32")
         certutil = os.path.join(system32, "certutil.exe")
         env = os.environ.copy()
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            mp = os.path.normcase(os.path.normpath(meipass))
-            env["PATH"] = os.pathsep.join(
-                p for p in env.get("PATH", "").split(os.pathsep)
-                if p and os.path.normcase(os.path.normpath(p)) != mp
-            )
+        # Force the PATH to contain ONLY system paths to completely isolate certutil.exe
+        # from any outside or packaged DLLs that might conflict.
+        env["PATH"] = f"{system32}{os.pathsep}{system_root}"
         return subprocess.run(
             [certutil] + list(args),
             capture_output=True, check=check, env=env, cwd=system32,
