@@ -7,7 +7,7 @@ from backend.tools.constant import InpaintMode, SubtitleDetectMode
 import configparser
 
 # 项目版本号
-VERSION = "1.6.3"
+VERSION = "1.6.4"
 PROJECT_HOME_URL = "https://github.com/YaoFANGUK/video-subtitle-remover"
 PROJECT_ISSUES_URL = PROJECT_HOME_URL + "/issues"
 PROJECT_RELEASES_URL = PROJECT_HOME_URL + "/releases"

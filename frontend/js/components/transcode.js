@@ -788,7 +788,8 @@ function escapeHtml(text) {
 }
 
 function escapeSingleQuotes(str) {
-    return String(str).replace(/'/g, "\\'");
+    if (!str) return '';
+    return String(str).replace(/\\/g, '/').replace(/'/g, "\\'");
 }
 
 function ensure_drag_drop_styles() {

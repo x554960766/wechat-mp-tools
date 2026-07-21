@@ -6,7 +6,7 @@
 
 > [!TIP]
 > **无需配置本地开发环境，开箱即用！**
-> 本项目已通过 GitHub Actions 自动构建出 Windows 与 macOS 的可执行客户端。请直接前往 [👉 GitHub Releases 1.6.3 下载页面](https://github.com/x554960766/wechat-mp-tools/releases/tag/v1.6.3) 下载最新版本。
+> 本项目已通过 GitHub Actions 自动构建出 Windows 与 macOS 的可执行客户端。请直接前往 [👉 GitHub Releases 1.6.4 下载页面](https://github.com/x554960766/wechat-mp-tools/releases/tag/v1.6.4) 下载最新版本。
 
 ---
 
@@ -51,11 +51,11 @@
 - **弹幕与CC字幕转换**：支持将 B 站 XML/Protobuf 弹幕转换为 ASS 格式，CC 字幕提取并自动转为 SRT/ASS 字幕。
 - **扫码与 Cookie 登录**：支持官方二维码扫码登录和手动粘贴 Cookie，且支持自动检测并显示失效状态，支持获取 1080P/4K 高画质视频。
 
-### 🎬 视频转码
+### 🎬 视频转码（1.6.4 优化）
 - 自动扫描已下载的视频流，或拖入本地视频进行转码。
 - 支持 MP4、MKV、MOV、WebM 和 MP3 音频提取。
 - 支持 H.264/H.265 编码，内置硬件加速（VideoToolbox/NVENC/QSV）及三阶段智能体积压缩兜底逻辑。
-- **环境自愈**：启动时自动将 Homebrew 及项目内置的 `ffmpeg` 路径添加至 `PATH`，若缺少环境则自动在前端隐藏相关菜单与按钮。
+- **环境自愈与体验优化**：自动探测并优先加载系统与应用内置的 FFmpeg 环境。未检测到环境时引导一键自动下载配置，且下载完成后自动刷新生效；全平台完美兼容 Windows 与 macOS 目录下文件高亮定位与目录打开功能。
 
 ---
 

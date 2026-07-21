@@ -51,9 +51,12 @@ def get_video_metadata(file_path: str) -> dict:
         file_path
     ]
     try:
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="ignore", timeout=10)
         if result.returncode != 0:
             return {"error": f"ffprobe 执行失败: {result.stderr}"}
+        
+        if not result.stdout or not result.stdout.strip():
+            return {"error": "ffprobe 未能解析出有效元数据 (输出为空)"}
         
         data = json.loads(result.stdout)
         format_info = data.get("format", {})
@@ -913,20 +916,21 @@ def open_parent():
         if not path.exists():
             return jsonify({"error": "文件不存在"}), 404
             
+        resolved_path = str(path.resolve())
         if path.is_file():
             if sys.platform == "darwin":
-                subprocess.run(["open", "-R", str(path)])
+                subprocess.run(["open", "-R", resolved_path])
             elif sys.platform == "win32":
-                subprocess.run(["explorer", f"/select,{path}"])
+                subprocess.run(f'explorer /select,"{resolved_path}"', shell=True)
             else:
-                subprocess.run(["xdg-open", str(path.parent)])
+                subprocess.run(["xdg-open", str(path.parent.resolve())])
         else:
             if sys.platform == "darwin":
-                subprocess.run(["open", str(path)])
+                subprocess.run(["open", resolved_path])
             elif sys.platform == "win32":
-                subprocess.run(["explorer", str(path)])
+                os.startfile(resolved_path)
             else:
-                subprocess.run(["xdg-open", str(path)])
+                subprocess.run(["xdg-open", resolved_path])
         return jsonify({"message": "已打开"})
     except Exception as e:
         return jsonify({"error": f"打开失败: {str(e)}"}), 500

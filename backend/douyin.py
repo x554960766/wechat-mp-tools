@@ -2296,14 +2296,14 @@ def open_parent():
             if sys.platform == "darwin":
                 subprocess.run(["open", "-R", str(path)])
             elif sys.platform == "win32":
-                subprocess.run(["explorer", f"/select,{path}"])
+                subprocess.run(f'explorer /select,"{path.resolve()}"', shell=True)
             else:
                 subprocess.run(["xdg-open", str(path.parent)])
         else:
             if sys.platform == "darwin":
                 subprocess.run(["open", str(path)])
             elif sys.platform == "win32":
-                subprocess.run(["explorer", str(path)])
+                subprocess.run(f'explorer "{path.resolve()}"', shell=True)
             else:
                 subprocess.run(["xdg-open", str(path)])
         return jsonify({"message": "已打开"})

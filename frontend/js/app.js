@@ -107,17 +107,12 @@ const App = {
         try {
             const data = await API.transcode.checkFFmpeg();
             const transcodeNav = document.getElementById('nav-transcode');
-            if (data && data.available) {
-                if (transcodeNav) transcodeNav.style.display = 'flex';
-                this.ffmpegAvailable = true;
-            } else {
-                if (transcodeNav) transcodeNav.style.display = 'none';
-                this.ffmpegAvailable = false;
-            }
+            if (transcodeNav) transcodeNav.style.display = 'flex';
+            this.ffmpegAvailable = !!(data && data.available);
         } catch (err) {
             console.error('Failed to check ffmpeg status:', err);
             const transcodeNav = document.getElementById('nav-transcode');
-            if (transcodeNav) transcodeNav.style.display = 'none';
+            if (transcodeNav) transcodeNav.style.display = 'flex';
             this.ffmpegAvailable = false;
         }
     },
@@ -622,14 +617,13 @@ const App = {
                     if (bar) bar.style.width = `95%`;
                 } else if (st.status === 'completed') {
                     clearInterval(pollId);
-                    if (text) text.textContent = `配置成功！`;
+                    if (text) text.textContent = `配置成功！即将自动刷新...`;
                     if (bar) bar.style.width = `100%`;
                     Toast.success('FFmpeg 环境下载并配置成功！');
-                    // Refresh global FFmpeg state: show transcode nav & enable related buttons
                     await this.checkFFmpegStatus();
                     setTimeout(() => {
                         Modal.close();
-                        if (onSuccess) onSuccess();
+                        window.location.reload();
                     }, 1200);
                 } else if (st.status === 'failed') {
                     clearInterval(pollId);
