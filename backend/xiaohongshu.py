@@ -235,11 +235,28 @@ class XhsClient:
             print(f"Error resolving short link {url}: {e}")
             return url
 
+    def extract_profile_url(self, text: str) -> str:
+        """从任意包含文字和链接的字符串中提取博主主页链接，并自动还原短链"""
+        text = text.strip()
+        profile_pattern = re.compile(r"(?:https?://)?(?:www\.)?xiaohongshu\.com/user/profile/[a-zA-Z0-9_-]+")
+        match = profile_pattern.search(text)
+        if match:
+            url = match.group(0)
+            return url if url.startswith("http") else "https://" + url
+
+        short_pattern = re.compile(r"(?:https?://)?xhslink\.(?:com|cn)/[^\s\"<>\\^`{|}，。；！？、【】《》]+")
+        match = short_pattern.search(text)
+        if match:
+            resolved = self.resolve_short_link(match.group(0))
+            return resolved
+
+        return text
+
     def extract_links(self, text: str) -> list[str]:
         words = text.split()
         results = []
         
-        short_pattern = re.compile(r"(?:https?://)?xhslink\.com/[^\s\"<>\\^`{|}，。；！？、【】《》]+")
+        short_pattern = re.compile(r"(?:https?://)?xhslink\.(?:com|cn)/[^\s\"<>\\^`{|}，。；！？、【】《》]+")
         share_pattern = re.compile(r"(?:https?://)?(?:www\.)?xiaohongshu\.com/discovery/item/\S+")
         link_pattern = re.compile(r"(?:https?://)?(?:www\.)?xiaohongshu\.com/explore/\S+")
         user_note_pattern = re.compile(r"(?:https?://)?(?:www\.)?xiaohongshu\.com/user/profile/[a-z0-9]+/\S+")
@@ -657,6 +674,7 @@ class XhsClient:
         return notes_list
 
     def get_user_profile(self, url: str) -> dict:
+        url = self.extract_profile_url(url)
         state = self.get_initial_state(url)
         user_data = state.get("user", {})
         page_data = user_data.get("userPageData", {})
