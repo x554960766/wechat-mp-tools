@@ -192,13 +192,36 @@ def check_cert_trusted():
                 if has_valid_trust_count(out.stdout):
                     return True
                     
+            # 4. Fallback: use security verify-cert to directly validate the CA against
+            #    the system trust chain. This handles edge cases where third-party VPN
+            #    software (e.g. Sangfor, Clash) modifies the trust-settings domain layout
+            #    and our CA trust entry is not visible via dump-trust-settings.
+            if CA_CERT_PATH.exists():
+                try:
+                    out_v = subprocess.run(
+                        ["security", "verify-cert", "-c", str(CA_CERT_PATH)],
+                        capture_output=True, text=True, timeout=5
+                    )
+                    if out_v.returncode == 0:
+                        print("check_cert_trusted: trust-settings scan missed, but verify-cert confirmed CA is trusted")
+                        return True
+                except Exception:
+                    pass
+
             return False
         except Exception:
             return False
     elif sys.platform == "win32":
         try:
+            # Check user store first
             out = _run_certutil(["-verifystore", "-user", "root", "Channels Interceptor CA"])
-            return out.returncode == 0
+            if out.returncode == 0:
+                return True
+            # Also check LocalMachine store (some tools like dev-sidecar install there)
+            out2 = _run_certutil(["-verifystore", "root", "Channels Interceptor CA"])
+            if out2.returncode == 0:
+                return True
+            return False
         except Exception:
             return False
     return False
@@ -208,9 +231,19 @@ def install_system_cert(ca_cert_path):
         return True
         
     if sys.platform == "darwin":
-        # Try to delete from user keychains to prevent duplicates/conflicts
+        # Delete from ALL keychains to prevent duplicates/conflicts with stale entries
+        for kc_flag in ("-c",):
+            try:
+                subprocess.run(["security", "delete-certificate", kc_flag, "Channels Interceptor CA"], capture_output=True)
+            except Exception:
+                pass
+        # Also remove from System keychain explicitly (may fail without admin, that's OK)
         try:
-            subprocess.run(["security", "delete-certificate", "-c", "Channels Interceptor CA"], capture_output=True)
+            subprocess.run(
+                ["security", "delete-certificate", "-c", "Channels Interceptor CA",
+                 "/Library/Keychains/System.keychain"],
+                capture_output=True
+            )
         except Exception:
             pass
             
@@ -341,6 +374,13 @@ def set_windows_proxy(enabled, host="127.0.0.1", port=5202):
         if enabled:
             winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
             winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, f"{host}:{port}")
+            # Clear ProxyOverride set by dev-sidecar or other tools that might
+            # bypass our proxy for target domains. We need channels.weixin.qq.com
+            # to go through our MITM proxy, so any override rules must be removed.
+            try:
+                winreg.DeleteValue(key, "ProxyOverride")
+            except FileNotFoundError:
+                pass  # No ProxyOverride set, that's fine
         else:
             winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
         winreg.CloseKey(key)
@@ -547,7 +587,43 @@ class ChannelsAddon:
                 print(f"[Proxy] Error hooking JS bundle: {ex}", flush=True)
             return
 
-        # 2. Check for channels.weixin.qq.com / mp.weixin.qq.com HTML
+        # 2. Handle 302 redirect on /web/pages/feed — prevent redirect to home page
+        #    (Borrowed from wx_channels_download: when the feed page returns 302,
+        #     re-fetch with modified query params to get the actual page content)
+        if host == "channels.weixin.qq.com":
+            path_only = flow.request.path.split("?", 1)[0]
+            if path_only == "/web/pages/feed" and flow.response.status_code == 302:
+                try:
+                    import urllib.parse
+                    original_url = flow.request.url
+                    parsed = urllib.parse.urlparse(original_url)
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    qs["flow"] = ["2"]
+                    qs["fpid"] = ["FinderLike"]
+                    qs["bus"] = [str(int(time.time()))]
+                    qs["entrance_id"] = ["1002"]
+                    qs["wx_header"] = ["0"]
+                    new_query = urllib.parse.urlencode(qs, doseq=True)
+                    retry_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
+                    headers = dict(flow.request.headers)
+                    headers.pop("accept-encoding", None)
+                    headers.pop("Accept-Encoding", None)
+                    resp2 = __import__("requests").get(
+                        retry_url, headers=headers, timeout=10,
+                        allow_redirects=False, verify=False
+                    )
+                    if resp2.status_code == 200:
+                        from mitmproxy import http
+                        flow.response = http.Response.make(
+                            200, resp2.content,
+                            {"Content-Type": resp2.headers.get("Content-Type", "text/html; charset=utf-8")}
+                        )
+                        content_type = flow.response.headers.get("content-type", "").lower()
+                        print(f"[Proxy] Intercepted 302 on /web/pages/feed, re-fetched successfully", flush=True)
+                except Exception as ex302:
+                    print(f"[Proxy] Failed to intercept 302 on /web/pages/feed: {ex302}", flush=True)
+
+        # 3. Check for channels.weixin.qq.com / mp.weixin.qq.com HTML
         if "text/html" not in content_type:
             return
 
@@ -1373,10 +1449,64 @@ class ProxyManager:
             print(f"Error starting ProxyManager: mitmproxy is not installed in this Python environment. {e}")
             raise RuntimeError("未检测到 mitmproxy 依赖，请确保您是在虚拟环境 venv312 下运行项目（当前 Python 缺少 mitmproxy 库）。")
 
+        # 0. 检测系统代理是否已被其他软件占用（VPN/Clash/dev-sidecar 等）
+        if sys.platform == "darwin":
+            try:
+                service = get_active_mac_service()
+                for proxy_cmd in ("getwebproxy", "getsecurewebproxy"):
+                    out = subprocess.run(
+                        ["networksetup", f"-{proxy_cmd}", service],
+                        capture_output=True, text=True, timeout=3
+                    )
+                    if out.returncode == 0:
+                        lines = out.stdout.strip().splitlines()
+                        enabled_line = [l for l in lines if l.startswith("Enabled:")]
+                        port_line = [l for l in lines if l.startswith("Port:")]
+                        if enabled_line and "Yes" in enabled_line[0]:
+                            conflict_port = port_line[0].split(":", 1)[1].strip() if port_line else "?"
+                            if conflict_port != str(self.port):
+                                print(f"[WARNING] 系统代理已被其他软件占用 (端口 {conflict_port})，"
+                                      f"将强制覆盖为 MITM 代理端口 {self.port}。"
+                                      f"如果您正在使用 VPN/Clash，请先关闭它们的系统代理设置。")
+            except Exception as ex:
+                print(f"[WARNING] 检测系统代理状态失败: {ex}")
+        elif sys.platform == "win32":
+            try:
+                import winreg
+                key = winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                    0, winreg.KEY_READ
+                )
+                try:
+                    proxy_enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
+                    if proxy_enable:
+                        proxy_server, _ = winreg.QueryValueEx(key, "ProxyServer")
+                        if proxy_server and str(self.port) not in str(proxy_server):
+                            print(f"[WARNING] Windows 系统代理已被其他软件占用 ({proxy_server})，"
+                                  f"将强制覆盖为 MITM 代理端口 {self.port}。"
+                                  f"如果您正在使用 dev-sidecar/Clash/VPN，请先关闭它们的系统代理。")
+                except FileNotFoundError:
+                    pass
+                # Check if ProxyOverride might bypass our target domains
+                try:
+                    proxy_override, _ = winreg.QueryValueEx(key, "ProxyOverride")
+                    if proxy_override:
+                        print(f"[WARNING] 检测到 Windows ProxyOverride 设置: {proxy_override}，"
+                              f"某些域名可能绕过 MITM 代理。将在设置代理时清除此项。")
+                except FileNotFoundError:
+                    pass
+                winreg.CloseKey(key)
+            except Exception as ex:
+                print(f"[WARNING] 检测 Windows 系统代理状态失败: {ex}")
+
         ensure_ca_certificates()
 
         # 1. 安装并信任证书
-        install_system_cert(CA_CERT_PATH)
+        cert_ok = install_system_cert(CA_CERT_PATH)
+        if not cert_ok:
+            print("[WARNING] CA 证书可能未被系统信任，MITM 拦截可能失败。"
+                  "请检查是否有其他 VPN/安全软件的证书冲突。")
 
         # 2. 把我们的 CA 喂给 mitmproxy
         confdir = prepare_mitm_confdir()
