@@ -14,7 +14,7 @@ from pathlib import Path
 from backend.runtime import app_dir
 
 # ── 版本号 ────────────────────────────────────────────────
-APP_VERSION = "1.6.5"
+APP_VERSION = "1.7.0"
 
 # ── 路径配置 ──────────────────────────────────────────────
 if getattr(sys, 'frozen', False):
@@ -33,6 +33,7 @@ DOWNLOAD_HISTORY_FILE = DATA_DIR / "download_history.json"
 
 # ── 微信 API 配置 ─────────────────────────────────────────
 BASE_URL = "https://mp.weixin.qq.com"
+WEREAD_PLATFORM_URL = "https://weread.111965.xyz"
 DEFAULT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "

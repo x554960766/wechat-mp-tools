@@ -11,23 +11,23 @@ const AccountsPage = {
                 <p class="page-description">搜索、收藏和管理您关注的微信公众号</p>
             </div>
 
-            <!-- 搜索区域 -->
+            <!-- 搜索与添加区域 -->
             <div class="card" style="margin-bottom: var(--spacing-lg);">
                 <div class="card-header">
-                    <h3 class="card-title">🔍 搜索公众号</h3>
+                    <h3 class="card-title">🔗 解析并添加公众号</h3>
                 </div>
                 <div style="display: flex; gap: var(--spacing-sm);">
                     <div class="search-box" style="flex: 1; max-width: none;">
                         <svg class="search-icon" viewBox="0 0 24 24" fill="none">
-                            <circle cx="11" cy="11" r="8" stroke="currentColor" stroke-width="2"/>
-                            <line x1="21" y1="21" x2="16.65" y2="16.65" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                            <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                            <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
                         </svg>
                         <input type="text" class="form-input" id="search-account-input"
-                               placeholder="输入公众号名称搜索..."
+                               placeholder="请粘贴该公众号的任意文章链接（如 https://mp.weixin.qq.com/s/...）以解析添加..."
                                onkeydown="if(event.key==='Enter') AccountsPage.search()">
                     </div>
                     <button class="btn btn-primary" onclick="AccountsPage.search()" id="btn-search-account">
-                        搜索
+                        解析添加
                     </button>
                 </div>
                 <div id="search-results" class="search-results"></div>

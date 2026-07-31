@@ -57,8 +57,25 @@ class RssScheduler:
 
     # ── 订阅管理 ──────────────────────────────────────────
 
+    @staticmethod
+    def _is_legacy_fakeid(fakeid: str) -> bool:
+        if not fakeid:
+            return True
+        fid = str(fakeid).strip()
+        if fid.endswith("="):
+            return True
+        if not fid.startswith("MP_WXS_") and len(fid) >= 16 and not fid.isdigit():
+            return True
+        return False
+
     def get_subscriptions(self) -> list:
-        return load_json(RSS_SUBSCRIPTIONS_FILE, [])
+        raw_subs = load_json(RSS_SUBSCRIPTIONS_FILE, [])
+        if not isinstance(raw_subs, list):
+            return []
+        valid_subs = [s for s in raw_subs if isinstance(s, dict) and not self._is_legacy_fakeid(s.get("fakeid"))]
+        if len(valid_subs) != len(raw_subs):
+            save_json(RSS_SUBSCRIPTIONS_FILE, valid_subs)
+        return valid_subs
 
     def _save_subscriptions(self, subs: list):
         save_json(RSS_SUBSCRIPTIONS_FILE, subs)

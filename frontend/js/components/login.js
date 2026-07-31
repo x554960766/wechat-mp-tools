@@ -53,7 +53,7 @@ const LoginPage = {
             <div class="page-header" style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;">
                 <div>
                     <h2 class="page-title">账号池</h2>
-                    <p class="page-description">管理微信公众平台采集账号，支持多账号自动轮换</p>
+                    <p class="page-description">管理微信读书采集账号，支持多账号自动轮换</p>
                 </div>
                 <button class="btn btn-primary" id="btn-add-account" onclick="LoginPage.startLogin()">
                     <svg viewBox="0 0 24 24" fill="none" width="18" height="18">
@@ -146,7 +146,7 @@ const LoginPage = {
                 <div class="empty-state" style="text-align: center; padding: 60px 24px;">
                     <div style="font-size: 3rem; margin-bottom: 16px; opacity: 0.4;">🔐</div>
                     <h3 style="color: var(--text-primary); margin-bottom: 8px;">账号池为空</h3>
-                    <p style="color: var(--text-muted); margin-bottom: 24px;">点击「添加账号」按钮扫码登录，添加第一个采集账号</p>
+                    <p style="color: var(--text-muted); margin-bottom: 24px;">点击「添加账号」扫码登录，绑定微信读书采集账号</p>
                     <button class="btn btn-primary" onclick="LoginPage.startLogin()">
                         <svg viewBox="0 0 24 24" fill="none" width="18" height="18">
                             <line x1="12" y1="5" x2="12" y2="19" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
@@ -220,7 +220,7 @@ const LoginPage = {
                     <div>失败: <strong>${acc.failures}</strong></div>
                     <div>风控: <strong>${acc.risk_hits}</strong></div>
                     <div style="grid-column: span 2;">
-                        剩余: <strong style="color: ${acc.remaining_seconds > 86400 ? 'var(--success)' : acc.remaining_seconds > 0 ? 'var(--warning)' : 'var(--error)'};">${remaining}</strong>
+                        有效期: <strong style="color: ${acc.remaining_seconds > 86400 ? 'var(--success)' : acc.remaining_seconds > 0 ? 'var(--warning)' : 'var(--error)'};">${remaining}</strong>
                     </div>
                 </div>
 
@@ -253,14 +253,12 @@ const LoginPage = {
             btn.innerHTML = '<div class="spinner" style="width: 16px; height: 16px; border-width: 2px;"></div> 正在启动...';
         }
 
-        // 显示扫码状态区域
         const statusEl = document.getElementById('pool-login-status');
         if (statusEl) {
             statusEl.innerHTML = `
                 <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; text-align: center;">
                     <div class="spinner" style="margin: 0 auto 12px;"></div>
-                    <p style="color: var(--text-primary); font-weight: 600;">正在启动浏览器扫码登录...</p>
-                    <p style="color: var(--text-muted); font-size: 0.85rem;">请在弹出的浏览器窗口中扫码</p>
+                    <p style="color: var(--text-primary); font-weight: 600;">正在请求微信读书扫码登录...</p>
                     <button class="btn btn-secondary btn-sm" style="margin-top: 12px;" onclick="LoginPage.cancelLogin()">取消</button>
                 </div>
             `;
@@ -268,7 +266,7 @@ const LoginPage = {
 
         try {
             await API.auth.login();
-            Toast.info('已启动浏览器登录流程，请在弹出的窗口中扫码...');
+            Toast.info('已请求扫码链接，正在等待扫码确认...');
             this.startStatusPolling();
         } catch (err) {
             Toast.error('启动登录失败: ' + err.message);
@@ -288,14 +286,26 @@ const LoginPage = {
                 if (!statusEl) return;
 
                 if (loginState.status === 'scanning') {
+                    const scanUrl = loginState.qrcode || '';
+                    const qrImgUrl = scanUrl ? `https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=${encodeURIComponent(scanUrl)}` : '';
                     statusEl.innerHTML = `
-                        <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 20px; text-align: center;">
-                            <div class="spinner" style="margin: 0 auto 12px;"></div>
-                            <p style="color: var(--text-primary); font-weight: 600;">${loginState.message}</p>
-                            <div class="progress-bar" style="width: 60%; margin: 12px auto;">
-                                <div class="progress-fill" style="width: ${loginState.progress}%"></div>
+                        <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; padding: 24px; text-align: center; max-width: 420px; margin: 0 auto; box-shadow: var(--shadow-md);">
+                            <p style="color: var(--text-primary); font-weight: 700; font-size: 1.1rem; margin-bottom: 6px;">📱 请使用手机微信扫码登录</p>
+                            <p style="color: var(--text-muted); font-size: 0.85rem; margin-bottom: 16px;">打开手机微信 -> 扫一扫，扫描下方二维码并在手机上确认登录</p>
+                            
+                            ${qrImgUrl ? `
+                                <div style="background: white; padding: 12px; border-radius: 12px; display: inline-block; box-shadow: var(--shadow-sm); border: 1px solid #eee;">
+                                    <img src="${qrImgUrl}" alt="微信扫码二维码" style="width: 220px; height: 220px; display: block;" />
+                                </div>
+                            ` : `
+                                <div class="spinner" style="margin: 20px auto;"></div>
+                            `}
+                            
+                            <div style="margin-top: 16px; font-size: 0.82rem; color: var(--text-secondary);">
+                                <span class="spinner-inline" style="width: 12px; height: 12px; display: inline-block; vertical-align: middle; margin-right: 4px;"></span>
+                                正在等待扫码确认...
                             </div>
-                            <button class="btn btn-secondary btn-sm" style="margin-top: 12px;" onclick="LoginPage.cancelLogin()">取消登录</button>
+                            <button class="btn btn-secondary btn-sm" style="margin-top: 16px;" onclick="LoginPage.cancelLogin()">取消登录</button>
                         </div>
                     `;
                 } else if (loginState.status === 'success') {
@@ -307,7 +317,6 @@ const LoginPage = {
                     clearInterval(this._pollTimer);
                     this._pollTimer = null;
                     this._resetAddButton();
-                    // 刷新账号列表
                     setTimeout(() => {
                         this.loadAccounts();
                         if (statusEl) statusEl.innerHTML = '';
@@ -330,7 +339,7 @@ const LoginPage = {
                     this._resetAddButton();
                 }
             } catch (err) { /* silent */ }
-        }, 3000);
+        }, 2000);
     },
 
     _resetAddButton() {

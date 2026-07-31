@@ -69,21 +69,8 @@ class AccountPool:
                     acc["status"] = "active"
                     changed = True
 
-                # 凭证过期判断
-                if acc["status"] == "active":
-                    save_time = acc.get("save_time", 0)
-                    if save_time and (now - save_time > LOGIN_VALID_SECONDS):
-                        acc["status"] = "invalid"
-                        acc["last_error"] = "凭证已过期"
-                        acc["kicked_time"] = now
-                        self._kick_events.append({
-                            "id": acc["id"],
-                            "nickname": acc.get("nickname", ""),
-                            "reason": "凭证已过期",
-                            "time": now,
-                            "status": "invalid",
-                        })
-                        changed = True
+                # 凭证状态保持 (微信读书 Token 长期有效，按需熔断)
+                pass
 
             active = [a for a in accounts if a["status"] == "active"]
 
@@ -117,15 +104,16 @@ class AccountPool:
             if not acc:
                 return
 
+            err_str = str(error or "")
             if ret == 0:
                 # 成功：清零失败计数
                 acc["failures"] = 0
                 acc["last_error"] = None
-            elif ret == 200013:
-                # 风控
+            elif ret == 200013 or "WeReadError429" in err_str:
+                # 风控 / 请求频繁
                 acc["risk_hits"] = acc.get("risk_hits", 0) + 1
                 acc["failures"] = acc.get("failures", 0) + 1
-                acc["last_error"] = error or "触发频率控制(200013)"
+                acc["last_error"] = error or "触发频率控制 (WeRead429)"
                 if acc["risk_hits"] >= RISK_KICK_THRESHOLD:
                     acc["status"] = "banned"
                     acc["kicked_time"] = now
@@ -142,11 +130,11 @@ class AccountPool:
                     acc["status"] = "cooldown"
                     acc["cooldown_until"] = now + COOLDOWN_SECONDS
                     logger.info("账号 [%s] 进入冷却 %ds", acc.get("nickname"), COOLDOWN_SECONDS)
-            elif ret == 200003:
+            elif ret == 200003 or "WeReadError401" in err_str:
                 # 登录态失效
                 acc["status"] = "invalid"
                 acc["kicked_time"] = now
-                acc["last_error"] = error or "登录态失效(200003)"
+                acc["last_error"] = error or "登录态失效 (WeRead401)"
                 self._kick_events.append({
                     "id": acc["id"],
                     "nickname": acc.get("nickname", ""),
