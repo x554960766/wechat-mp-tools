@@ -32,78 +32,142 @@ def _get_session():
     return token, cookie_str
 
 
+def fetch_article_detail_content(url: str) -> str:
+    """抓取微信公众号文章网页并提取 HTML 正文（.rich_media_content），还原图片 data-src"""
+    import bs4
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+    resp = req.get(url, headers=headers, timeout=20)
+    if resp.status_code != 200:
+        raise RuntimeError(f"HTTP {resp.status_code}")
+
+    soup = bs4.BeautifulSoup(resp.text, "html.parser")
+    content_node = soup.select_one(".rich_media_content") or soup.select_one("#js_content")
+    if not content_node:
+        return resp.text
+
+    for img in content_node.find_all("img"):
+        if img.get("data-src"):
+            img["src"] = img["data-src"]
+            del img["data-src"]
+
+    return str(content_node)
+
+
 def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "") -> tuple:
-    """Fetch one WeChat publish page and return (articles, total).
-    Automatically switches accounts on rate-limiting/auth-expiry."""
+    """使用微信读书接口拉取指定公众号的文章列表 (page, total)
+    遇到失效 (WeReadError401) 或频繁 (WeReadError429) 时自动向账号池上报并无缝切换账号重试"""
     max_switch = 3
     last_exc = None
+    page = (begin // max(1, count)) + 1
+
+    from backend.config import get_settings, WEREAD_PLATFORM_URL
+    platform_url = get_settings().get("weread_platform_url") or WEREAD_PLATFORM_URL
+
     for _ in range(max_switch):
         try:
             account_id, token, cookie_str = borrow_session()
         except RuntimeError as e:
             raise RuntimeError(str(e))
 
-        headers = {**DEFAULT_HEADERS, "Cookie": cookie_str}
+        headers = {
+            "xid": str(account_id),
+            "Authorization": f"Bearer {token}",
+        }
         proxies = get_proxies_dict()
         proxy_url = proxies.get("http") if proxies else None
-        is_searching = bool(keyword)
-        params = {
-            "sub": "search" if is_searching else "list",
-            "search_field": "7" if is_searching else "null",
-            "begin": str(begin),
-            "count": str(count),
-            "query": keyword,
-            "fakeid": fakeid,
-            "type": "101_1",
-            "free_publish_type": "1",
-            "sub_action": "list_ex",
-            "token": token,
-            "lang": "zh_CN",
-            "f": "json",
-            "ajax": "1",
-        }
 
         try:
-            resp = req.get(
-                f"{BASE_URL}/cgi-bin/appmsgpublish",
-                params=params,
+            from curl_cffi import requests as c_req
+            resp = c_req.get(
+                f"{platform_url}/api/v2/platform/mps/{fakeid}/articles",
+                params={"page": page},
                 headers=headers,
                 proxies=proxies,
                 timeout=30,
+                impersonate="chrome",
             )
-        except req.RequestException as e:
-            report_proxy_status(proxy_url, success=False)
-            account_pool.report(account_id, http_ok=False, error=str(e))
-            last_exc = e
-            continue
+        except Exception as e:
+            try:
+                resp = req.get(
+                    f"{platform_url}/api/v2/platform/mps/{fakeid}/articles",
+                    params={"page": page},
+                    headers=headers,
+                    proxies=proxies,
+                    timeout=30,
+                )
+            except Exception as exc:
+                report_proxy_status(proxy_url, success=False)
+                account_pool.report(account_id, http_ok=False, error=str(exc))
+                last_exc = exc
+                continue
 
         if resp.status_code != 200:
+            err_body = resp.text
             report_proxy_status(proxy_url, success=False)
-            account_pool.report(account_id, http_ok=False, error=f"HTTP {resp.status_code}")
-            last_exc = RuntimeError(f"HTTP {resp.status_code}")
-            continue
+            account_pool.report(account_id, http_ok=False, error=f"WeReadError: HTTP {resp.status_code} {err_body}")
+
+            if "WeReadError401" in err_body or resp.status_code == 401:
+                last_exc = PermissionError("微信读书账号登录失效，正在切换账号重试...")
+                continue
+            elif "WeReadError429" in err_body or resp.status_code == 429:
+                last_exc = RuntimeError("触发微信读书频率控制(429)，正在切换账号重试...")
+                continue
+            elif resp.status_code == 500 or "unknown error" in err_body:
+                raise RuntimeError("该公众号为旧版标识，微信读书接口无法识别。请重新粘贴该公众号的任意一篇文章链接解析添加，以升级订阅。")
+            else:
+                last_exc = RuntimeError(f"HTTP {resp.status_code}: {err_body}")
+                continue
 
         report_proxy_status(proxy_url, success=True)
-        data = resp.json()
-        base_resp = data.get("base_resp", {})
-        ret = base_resp.get("ret", 0)
+        raw_data = resp.json()
+        account_pool.report(account_id, ret=0)
 
-        # 上报账号池
-        account_pool.report(account_id, ret=ret)
+        if isinstance(raw_data, list):
+            items_list = raw_data
+        elif isinstance(raw_data, dict):
+            items_list = (
+                raw_data.get("articles") or
+                raw_data.get("items") or
+                raw_data.get("list") or
+                raw_data.get("data") or
+                raw_data.get("app_msg_list") or
+                []
+            )
+            if not items_list and raw_data.get("id"):
+                items_list = [raw_data]
+        else:
+            items_list = []
 
-        if ret == 200003:
-            last_exc = PermissionError("登录已过期，请重新扫码登录")
-            continue  # 换账号重试
-        if ret == 200013:
-            last_exc = RuntimeError("触发频率控制，正在切换账号重试...")
-            continue  # 换账号重试
-        if ret != 0:
-            err_msg = base_resp.get("err_msg", "未知错误")
-            raise RuntimeError(f"API错误 (ret={ret}): {err_msg}")
+        articles = []
+        for item in items_list:
+            art_id = str(item.get("id", "") or item.get("aid", "") or item.get("docid", ""))
+            title = item.get("title", "") or item.get("name", "")
+            cover = item.get("picUrl", "") or item.get("cover", "") or item.get("pic_url", "")
+            pub_time = item.get("publishTime") or item.get("update_time") or item.get("create_time") or item.get("updateTime") or 0
 
-        return _parse_publish_response(data)
+            link = item.get("link") or item.get("url") or ""
+            if not link:
+                link = f"https://mp.weixin.qq.com/s/{art_id}" if art_id and not art_id.startswith("http") else art_id
 
-    # 所有重试用完
+            articles.append({
+                "title": title,
+                "link": link,
+                "cover": cover,
+                "digest": item.get("digest", "") or title,
+                "author": item.get("author", "") or item.get("author_name", ""),
+                "update_time": pub_time,
+                "is_original": False,
+                "item_show_type": 0,
+                "id": art_id,
+            })
+
+        # 计算估算 total 数量
+        total_estimate = begin + len(articles) + (10 if len(articles) >= count else 0)
+        return articles, total_estimate
+
     if isinstance(last_exc, PermissionError):
         raise last_exc
     raise last_exc or RuntimeError("账号池所有账号均不可用")
@@ -829,7 +893,10 @@ def _do_range_download(
 
                     _download_article_into_task(task_id, article, account_name, history, downloaded_index)
                     downloaded_index += 1
-                    time.sleep(delay)
+                    # 增加防风控随机抖动延迟 (1.2s - 2.5s) 模拟人类请求
+                    import random
+                    sleep_time = max(1.0, delay) + random.uniform(0.3, 1.2)
+                    time.sleep(sleep_time)
 
                 # 当前页所有文章都早于 start_time，说明后续页也不会有范围内的文章了
                 if out_of_range_count > 0 and out_of_range_count >= len(articles):

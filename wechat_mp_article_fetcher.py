@@ -49,23 +49,23 @@ CONFIG_FILE = DATA_DIR / "wechat_mp_config.json"
 
 
 def load_credentials():
-    """从配置文件读取 token + cookie（由 wechat_mp_login.py 生成）"""
+    """从配置文件读取 token + vid (微信读书凭据)"""
     if not CONFIG_FILE.exists():
         raise RuntimeError(
-            "\n❌ 未找到凭证！请先运行：\n"
+            "\n❌ 未找到凭据！请先运行：\n"
             "     python3 wechat_mp_login.py   （扫码登录，自动保存）\n"
             f"  配置文件路径: {CONFIG_FILE}"
         )
     cfg = json.loads(CONFIG_FILE.read_text())
     token = cfg.get("token", "")
-    cookie_str = cfg.get("cookie_str", "")
-    if not token or not cookie_str:
+    vid = cfg.get("vid", "")
+    if not token:
         raise RuntimeError(
-            "\n❌ 凭证不完整（token 或 cookie 为空）！\n"
+            "\n❌ 凭证不完整（token 为空）！\n"
             "  请重新运行：python3 wechat_mp_login.py"
         )
-    print(f"  📂 已从配置文件加载凭证（token={token[:8]}...）")
-    return token, cookie_str, cfg
+    print(f"  📂 已从配置文件加载微信读书凭证（vid={vid}, token={token[:8]}...）")
+    return token, vid, cfg
 
 
 def fetch_page_via_appmsgpublish(
@@ -77,47 +77,58 @@ def fetch_page_via_appmsgpublish(
     keyword: str = "",
 ) -> dict:
     """
-    方式一：调用微信后台 appmsgpublish 接口获取文章列表
-
-    API: GET https://mp.weixin.qq.com/cgi-bin/appmsgpublish
-
-    参数说明：
-      sub=list       — 获取全部文章列表（search=按关键字搜索）
-      begin=0        — 分页偏移量
-      count=10       — 每页数量（最大 20）
-      fakeid=xxx     — 公众号唯一标识
-      token=xxx      — 后台登录 token（由 wechat_mp_login.py 获取）
+    调用微信读书中转平台接口获取文章列表
+    API: GET https://weread.111965.xyz/api/v2/platform/mps/{fakeid}/articles?page={page}
     """
-    url = "https://mp.weixin.qq.com/cgi-bin/appmsgpublish"
-
-    is_searching = bool(keyword)
-    params = {
-        "sub":               "search" if is_searching else "list",
-        "search_field":      "7" if is_searching else "null",
-        "begin":             str(begin),
-        "count":             str(count),
-        "query":             keyword,
-        "fakeid":            fakeid,
-        "type":              "101_1",
-        "free_publish_type": "1",
-        "sub_action":        "list_ex",
-        "token":             token,
-        "lang":              "zh_CN",
-        "f":                 "json",
-        "ajax":              "1",
-    }
+    platform_url = "https://weread.111965.xyz"
+    page = (begin // max(1, count)) + 1
+    url = f"{platform_url}/api/v2/platform/mps/{fakeid}/articles"
 
     headers = {
-        "Cookie":      cookie_str,
-        "User-Agent":  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                       "AppleWebKit/537.36 (KHTML, like Gecko) "
-                       "Chrome/120.0.0.0 Safari/537.36",
-        "Referer":     "https://mp.weixin.qq.com/",
-        "Origin":      "https://mp.weixin.qq.com",
-        "Accept":      "application/json, text/plain, */*",
+        "xid": str(cookie_str or "default"),
+        "Authorization": f"Bearer {token}",
     }
 
-    resp = requests.get(url, params=params, headers=headers, timeout=30)
+    resp = requests.get(url, params={"page": page}, headers=headers, timeout=30)
+    if resp.status_code != 200:
+        raise RuntimeError(f"WeRead API 错误 (HTTP {resp.status_code}): {resp.text}")
+
+    items = resp.json()
+    articles = []
+    if isinstance(items, list):
+        for item in items:
+            art_id = item.get("id", "")
+            link = f"https://mp.weixin.qq.com/s/{art_id}" if art_id and not art_id.startswith("http") else art_id
+            articles.append({
+                "title": item.get("title", ""),
+                "link": link,
+                "cover": item.get("picUrl", "") or item.get("cover", ""),
+                "digest": item.get("title", ""),
+                "author": "",
+                "update_time": item.get("publishTime", 0),
+                "id": art_id,
+            })
+
+    return {
+        "publish_page": json.dumps({
+            "publish_list": [
+                {
+                    "publish_info": json.dumps({
+                        "appmsgex": [
+                            {
+                                "title": a["title"],
+                                "link": a["link"],
+                                "cover": a["cover"],
+                                "digest": a["digest"],
+                                "update_time": a["update_time"],
+                            }
+                        ]
+                    })
+                } for a in articles
+            ],
+            "total_count": begin + len(articles) + (10 if len(articles) >= count else 0)
+        })
+    }
 
     if resp.status_code != 200:
         raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
