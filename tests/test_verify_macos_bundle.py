@@ -1,7 +1,8 @@
-"""Tests for scripts/verify_macos_bundle.py — written first (red phase)."""
+"""Tests for scripts/verify_macos_bundle.py."""
 
 from __future__ import annotations
 
+import plistlib
 import subprocess
 import sys
 from pathlib import Path
@@ -17,7 +18,7 @@ import verify_macos_bundle as vmb  # type: ignore[import-untyped]
 
 
 # ---------------------------------------------------------------------------
-# Helpers: fake subprocess.run that returns canned stdout/stderr/returncode
+# Helpers
 # ---------------------------------------------------------------------------
 
 def _make_run(
@@ -36,32 +37,59 @@ def _make_run(
     return mock
 
 
-def _fake_bundle(tmp_path: Path, has_main: bool = True, has_dylib: bool = True,
-                 has_chromium: bool = False) -> Path:
-    """Create a minimal .app tree and return the path."""
+# ms-playwright path segments (versioned dirs use globs in implementation)
+PW_BROWSER_SEGS = ("chromium-", "chrome-mac-")
+PW_BROWSER_EXE = "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+PW_HEADLESS_SEGS = ("chromium_headless_shell-", "chrome-headless-shell-mac-")
+PW_HEADLESS_EXE = "chrome-headless-shell"
+
+
+def _fake_bundle(
+    tmp_path: Path,
+    has_main: bool = True,
+    has_dylib: bool = True,
+    has_chromium_browser: bool = False,
+    has_headless_shell: bool = False,
+    exe_name: str | None = None,
+    plist_cfbe: str | None = None,
+    chromium_dylib_arch: str | None = None,
+) -> Path:
+    """Create a minimal .app tree with optional ms-playwright Chromium."""
     app = tmp_path / "WeChat MP Tools.app"
     contents = app / "Contents"
     macos = contents / "MacOS"
     macos.mkdir(parents=True)
-    (contents / "Info.plist").write_text("")
+    if plist_cfbe is not None:
+        with open(contents / "Info.plist", "wb") as f:
+            plistlib.dump({"CFBundleExecutable": plist_cfbe}, f)
+    else:
+        (contents / "Info.plist").write_bytes(b"")
     if has_main:
-        (macos / "WeChat MP Tools").write_text("")
+        (macos / (exe_name or app.stem)).write_text("")
     if has_dylib:
         lib_dir = contents / "MacOS" / "_internal" / "lib"
         lib_dir.mkdir(parents=True)
         (lib_dir / "foo.dylib").write_text("")
-    if has_chromium:
-        fw_dir = contents / "Frameworks"
-        fw_dir.mkdir(parents=True)
-        (fw_dir / "Chromium.app").mkdir()
-        chrom_macos = fw_dir / "Chromium.app" / "Contents" / "MacOS"
-        chrom_macos.mkdir(parents=True)
-        (chrom_macos / "Chromium").write_text("")
+    # ms-playwright Chromium tree
+    pw = contents / "Frameworks" / "ms-playwright"
+    if has_chromium_browser:
+        seg = pw / PW_BROWSER_SEGS[0] / PW_BROWSER_SEGS[1]
+        seg.mkdir(parents=True)
+        exe_path = seg / PW_BROWSER_EXE
+        exe_path.parent.mkdir(parents=True)
+        exe_path.write_text("")
+    if has_headless_shell:
+        seg = pw / PW_HEADLESS_SEGS[0] / PW_HEADLESS_SEGS[1]
+        seg.mkdir(parents=True)
+        (seg / PW_HEADLESS_EXE).write_text("")
+    if chromium_dylib_arch is not None:
+        pw.mkdir(parents=True, exist_ok=True)
+        (pw / "libfake.dylib").write_text("")
     return app
 
 
 # ---------------------------------------------------------------------------
-# 1. Parsing `lipo -archs` output
+# 1. Parsing lipo -archs output
 # ---------------------------------------------------------------------------
 
 class TestParseLipoArches:
@@ -96,6 +124,12 @@ class TestArchitectures:
             result = vmb.architectures(Path("/fake/binary"))
         assert result == set()
 
+    def test_returns_empty_on_lipo_launch_failure(self):
+        """OSError from subprocess.run (e.g. lipo not found) yields empty set."""
+        with patch.object(vmb, "_run", side_effect=OSError("no lipo")):
+            result = vmb.architectures(Path("/fake/binary"))
+        assert result == set()
+
 
 # ---------------------------------------------------------------------------
 # 3. Requiring the main executable
@@ -123,6 +157,14 @@ class TestMainExecutableRequired:
             errs = vmb.verify(app, "arm64")
         assert not any("main" in e.lower() for e in errs)
 
+    def test_reads_cfbe_from_plist(self, tmp_path):
+        """Main executable name is read from Info.plist CFBundleExecutable."""
+        app = _fake_bundle(tmp_path, exe_name="custom_bin", plist_cfbe="custom_bin")
+        mock_run = _make_run(stdout="arm64")
+        with patch.object(vmb, "_run", mock_run):
+            errs = vmb.verify(app, "arm64")
+        assert not any("main" in e.lower() for e in errs)
+
 
 # ---------------------------------------------------------------------------
 # 4. Requiring a .dylib / .so native extension match
@@ -139,7 +181,7 @@ class TestNativeExtensionRequired:
     def test_dylib_wrong_arch_fails(self, tmp_path):
         app = _fake_bundle(tmp_path)
         call_count = 0
-        def side_effect(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess:
+        def side_effect(*a: Any, **kw: Any) -> subprocess.CompletedProcess:
             nonlocal call_count
             call_count += 1
             arch = "arm64" if call_count == 1 else "x86_64"
@@ -155,37 +197,96 @@ class TestNativeExtensionRequired:
             errs = vmb.verify(app, "arm64")
         assert not any("native" in e.lower() for e in errs)
 
+    def test_playwright_dylib_excluded_from_native_check(self, tmp_path):
+        """A correct-arch .dylib inside ms-playwright must NOT satisfy
+        the Python native extension requirement."""
+        app = _fake_bundle(tmp_path, has_dylib=False, has_chromium_browser=True,
+                           chromium_dylib_arch="arm64")
+        mock_run = _make_run(stdout="arm64")
+        with patch.object(vmb, "_run", mock_run):
+            errs = vmb.verify(app, "arm64")
+        assert any("native" in e.lower() for e in errs)
+
+    def test_app_dylib_wrong_chromium_dylib_correct_still_fails(self, tmp_path):
+        """Regression: app .dylib wrong-arch + Chromium .dylib correct-arch
+        still fails the native extension check."""
+        app = _fake_bundle(tmp_path, has_dylib=True, has_chromium_browser=True,
+                           chromium_dylib_arch="arm64")
+        call_count = 0
+        def side_effect(*a: Any, **kw: Any) -> subprocess.CompletedProcess:
+            nonlocal call_count
+            call_count += 1
+            # 1=main(arm64), 2=app_dylib(x86_64), 3+=chromium stuff(arm64)
+            arch = "x86_64" if call_count == 2 else "arm64"
+            return subprocess.CompletedProcess([], arch.encode(), b"", 0)
+        with patch.object(vmb, "_run", side_effect=side_effect):
+            errs = vmb.verify(app, "arm64")
+        assert any("native" in e.lower() for e in errs)
+
 
 # ---------------------------------------------------------------------------
-# 5. Checking Chromium when bundled
+# 5. Checking Chromium when bundled (ms-playwright layout)
 # ---------------------------------------------------------------------------
 
 class TestChromiumCheck:
-    def test_chromium_missing_arch_fails(self, tmp_path):
-        app = _fake_bundle(tmp_path, has_chromium=True)
+    def test_browser_wrong_arch_fails(self, tmp_path):
+        app = _fake_bundle(tmp_path, has_chromium_browser=True)
         call_count = 0
-        def side_effect(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess:
+        def side_effect(*a: Any, **kw: Any) -> subprocess.CompletedProcess:
             nonlocal call_count
             call_count += 1
             arch = "x86_64" if call_count >= 3 else "arm64"
             return subprocess.CompletedProcess([], arch.encode(), b"", 0)
         with patch.object(vmb, "_run", side_effect=side_effect):
             errs = vmb.verify(app, "arm64")
-        assert any("chromium" in e.lower() for e in errs)
+        assert any("chromium" in e.lower() or "chrome" in e.lower() for e in errs)
 
-    def test_chromium_correct_arch_passes(self, tmp_path):
-        app = _fake_bundle(tmp_path, has_chromium=True)
+    def test_browser_correct_arch_passes(self, tmp_path):
+        app = _fake_bundle(tmp_path, has_chromium_browser=True)
         mock_run = _make_run(stdout="arm64")
         with patch.object(vmb, "_run", mock_run):
             errs = vmb.verify(app, "arm64")
         assert not any("chromium" in e.lower() for e in errs)
 
-    def test_no_chromium_bundled_no_error(self, tmp_path):
-        app = _fake_bundle(tmp_path, has_chromium=False)
+    def test_headless_shell_wrong_arch_fails(self, tmp_path):
+        app = _fake_bundle(tmp_path, has_headless_shell=True)
+        call_count = 0
+        def side_effect(*a: Any, **kw: Any) -> subprocess.CompletedProcess:
+            nonlocal call_count
+            call_count += 1
+            arch = "x86_64" if call_count >= 3 else "arm64"
+            return subprocess.CompletedProcess([], arch.encode(), b"", 0)
+        with patch.object(vmb, "_run", side_effect=side_effect):
+            errs = vmb.verify(app, "arm64")
+        assert any("headless" in e.lower() or "chromium" in e.lower() for e in errs)
+
+    def test_headless_shell_correct_arch_passes(self, tmp_path):
+        app = _fake_bundle(tmp_path, has_headless_shell=True)
+        mock_run = _make_run(stdout="arm64")
+        with patch.object(vmb, "_run", mock_run):
+            errs = vmb.verify(app, "arm64")
+        assert not any("headless" in e.lower() or "chromium" in e.lower() for e in errs)
+
+    def test_no_playwright_bundled_no_error(self, tmp_path):
+        app = _fake_bundle(tmp_path, has_chromium_browser=False, has_headless_shell=False)
         mock_run = _make_run(stdout="arm64")
         with patch.object(vmb, "_run", mock_run):
             errs = vmb.verify(app, "arm64")
         assert not any("chromium" in e.lower() for e in errs)
+
+    def test_all_chromium_executables_checked(self, tmp_path):
+        """Both browser and headless shell are checked when present."""
+        app = _fake_bundle(tmp_path, has_chromium_browser=True, has_headless_shell=True)
+        call_count = 0
+        def side_effect(*a: Any, **kw: Any) -> subprocess.CompletedProcess:
+            nonlocal call_count
+            call_count += 1
+            # 1=main, 2=dylib, 3=browser(arm64), 4=headless(x86_64)
+            arch = "x86_64" if call_count >= 4 else "arm64"
+            return subprocess.CompletedProcess([], arch.encode(), b"", 0)
+        with patch.object(vmb, "_run", side_effect=side_effect):
+            errs = vmb.verify(app, "arm64")
+        assert any("headless" in e.lower() for e in errs)
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +304,7 @@ class TestUniversalBinary:
     def test_universal_binary_wrong_single_request_fails(self, tmp_path):
         app = _fake_bundle(tmp_path)
         call_count = 0
-        def side_effect(*args: Any, **kwargs: Any) -> subprocess.CompletedProcess:
+        def side_effect(*a: Any, **kw: Any) -> subprocess.CompletedProcess:
             nonlocal call_count
             call_count += 1
             return subprocess.CompletedProcess([], b"x86_64\n", b"", 0)
@@ -256,10 +357,10 @@ class TestCLI:
         captured = capsys.readouterr()
         assert len(captured.err) > 0
 
-    def test_missing_args_exits_nonzero(self, capsys):
+    def test_missing_args_exits_2(self, capsys):
         with pytest.raises(SystemExit) as exc_info:
             vmb.main([])
-        assert exc_info.value.code != 0
+        assert exc_info.value.code == 2
 
     def test_deterministic_output_order(self, tmp_path, capsys):
         """Errors are sorted for deterministic output."""
