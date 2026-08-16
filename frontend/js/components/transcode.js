@@ -1,7 +1,7 @@
 /**
-     * 视频转码页面组件
-     * Premium Glassmorphism 界面 + 一键转码 + 拖入识别 + 双流信息对比
-     */
+ * 视频转码页面组件
+ * 清新浅色主题 (Light Theme) + 一键转码 + 拖入识别 + 双流信息比对
+ */
 const TranscodePage = {
     selectedFile: null,       // 当前选中的待转码文件: { name, path, size, meta }
     scannedVideos: [],        // 扫描到的已下载视频列表
@@ -26,45 +26,45 @@ const TranscodePage = {
                         </div>
                         <div class="card-body" style="padding: 0 var(--spacing-md) var(--spacing-md);">
                             <!-- 拖拽/点击选择区域 -->
-                            <div id="transcode-dropzone" class="dropzone" style="border: 2px dashed var(--border-color); border-radius: var(--radius-lg); padding: var(--spacing-xl); text-align: center; background: var(--bg-input); cursor: pointer; transition: all var(--transition-normal); position: relative; overflow: hidden;">
-                                <div class="dropzone-icon" style="font-size: 2.8rem; margin-bottom: var(--spacing-sm); filter: drop-shadow(0 0 10px var(--primary-glow));">
+                            <div id="transcode-dropzone" class="dropzone" style="border: 2px dashed rgba(102, 126, 234, 0.35); border-radius: var(--radius-lg); padding: 28px 20px; text-align: center; background: var(--bg-card, #ffffff); cursor: pointer; transition: all var(--transition-normal); position: relative; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.02);">
+                                <div class="dropzone-icon" style="font-size: 2.8rem; margin-bottom: var(--spacing-sm);">
                                     📁
                                 </div>
                                 <div class="dropzone-text" style="font-weight: 600; color: var(--text-primary); font-size: 1.05rem;">
                                     拖拽外部视频文件到此处，或点击浏览本地文件
                                 </div>
-                                <div class="dropzone-subtext" style="font-size: 0.8rem; color: var(--text-muted); margin-top: 6px;">
-                                    支持 MP4, MOV, MKV, AVI 等格式
+                                <div class="dropzone-subtext" style="font-size: 0.82rem; color: var(--text-muted); margin-top: 6px;">
+                                    支持 MP4, MOV, MKV, AVI, FLV, TS 等格式
                                 </div>
                                 <input type="file" id="transcode-file-input" accept="video/*" style="display: none;" />
                                 
                                 <!-- 上传遮罩层 (外部浏览器 fallback) -->
-                                <div id="upload-overlay" style="display: none; position: absolute; inset: 0; background: rgba(10, 10, 26, 0.9); flex-direction: column; align-items: center; justify-content: center; gap: var(--spacing-md); z-index: 10;">
+                                <div id="upload-overlay" style="display: none; position: absolute; inset: 0; background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(4px); flex-direction: column; align-items: center; justify-content: center; gap: var(--spacing-md); z-index: 10;">
                                     <div class="spinner" style="width: 36px; height: 36px;"></div>
-                                    <div style="color: var(--text-primary); font-weight: 500;" id="upload-status-text">正在上传视频到本地缓存...</div>
-                                    <div class="progress-bar" style="width: 60%; height: 6px;">
-                                        <div class="progress-fill" id="upload-progress-fill" style="width: 0%;"></div>
+                                    <div style="color: var(--text-primary); font-weight: 600;" id="upload-status-text">正在上传视频到本地缓存...</div>
+                                    <div class="progress-bar" style="width: 60%; height: 6px; background: #e2e8f0;">
+                                        <div class="progress-fill" id="upload-progress-fill" style="width: 0%; background: var(--gradient-primary);"></div>
                                     </div>
                                 </div>
                             </div>
 
                             <!-- 已选中文件信息摘要 -->
-                            <div id="selected-file-banner" style="display: none; margin-top: var(--spacing-md); padding: 12px; background: rgba(102, 126, 234, 0.08); border: 1px solid rgba(102, 126, 234, 0.2); border-radius: var(--radius-md); align-items: center; gap: var(--spacing-md);">
+                            <div id="selected-file-banner" style="display: none; margin-top: var(--spacing-md); padding: 12px 16px; background: rgba(102, 126, 234, 0.08); border: 1px solid rgba(102, 126, 234, 0.25); border-radius: var(--radius-md); align-items: center; gap: var(--spacing-md);">
                                 <div style="font-size: 1.8rem;">🎥</div>
                                 <div style="flex: 1; min-width: 0;">
                                     <div id="selected-file-name" style="font-weight: 600; font-size: 0.95rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"></div>
                                     <div style="display: flex; gap: 12px; font-size: 0.78rem; color: var(--text-secondary); margin-top: 4px;">
                                         <span id="selected-file-size"></span>
-                                        <span id="selected-file-type" style="color: var(--primary-light); font-weight: bold;"></span>
+                                        <span id="selected-file-type" style="color: var(--primary); font-weight: 600;"></span>
                                     </div>
                                 </div>
-                                <button class="btn btn-secondary btn-sm" onclick="TranscodePage.clearSelectedFile()" style="padding: 4px 8px; font-size: 0.75rem;">取消</button>
+                                <button class="btn btn-secondary btn-sm" onclick="TranscodePage.clearSelectedFile()" style="padding: 4px 10px; font-size: 0.75rem;">取消选择</button>
                             </div>
                         </div>
                     </div>
 
                     <!-- 转码配置参数 -->
-                    <div class="card" id="transcode-settings-card" style="opacity: 0.6; pointer-events: none; transition: opacity 0.3s;">
+                    <div class="card" id="transcode-settings-card" style="opacity: 0.65; pointer-events: none; transition: opacity 0.3s;">
                         <div class="card-header">
                             <h3 class="card-title">⚙️ 转码与压缩参数配置</h3>
                         </div>
@@ -73,7 +73,7 @@ const TranscodePage = {
                                 <div class="form-group">
                                     <label class="form-label" for="param-format">输出容器格式</label>
                                     <select class="form-select" id="param-format" onchange="TranscodePage.onFormatChange()">
-                                        <option value="mp4">MP4 (通用高清封装)</option>
+                                        <option value="mp4">MP4 (通用高清封装 - 推荐)</option>
                                         <option value="mkv">MKV (高清无损容器)</option>
                                         <option value="mov">MOV (Apple 兼容格式)</option>
                                         <option value="webm">WebM (适合网页播放)</option>
@@ -84,8 +84,8 @@ const TranscodePage = {
                                 <div class="form-group" id="group-video-codec">
                                     <label class="form-label" for="param-codec">视频编码格式</label>
                                     <select class="form-select" id="param-codec">
-                                        <option value="h264">H.264 / AVC (高兼容性)</option>
-                                        <option value="hevc">H.265 / HEVC (高压缩率)</option>
+                                        <option value="h264">H.264 / AVC (兼容性最高)</option>
+                                        <option value="hevc">H.265 / HEVC (压缩率最高)</option>
                                         <option value="copy">Direct Copy (直接封装，不重编码)</option>
                                     </select>
                                 </div>
@@ -97,7 +97,7 @@ const TranscodePage = {
                                     <select class="form-select" id="param-quality">
                                         <option value="medium">中等画质 (兼顾体积与画质 - 推荐)</option>
                                         <option value="high">极佳画质 (体积偏大，适合二次编辑)</option>
-                                        <option value="low">极高压缩率 (体积缩减 60-80%，适合传输)</option>
+                                        <option value="low">极高压缩率 (体积缩减 60-80%，适合网络分发)</option>
                                     </select>
                                 </div>
 
@@ -116,9 +116,9 @@ const TranscodePage = {
                                 <div class="form-group" id="group-audio-mode" style="margin-bottom: 0;">
                                     <label class="form-label" for="param-audio">音频轨处理模式</label>
                                     <select class="form-select" id="param-audio">
-                                        <option value="keep">保留音频轨道</option>
+                                        <option value="keep">保留原始音频轨道</option>
                                         <option value="mute">视频静音 (去除音轨)</option>
-                                        <option value="mp3">压缩音轨为 MP3 (省体积)</option>
+                                        <option value="mp3">压缩音轨为 MP3 (节省体积)</option>
                                     </select>
                                 </div>
 
@@ -132,7 +132,7 @@ const TranscodePage = {
                             </div>
 
                             <div style="margin-top: var(--spacing-lg);">
-                                <button class="btn btn-primary" id="btn-start-transcode" onclick="TranscodePage.startTranscoding()" style="width: 100%; height: 46px; font-size: 1rem; border-radius: var(--radius-md);">
+                                <button class="btn btn-primary" id="btn-start-transcode" onclick="TranscodePage.startTranscoding()" style="width: 100%; height: 44px; font-size: 1rem; border-radius: var(--radius-md);">
                                     ⚡ 开始一键转码
                                 </button>
                             </div>
@@ -147,7 +147,7 @@ const TranscodePage = {
                     <div class="card">
                         <div class="card-header">
                             <h3 class="card-title">⏳ 任务队列与进度</h3>
-                            <button class="btn btn-secondary btn-sm" onclick="TranscodePage.clearCompletedJobs()" style="padding: 4px 8px; font-size: 0.75rem;">清空历史</button>
+                            <button class="btn btn-secondary btn-sm" onclick="TranscodePage.clearCompletedJobs()" style="padding: 4px 10px; font-size: 0.75rem;">清空历史</button>
                         </div>
                         <div class="card-body" style="padding: 0 var(--spacing-md) var(--spacing-md);">
                             <div id="transcode-queue-container" style="display: flex; flex-direction: column; gap: var(--spacing-md); max-height: 240px; overflow-y: auto;">
@@ -166,42 +166,42 @@ const TranscodePage = {
                         <div class="card-body" style="padding: 0 var(--spacing-md) var(--spacing-md); display: flex; flex-direction: column; gap: var(--spacing-md);">
                             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
                                 <!-- 准备转码的视频信息 -->
-                                <div style="background: rgba(255, 255, 255, 0.05); border: 1px solid var(--border-color); border-radius: var(--radius-md); padding: 12px;">
-                                    <div style="font-weight: bold; font-size: 0.8rem; color: var(--text-primary); border-bottom: 1px solid var(--border-color); padding-bottom: 6px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                                <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: var(--radius-md); padding: 14px;">
+                                    <div style="font-weight: 600; font-size: 0.82rem; color: #334155; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin-bottom: 10px; display: flex; align-items: center; gap: 6px;">
                                         <span>📝</span> 准备转码源文件
                                     </div>
-                                    <div class="metadata-detail-list" style="display: flex; flex-direction: column; gap: 6px; font-size: 0.82rem; color: var(--text-primary);">
-                                        <div>大小：<span id="meta-in-size" style="font-weight: bold; color: var(--text-primary);">--</span></div>
-                                        <div>时长：<span id="meta-in-duration" style="font-weight: bold; color: var(--text-primary);">--</span></div>
-                                        <div>格式：<span id="meta-in-format" style="font-weight: bold; color: var(--text-primary);">--</span></div>
-                                        <div>视频流：<span id="meta-in-vcodec" style="font-weight: bold; color: var(--text-primary);">--</span></div>
-                                        <div>音频流：<span id="meta-in-acodec" style="font-weight: bold; color: var(--text-primary);">--</span></div>
-                                        <div>分辨率：<span id="meta-in-resolution" style="font-weight: bold; color: var(--text-primary);">--</span></div>
-                                        <div>帧率：<span id="meta-in-fps" style="font-weight: bold; color: var(--text-primary);">--</span></div>
+                                    <div class="metadata-detail-list" style="display: flex; flex-direction: column; gap: 6px; font-size: 0.82rem; color: #475569;">
+                                        <div>大小：<span id="meta-in-size" style="font-weight: 600; color: #0f172a;">--</span></div>
+                                        <div>时长：<span id="meta-in-duration" style="font-weight: 600; color: #0f172a;">--</span></div>
+                                        <div>格式：<span id="meta-in-format" style="font-weight: 600; color: #0f172a;">--</span></div>
+                                        <div>视频流：<span id="meta-in-vcodec" style="font-weight: 600; color: #0f172a;">--</span></div>
+                                        <div>音频流：<span id="meta-in-acodec" style="font-weight: 600; color: #0f172a;">--</span></div>
+                                        <div>分辨率：<span id="meta-in-resolution" style="font-weight: 600; color: #0f172a;">--</span></div>
+                                        <div>帧率：<span id="meta-in-fps" style="font-weight: 600; color: #0f172a;">--</span></div>
                                     </div>
                                 </div>
 
                                 <!-- 转码完成后的视频信息 -->
-                                <div id="meta-out-box" style="background: rgba(67, 233, 123, 0.05); border: 1px dashed rgba(67, 233, 123, 0.2); border-radius: var(--radius-md); padding: 12px; transition: all 0.3s;">
-                                    <div style="font-weight: bold; font-size: 0.8rem; color: var(--text-primary); border-bottom: 1px dashed rgba(67, 233, 123, 0.2); padding-bottom: 6px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+                                <div id="meta-out-box" style="background: #f0fdf4; border: 1px dashed #86efac; border-radius: var(--radius-md); padding: 14px; transition: all 0.3s;">
+                                    <div style="font-weight: 600; font-size: 0.82rem; color: #166534; border-bottom: 1px dashed #bbf7d0; padding-bottom: 6px; margin-bottom: 10px; display: flex; align-items: center; gap: 6px;">
                                         <span>🏁</span> 转码输出结果
                                     </div>
-                                    <div id="meta-out-empty" style="color: var(--text-primary); font-size: 0.8rem; text-align: center; padding-top: 30px;">
+                                    <div id="meta-out-empty" style="color: #64748b; font-size: 0.82rem; text-align: center; padding-top: 30px;">
                                         待当前任务转换结束...
                                     </div>
-                                    <div id="meta-out-details" class="metadata-detail-list" style="display: none; flex-direction: column; gap: 6px; font-size: 0.82rem; color: var(--text-primary);">
-                                        <div>大小：<span id="meta-out-size" style="font-weight: bold; color: #22c55e !important;">--</span></div>
-                                        <div>时长：<span id="meta-out-duration" style="font-weight: bold; color: var(--text-primary);">--</span></div>
-                                        <div>格式：<span id="meta-out-format" style="font-weight: bold; color: var(--text-primary);">--</span></div>
-                                        <div>视频流：<span id="meta-out-vcodec" style="font-weight: bold; color: var(--text-primary);">--</span></div>
-                                        <div>音频流：<span id="meta-out-acodec" style="font-weight: bold; color: var(--text-primary);">--</span></div>
-                                        <div>分辨率：<span id="meta-out-resolution" style="font-weight: bold; color: var(--text-primary);">--</span></div>
-                                        <div>帧率：<span id="meta-out-fps" style="font-weight: bold; color: var(--text-primary);">--</span></div>
+                                    <div id="meta-out-details" class="metadata-detail-list" style="display: none; flex-direction: column; gap: 6px; font-size: 0.82rem; color: #475569;">
+                                        <div>大小：<span id="meta-out-size" style="font-weight: 700; color: #16a34a !important;">--</span></div>
+                                        <div>时长：<span id="meta-out-duration" style="font-weight: 600; color: #0f172a;">--</span></div>
+                                        <div>格式：<span id="meta-out-format" style="font-weight: 600; color: #0f172a;">--</span></div>
+                                        <div>视频流：<span id="meta-out-vcodec" style="font-weight: 600; color: #0f172a;">--</span></div>
+                                        <div>音频流：<span id="meta-out-acodec" style="font-weight: 600; color: #0f172a;">--</span></div>
+                                        <div>分辨率：<span id="meta-out-resolution" style="font-weight: 600; color: #0f172a;">--</span></div>
+                                        <div>帧率：<span id="meta-out-fps" style="font-weight: 600; color: #0f172a;">--</span></div>
                                     </div>
                                 </div>
                             </div>
                             <div style="display: flex; justify-content: center; margin-top: 4px;">
-                                <span id="meta-out-ratio" class="badge badge-success" style="display: none; padding: 4px 12px; font-size: 0.85rem;">--</span>
+                                <span id="meta-out-ratio" class="badge badge-success" style="display: none; padding: 4px 12px; font-size: 0.85rem; font-weight: 600;">--</span>
                             </div>
                         </div>
                     </div>
@@ -213,9 +213,9 @@ const TranscodePage = {
                         </div>
                         <div class="card-body" style="padding: 0 var(--spacing-md) var(--spacing-md); display: flex; flex-direction: column; gap: var(--spacing-md);">
                             <!-- 分类标签 -->
-                            <div class="system-switcher" style="margin-top: 0; padding: 2px;">
-                                <button class="sys-btn active" id="btn-tab-wechat" onclick="TranscodePage.switchTab('wechat')" style="font-size: 0.75rem; padding: 4px 0;">微信视频号下载</button>
-                                <button class="sys-btn" id="btn-tab-douyin" onclick="TranscodePage.switchTab('douyin')" style="font-size: 0.75rem; padding: 4px 0;">抖音下载</button>
+                            <div class="system-switcher" style="margin-top: 0; padding: 3px; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: var(--radius-sm);">
+                                <button class="sys-btn active" id="btn-tab-wechat" onclick="TranscodePage.switchTab('wechat')" style="font-size: 0.78rem; padding: 5px 0;">微信视频号下载</button>
+                                <button class="sys-btn" id="btn-tab-douyin" onclick="TranscodePage.switchTab('douyin')" style="font-size: 0.78rem; padding: 5px 0;">抖音下载</button>
                             </div>
 
                             <!-- 扫描结果列表 -->
@@ -301,114 +301,158 @@ const TranscodePage = {
             }
         });
 
-        // 拖拽高亮与移出
-        dropzone.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            dropzone.style.borderColor = 'var(--primary)';
-            dropzone.style.background = 'rgba(102, 126, 234, 0.05)';
+        // 拖拽悬停视觉反馈
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropzone.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                dropzone.style.borderColor = 'var(--primary)';
+                dropzone.style.background = 'rgba(102, 126, 234, 0.05)';
+            });
         });
 
-        dropzone.addEventListener('dragleave', () => {
-            dropzone.style.borderColor = 'var(--border-color)';
-            dropzone.style.background = 'var(--bg-input)';
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropzone.addEventListener(eventName, (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                dropzone.style.borderColor = 'rgba(102, 126, 234, 0.35)';
+                dropzone.style.background = 'var(--bg-card, #ffffff)';
+            });
         });
 
+        // 核心：处理外部拖入的文件
         dropzone.addEventListener('drop', (e) => {
-            e.preventDefault();
-            dropzone.style.borderColor = 'var(--border-color)';
-            dropzone.style.background = 'var(--bg-input)';
-
-            if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-                this.handleFileSelected(e.dataTransfer.files[0]);
+            const dt = e.dataTransfer;
+            const files = dt.files;
+            if (files && files.length > 0) {
+                this.handleFileSelected(files[0]);
             }
         });
     },
 
     async handleFileSelected(file) {
-        // 核心亮点: 支持 Desktop webview 绝对路径直读, 或者是 Web 浏览器 HTTP upload fallback
-        if (file.path) {
-            // Desktop 模式：直接读取绝对文件路径，极速元数据分析，不占用网络资源
-            this.loadVideoInfo(file.path, file.name, file.size);
+        if (!file) return;
+
+        // 验证是否是支持的视频格式
+        const ext = file.name.split('.').pop().toLowerCase();
+        const validExts = ['mp4', 'mov', 'mkv', 'avi', 'flv', 'wmv', 'webm', 'ts', 'm4v', '3gp'];
+        if (!validExts.includes(ext)) {
+            Toast.error(`不支持的文件格式 .${ext}，请选择视频文件`);
+            return;
+        }
+
+        // Electron/桌面客户端环境下，File 对象通常直接附带 local filepath
+        let absolutePath = file.path;
+
+        if (absolutePath) {
+            // 本地路径模式：零拷贝秒级导入
+            this.loadVideoInfo(absolutePath, file.name, file.size);
         } else {
-            // Web 外部浏览器模式：通过 HTTP 循环上传到本地 Python temp_uploads 文件夹进行转码
-            this.uploadFile(file);
+            // 普通浏览器模式：需先上传到临时转码目录
+            await this.uploadLocalFile(file);
         }
     },
 
-    async uploadFile(file) {
-        if (this.isUploading) return;
-        this.isUploading = true;
-
+    async uploadLocalFile(file) {
         const overlay = document.getElementById('upload-overlay');
-        const progressFill = document.getElementById('upload-progress-fill');
-        const statusText = document.getElementById('upload-status-text');
+        const fill = document.getElementById('upload-progress-fill');
+        const text = document.getElementById('upload-status-text');
 
         if (overlay) overlay.style.display = 'flex';
+        this.isUploading = true;
 
         try {
             const formData = new FormData();
             formData.append('file', file);
-            
-            // HTTP 上传 (localhost 瞬间传输)
-            const result = await API.transcode.upload(formData);
-            
-            if (result.success) {
-                Toast.success('文件缓存成功！');
-                this.loadVideoInfo(result.path, result.name, result.size_bytes);
-            }
+
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/transcode/upload', true);
+
+            xhr.upload.onprogress = (e) => {
+                if (e.lengthComputable) {
+                    const percent = Math.round((e.loaded / e.total) * 100);
+                    if (fill) fill.style.width = percent + '%';
+                    if (text) text.textContent = `正在传输视频文件 (${percent}%)...`;
+                }
+            };
+
+            xhr.onload = () => {
+                if (overlay) overlay.style.display = 'none';
+                this.isUploading = false;
+
+                if (xhr.status === 200) {
+                    try {
+                        const res = JSON.parse(xhr.responseText);
+                        if (res.success && res.path) {
+                            Toast.success('视频文件载入成功！');
+                            this.loadVideoInfo(res.path, file.name, file.size);
+                        } else {
+                            Toast.error(res.error || '文件解析失败');
+                        }
+                    } catch (e) {
+                        Toast.error('上传响应异常');
+                    }
+                } else {
+                    Toast.error(`上传失败 (HTTP ${xhr.status})`);
+                }
+            };
+
+            xhr.onerror = () => {
+                if (overlay) overlay.style.display = 'none';
+                this.isUploading = false;
+                Toast.error('网络错误，视频传输中断');
+            };
+
+            xhr.send(formData);
+
         } catch (err) {
-            console.error('File upload failed:', err);
-        } finally {
-            this.isUploading = false;
             if (overlay) overlay.style.display = 'none';
-            if (progressFill) progressFill.style.width = '0%';
+            this.isUploading = false;
+            Toast.error('上传异常: ' + err.message);
         }
     },
 
-    // ── 读取与解析视频信息 ─────────────────────────────────────
-    async loadVideoInfo(absolutePath, filename, sizeBytes) {
-        const settingsCard = document.getElementById('transcode-settings-card');
+    async loadVideoInfo(path, name, sizeBytes) {
+        this.selectedFile = {
+            path: path,
+            name: name,
+            size: sizeBytes,
+            meta: null
+        };
+
+        // 更新视频选中摘要 Banner
         const banner = document.getElementById('selected-file-banner');
-        const bannerName = document.getElementById('selected-file-name');
-        const bannerSize = document.getElementById('selected-file-size');
-        const bannerType = document.getElementById('selected-file-type');
-        
-        // 1. 显示已选择的文件横幅
+        const nameEl = document.getElementById('selected-file-name');
+        const sizeEl = document.getElementById('selected-file-size');
+        const typeEl = document.getElementById('selected-file-type');
+        const settingsCard = document.getElementById('transcode-settings-card');
+        const metaCard = document.getElementById('metadata-comparison-card');
+
+        if (nameEl) nameEl.textContent = name;
+        if (sizeEl) sizeEl.textContent = `大小: ${formatBytes(sizeBytes)}`;
+        if (typeEl) typeEl.textContent = `格式: ${name.split('.').pop().toUpperCase()}`;
         if (banner) banner.style.display = 'flex';
-        if (bannerName) bannerName.textContent = filename;
-        if (bannerSize) bannerSize.textContent = formatBytes(sizeBytes);
-        if (bannerType) bannerType.textContent = filename.split('.').pop().toUpperCase();
-        
-        // 激活设置卡片
+
+        // 激活转码参数面板
         if (settingsCard) {
             settingsCard.style.opacity = '1';
             settingsCard.style.pointerEvents = 'auto';
         }
 
-        // 2. 显示元数据读取动画
-        this.selectedFile = {
-            name: filename,
-            path: absolutePath,
-            size: sizeBytes,
-            meta: null
-        };
-
-        // 展开元数据比对区，填充 -- 占位
-        const compCard = document.getElementById('metadata-comparison-card');
-        if (compCard) compCard.style.display = 'block';
-
+        // 显示元数据比对卡片并显示加载状态
+        if (metaCard) metaCard.style.display = 'block';
         this.setMetaValues('in', { size_bytes: sizeBytes }, true);
         this.clearMetaOutValues();
 
+        // 异步调用 FFprobe 提取源文件精细元数据
         try {
-            // 调用 ffprobe 提取信息
-            const meta = await API.transcode.videoInfo(absolutePath);
+            const meta = await API.transcode.videoInfo(path);
             if (meta && !meta.error) {
                 this.selectedFile.meta = meta;
                 this.setMetaValues('in', meta, false);
             }
         } catch (err) {
-            console.error('Failed to read video metadata:', err);
+            console.error('Failed to probe video meta:', err);
         }
     },
 
@@ -416,87 +460,104 @@ const TranscodePage = {
         this.selectedFile = null;
         const banner = document.getElementById('selected-file-banner');
         const settingsCard = document.getElementById('transcode-settings-card');
-        const compCard = document.getElementById('metadata-comparison-card');
+        const metaCard = document.getElementById('metadata-comparison-card');
+        const fileInput = document.getElementById('transcode-file-input');
 
         if (banner) banner.style.display = 'none';
+        if (fileInput) fileInput.value = '';
         if (settingsCard) {
-            settingsCard.style.opacity = '0.6';
+            settingsCard.style.opacity = '0.65';
             settingsCard.style.pointerEvents = 'none';
         }
-        if (compCard) compCard.style.display = 'none';
+        if (metaCard) metaCard.style.display = 'none';
     },
 
-    // ── 格式选项互斥处理 ─────────────────────────────────────
     onFormatChange() {
-        const format = document.getElementById('param-format').value;
-        const groupVideoCodec = document.getElementById('group-video-codec');
-        const groupQualityRes = document.getElementById('group-quality-res');
-        const groupAudioMode = document.getElementById('group-audio-mode');
-        const groupHwAccel = document.getElementById('group-hw-accel');
+        const fmt = document.getElementById('param-format').value;
+        const vcodecGroup = document.getElementById('group-video-codec');
+        const qualResGroup = document.getElementById('group-quality-res');
+        const audioGroup = document.getElementById('group-audio-mode');
+        const hwGroup = document.getElementById('group-hw-accel');
 
-        // 音频抽取模式
-        const isAudioOnly = format === 'mp3';
-        
-        if (isAudioOnly) {
-            if (groupVideoCodec) groupVideoCodec.style.display = 'none';
-            if (groupQualityRes) groupQualityRes.style.display = 'none';
-            if (groupAudioMode) groupAudioMode.style.display = 'none';
-            if (groupHwAccel) groupHwAccel.style.display = 'none';
+        if (fmt === 'mp3') {
+            // 纯音频提取模式，隐藏视频专属选项
+            if (vcodecGroup) vcodecGroup.style.display = 'none';
+            if (qualResGroup) qualResGroup.style.display = 'none';
+            if (audioGroup) audioGroup.style.display = 'none';
+            if (hwGroup) hwGroup.style.display = 'none';
         } else {
-            if (groupVideoCodec) groupVideoCodec.style.display = 'block';
-            if (groupQualityRes) groupQualityRes.style.display = 'grid';
-            if (groupAudioMode) groupAudioMode.style.display = 'block';
-            if (groupHwAccel) groupHwAccel.style.display = 'block';
+            if (vcodecGroup) vcodecGroup.style.display = 'block';
+            if (qualResGroup) qualResGroup.style.display = 'flex';
+            if (audioGroup) audioGroup.style.display = 'block';
+            if (hwGroup) hwGroup.style.display = 'block';
         }
     },
 
-    // ── 开始转码并进入队列 ────────────────────────────────────
     async startTranscoding() {
-        if (!this.selectedFile) return;
+        if (!this.selectedFile) {
+            Toast.warning('请先选择或拖入一个视频文件');
+            return;
+        }
 
         const format = document.getElementById('param-format').value;
-        const codec = document.getElementById('param-codec').value;
+        const videoCodec = document.getElementById('param-codec').value;
         const quality = document.getElementById('param-quality').value;
         const resolution = document.getElementById('param-resolution').value;
-        const audio = document.getElementById('param-audio').value;
-        const hw = document.getElementById('param-hw').value === 'true';
+        const audioMode = document.getElementById('param-audio').value;
+        const hwAccel = document.getElementById('param-hw').value === 'true';
 
         const btn = document.getElementById('btn-start-transcode');
-        if (btn) btn.disabled = true;
-
-        const params = {
-            output_format: format,
-            video_codec: codec,
-            quality: quality,
-            resolution: resolution,
-            audio_mode: audio,
-            hw_accel: hw
-        };
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = '🚀 正在提交转码任务...';
+        }
 
         try {
-            const result = await API.transcode.start(this.selectedFile.path, params);
-            if (result.success) {
-                Toast.success('转码任务已成功排队！');
-                // 立即更新队列状态
-                await this.pollStatus();
+            const res = await API.transcode.start({
+                input_path: this.selectedFile.path,
+                input_name: this.selectedFile.name,
+                output_format: format,
+                video_codec: videoCodec,
+                quality: quality,
+                resolution: resolution,
+                audio_mode: audioMode,
+                hw_accel: hwAccel
+            });
+
+            if (res && res.success) {
+                Toast.success('转码任务已成功加入队列！');
+                this.pollStatus();
+            } else {
+                Toast.error(res.error || '创建转码任务失败');
             }
         } catch (err) {
-            // shown by wrapper
+            Toast.error('任务提交失败: ' + err.message);
         } finally {
-            if (btn) btn.disabled = false;
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = '⚡ 开始一键转码';
+            }
         }
     },
 
-    // ── 扫描导入本地下载视频 ──────────────────────────────────
+    // ── 扫描下载目录视频 ──────────────────────────────────────────
     async loadScannedVideos() {
         try {
-            const data = await API.transcode.scanDownloads();
-            if (data.success) {
-                this.scannedVideos = data.videos || [];
+            const res = await API.transcode.scanDownloads();
+            if (res && res.success) {
+                this.scannedVideos = res.videos || [];
                 this.renderScannedVideos();
             }
         } catch (err) {
             console.error('Scan downloads failed:', err);
+            const container = document.getElementById('scanned-list-container');
+            if (container) {
+                container.innerHTML = `
+                    <div style="text-align: center; color: var(--text-muted); padding: 20px 0; font-size: 0.85rem;">
+                        读取已下载视频列表失败
+                    </div>
+                `;
+            }
         }
     },
 
@@ -519,12 +580,12 @@ const TranscodePage = {
             const timeStr = v.created_at ? new Date(v.created_at * 1000).toLocaleDateString() : '--';
             const sizeStr = formatBytes(v.size_bytes);
             return `
-                <div class="scanned-item" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px; background: rgba(255,255,255,0.02); border: 1px solid var(--border-color); border-radius: var(--radius-md); transition: all 0.2s;">
+                <div class="scanned-item" style="display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px; background: #ffffff; border: 1px solid #e2e8f0; border-radius: var(--radius-md); box-shadow: 0 1px 2px rgba(0,0,0,0.02); transition: all 0.2s;">
                     <div style="min-width: 0; flex: 1;">
-                        <div style="font-weight: 500; font-size: 0.85rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(v.name)}">
+                        <div style="font-weight: 600; font-size: 0.85rem; color: #1e293b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(v.name)}">
                             ${escapeHtml(v.name)}
                         </div>
-                        <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px; display: flex; gap: var(--spacing-md);">
+                        <div style="font-size: 0.72rem; color: #64748b; margin-top: 4px; display: flex; gap: var(--spacing-md);">
                             <span>📁 ${escapeHtml(v.parent_name || '已下载')}</span>
                             <span>⚖️ ${sizeStr}</span>
                             <span>🕒 ${timeStr}</span>
@@ -575,34 +636,34 @@ const TranscodePage = {
                 const timeStr = new Date(job.created_at * 1000).toLocaleTimeString();
                 
                 if (job.status === 'pending') {
-                    statusBadge = '<span class="badge badge-warning" style="background: rgba(254, 225, 64, 0.08); color: var(--warning);">等待中</span>';
+                    statusBadge = '<span class="badge badge-warning" style="background: rgba(245, 158, 11, 0.1); color: #d97706;">等待中</span>';
                 } else if (job.status === 'running') {
-                    statusBadge = '<span class="badge badge-info" style="background: rgba(102, 126, 234, 0.08); color: var(--primary-light); animation: pulse 1s infinite;">转码中</span>';
+                    statusBadge = '<span class="badge badge-info" style="background: rgba(102, 126, 234, 0.12); color: var(--primary); animation: pulse 1s infinite;">转码中</span>';
                     progressArea = `
                         <div style="margin-top: 8px; display: flex; flex-direction: column; gap: 4px;">
-                            <div class="progress-bar" style="height: 6px;">
-                                <div class="progress-fill" style="width: ${job.progress}%;"></div>
+                            <div class="progress-bar" style="height: 6px; background: #e2e8f0;">
+                                <div class="progress-fill" style="width: ${job.progress}%; background: var(--gradient-primary);"></div>
                             </div>
-                            <div style="display: flex; justify-content: space-between; font-size: 0.72rem; color: var(--text-secondary);">
+                            <div style="display: flex; justify-content: space-between; font-size: 0.72rem; color: #64748b;">
                                 <span>速度: ${job.speed || 'N/A'} (${job.fps ? Math.round(job.fps) + ' fps' : '--'})</span>
-                                <span>进度: ${job.progress}%</span>
+                                <span style="font-weight: 600; color: var(--primary);">进度: ${job.progress}%</span>
                             </div>
                         </div>
                     `;
                 } else if (job.status === 'completed') {
-                    statusBadge = '<span class="badge badge-success" style="background: rgba(67, 233, 123, 0.08); color: var(--success);">已完成</span>';
+                    statusBadge = '<span class="badge badge-success" style="background: rgba(34, 197, 94, 0.1); color: #16a34a;">已完成</span>';
                 } else if (job.status === 'failed') {
-                    statusBadge = '<span class="badge badge-error" style="background: rgba(245, 87, 108, 0.08); color: var(--error);" title="' + escapeHtml(job.error || '') + '">失败</span>';
+                    statusBadge = '<span class="badge badge-error" style="background: rgba(239, 68, 68, 0.1); color: #dc2626;" title="' + escapeHtml(job.error || '') + '">失败</span>';
                 }
 
                 return `
-                    <div class="queue-item" style="padding: 10px; background: rgba(255, 255, 255, 0.01); border: 1px solid var(--border-color); border-radius: var(--radius-md); transition: all 0.2s;">
+                    <div class="queue-item" style="padding: 10px 12px; background: #ffffff; border: 1px solid #e2e8f0; border-radius: var(--radius-md); box-shadow: 0 1px 2px rgba(0,0,0,0.02); transition: all 0.2s;">
                         <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
                             <div style="min-width: 0; flex: 1;">
-                                <div style="font-weight: 600; font-size: 0.85rem; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(job.input_name)}">
+                                <div style="font-weight: 600; font-size: 0.85rem; color: #1e293b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(job.input_name)}">
                                     ${escapeHtml(job.input_name)}
                                 </div>
-                                <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 4px; display: flex; gap: 8px; align-items: center;">
+                                <div style="font-size: 0.72rem; color: #64748b; margin-top: 4px; display: flex; gap: 8px; align-items: center;">
                                     <span>🕒 ${timeStr}</span>
                                     <span>⚙️ ${job.params.output_format.toUpperCase()} (${job.params.video_codec})</span>
                                 </div>
@@ -618,7 +679,7 @@ const TranscodePage = {
                         </div>
                         ${progressArea}
                         ${job.status === 'failed' ? `
-                            <div style="margin-top: 6px; color: var(--error); font-size: 0.72rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(job.error || '')}">
+                            <div style="margin-top: 6px; color: #dc2626; font-size: 0.72rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escapeHtml(job.error || '')}">
                                 ❌ 错误: ${escapeHtml(job.error || '')}
                             </div>
                         ` : ''}
@@ -626,7 +687,7 @@ const TranscodePage = {
                 `;
             }).join('');
 
-            // 如果当前查看的视频就是队列中转码完成的视频，自动填充输出比对元数据（始终获取最新完成的任务）
+            // 如果当前查看的视频就是队列中转码完成的视频，自动填充输出比对元数据
             if (this.selectedFile) {
                 const matchedJobs = data.jobs.filter(j => j.input_path === this.selectedFile.path && j.status === 'completed');
                 if (matchedJobs.length > 0) {
@@ -687,8 +748,8 @@ const TranscodePage = {
         if (sizeEl) sizeEl.textContent = formatBytes(meta.size_bytes);
         if (durEl) durEl.textContent = formatDuration(meta.duration);
         if (fmtEl) fmtEl.textContent = meta.format_name ? meta.format_name.split(',')[0] : 'Unknown';
-        if (vcodecEl) vcodecEl.textContent = meta.video_codec.toUpperCase();
-        if (acodecEl) acodecEl.textContent = meta.audio_codec.toUpperCase();
+        if (vcodecEl) vcodecEl.textContent = (meta.video_codec || '').toUpperCase();
+        if (acodecEl) acodecEl.textContent = (meta.audio_codec || '').toUpperCase();
         if (resEl) resEl.textContent = meta.width && meta.height ? `${meta.width} x ${meta.height}` : 'Audio Only';
         if (fpsEl) fpsEl.textContent = meta.fps ? `${meta.fps} FPS` : '--';
     },
@@ -702,8 +763,8 @@ const TranscodePage = {
         if (metaOutEmpty) metaOutEmpty.style.display = 'none';
         if (metaOutDetails) metaOutDetails.style.display = 'flex';
         if (metaOutBox) {
-            metaOutBox.style.background = 'rgba(67, 233, 123, 0.05)';
-            metaOutBox.style.borderColor = 'rgba(67, 233, 123, 0.4)';
+            metaOutBox.style.background = '#f0fdf4';
+            metaOutBox.style.borderColor = '#86efac';
         }
 
         const outMeta = job.output_metadata;
@@ -718,16 +779,16 @@ const TranscodePage = {
                 ratioEl.style.display = 'inline-flex';
                 if (ratio > 0) {
                     ratioEl.textContent = `🎉 已节省空间 ${ratio}%`;
-                    ratioEl.style.background = 'rgba(67, 233, 123, 0.15)';
-                    ratioEl.style.color = '#22c55e';
+                    ratioEl.style.background = 'rgba(34, 197, 94, 0.15)';
+                    ratioEl.style.color = '#16a34a';
                 } else if (ratio < 0) {
                     ratioEl.textContent = `⚠️ 体积增大了 ${Math.abs(ratio)}%`;
                     ratioEl.style.background = 'rgba(239, 68, 68, 0.15)';
-                    ratioEl.style.color = '#ef4444';
+                    ratioEl.style.color = '#dc2626';
                 } else {
                     ratioEl.textContent = '⚖️ 转码前后体积无变化';
                     ratioEl.style.background = 'rgba(102, 126, 234, 0.15)';
-                    ratioEl.style.color = 'var(--primary-light)';
+                    ratioEl.style.color = 'var(--primary)';
                 }
             }
         }
@@ -746,15 +807,15 @@ const TranscodePage = {
             ratioEl.textContent = '--';
         }
         if (metaOutBox) {
-            metaOutBox.style.background = 'rgba(255, 255, 255, 0.01)';
-            metaOutBox.style.borderColor = 'var(--border-color)';
+            metaOutBox.style.background = '#f8fafc';
+            metaOutBox.style.borderColor = '#e2e8f0';
         }
     }
 };
 
 // ── 格式化大小与时间辅助函数 ────────────────────────────────────
 function formatBytes(bytes, decimals = 2) {
-    if (bytes === 0) return '0 Bytes';
+    if (!bytes || bytes === 0) return '0 Bytes';
     const k = 1024;
     const dm = decimals < 0 ? 0 : decimals;
     const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
@@ -793,7 +854,6 @@ function escapeSingleQuotes(str) {
 }
 
 function ensure_drag_drop_styles() {
-    // 注入局部的微动画样式确保拖拽反馈及 pulse 更加细腻
     const id = 'transcode-local-styles';
     if (document.getElementById(id)) return;
 
@@ -806,12 +866,12 @@ function ensure_drag_drop_styles() {
             100% { opacity: 0.6; }
         }
         .scanned-item:hover {
-            background: rgba(255,255,255,0.06) !important;
-            border-color: var(--primary-light) !important;
+            background: #f8fafc !important;
+            border-color: var(--primary) !important;
         }
         .queue-item:hover {
-            border-color: var(--primary-light) !important;
-            box-shadow: var(--shadow-sm);
+            border-color: var(--primary) !important;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.06);
         }
     `;
     document.head.appendChild(style);

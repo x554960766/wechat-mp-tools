@@ -170,6 +170,8 @@ const DyDownloadsPage = {
         const typeSet = types instanceof Set ? types : new Set(types);
         const labels = [];
         if (typeSet.has('视频')) labels.push('视频');
+        if (typeSet.has('直播回放')) labels.push('直播回放');
+        if (typeSet.has('直播')) labels.push('直播');
         if (typeSet.has('图文')) labels.push('图文');
         if (typeSet.has('音乐')) labels.push('音乐');
         if (typeSet.has('批量')) labels.push('批量');
@@ -343,6 +345,8 @@ const DyDownloadsPage = {
                                     ? 'background: rgba(33, 150, 243, 0.1); color: #2196f3; padding: 3px 7px; border-radius: 4px; font-size: 0.75rem; font-weight: 500;'
                                     : 'background: rgba(255, 152, 0, 0.1); color: #ff9800; padding: 3px 7px; border-radius: 4px; font-size: 0.75rem; font-weight: 500;';
 
+                                const isVideo = item.type !== '图文' && (item.type === '视频' || item.type === '短视频' || item.type === '直播' || item.type === '直播回放' || item.type === '合集' || (item.path && /\.(mp4|mov|flv|mkv|avi|webm|ts)$/i.test(item.path)));
+
                                 return `
                                     <tr style="border-bottom: 1px solid var(--border-color); vertical-align: middle; transition: background 0.2s;" onmouseenter="this.style.background='var(--bg-glass-hover)'" onmouseleave="this.style.background='transparent'">
                                         <td style="padding: 10px var(--spacing-md); max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
@@ -364,9 +368,9 @@ const DyDownloadsPage = {
                                             <button class="btn btn-secondary btn-sm" onclick="DyDownloadsPage.openParent('${itemIndex}')" style="padding: 3px 8px; font-size: 0.8rem; margin-right: 4px;">
                                                 📂
                                             </button>
-                                            ${(item.type === '视频' && App.ffmpegAvailable) ? `
+                                            ${isVideo ? `
                                             <button class="btn btn-secondary btn-sm" onclick="DyDownloadsPage.importToTranscode('${itemIndex}')" style="padding: 3px 8px; font-size: 0.8rem; background: var(--gradient-primary); color: white;">
-                                                转码
+                                                导入转码
                                             </button>
                                             ` : ''}
                                         </td>

@@ -322,12 +322,54 @@ class AccountPool:
                 "last_used": acc.get("last_used", 0),
                 "last_verified_at": last_verified_at,
                 "last_verified_result": acc.get("last_verified_result", ""),
+                "last_browser_refreshed_at": acc.get("last_browser_refreshed_at", 0),
                 "cooldown_until": acc.get("cooldown_until", 0),
                 "last_error": acc.get("last_error"),
                 "kicked_time": acc.get("kicked_time", 0),
                 "save_time": save_time,
             })
         return result
+
+    def browser_refresh_account(self, account_id: str) -> dict:
+        """使用专属独立 Profile 启动无头浏览器，深度刷新微信读书登录态 Cookie"""
+        with self._lock:
+            accounts = self._load()
+            target = None
+            for a in accounts:
+                if a["id"] == account_id:
+                    target = a
+                    break
+            if not target:
+                return {"ok": False, "message": "账号不存在"}
+            existing_cookie = target.get("cookie_str", "")
+
+        from backend.weread_browser import refresh_weread_account_browser
+        res = refresh_weread_account_browser(account_id, existing_cookie=existing_cookie, headless=True)
+
+        now = time.time()
+        with self._lock:
+            accounts = self._load()
+            for a in accounts:
+                if a["id"] == account_id:
+                    if res.get("ok"):
+                        a["cookie_str"] = res.get("cookie", a.get("cookie_str", ""))
+                        a["last_browser_refreshed_at"] = now
+                        a["last_verified_at"] = now
+                        a["last_verified_result"] = "浏览器保活刷新成功"
+                        a["status"] = "active"
+                        a["health_status"] = "valid"
+                        a["failures"] = 0
+                        a["last_error"] = None
+                    elif res.get("needs_scan"):
+                        a["status"] = "invalid"
+                        a["health_status"] = "invalid"
+                        a["last_error"] = res.get("message", "登录凭证已过期，需重新扫码")
+                        a["last_verified_at"] = now
+                        a["last_verified_result"] = a["last_error"]
+                    break
+            self._save(accounts)
+
+        return res
 
     def add_or_update(self, cred: dict) -> dict:
         """登录成功后写入/更新（按 token / vid / nickname 去重合并）"""
@@ -435,14 +477,17 @@ class AccountPool:
             return dict(target)
 
     def remove(self, account_id: str) -> bool:
-        """从池中移除账号"""
+        """从池中移除账号，并清理该账号的独立 Profile 目录"""
         with self._lock:
             accounts = self._load()
             new_accounts = [a for a in accounts if a["id"] != account_id]
             if len(new_accounts) == len(accounts):
                 return False
             self._save(new_accounts)
-            return True
+
+        from backend.weread_browser import clean_weread_profile
+        clean_weread_profile(account_id)
+        return True
 
     def revive(self, account_id: str) -> bool:
         """手动复活/重新激活：恢复 status=active, 清零失败和风控计数，设为待探活状态"""
@@ -511,7 +556,7 @@ class AccountPool:
         logger.info("账号池后台自动保活与心跳巡检线程已启动")
 
     def _keepalive_loop(self):
-        """后台保活循环：定期巡检账号健康、自愈冷却、发送轻量保活心跳"""
+        """后台保活循环：定期巡检账号健康、自愈冷却、发送轻量保活心跳与浏览器换新"""
         # 启动后先等待 15 秒（避开应用启动高峰）
         if self._stop_keepalive.wait(15):
             return
@@ -522,12 +567,15 @@ class AccountPool:
             except Exception as e:
                 logger.error("账号池保活巡检异常: %s", e)
 
-            # 每 30 分钟巡检一轮
-            if self._stop_keepalive.wait(30 * 60):
+            # 每 15 分钟巡检一轮（贴合微信读书 1~2 小时凭证周期）
+            if self._stop_keepalive.wait(15 * 60):
                 break
 
     def _run_keepalive_round(self):
-        """执行一轮保活：自愈冷却账号 + 对活跃账号发送轻量心跳保持登录态活跃"""
+        """执行一轮双阶梯保活：
+        1. 冷却自愈与轻量心跳探活（仅对有效活跃账号）
+        2. 定期（>45分钟）按需无头浏览器深度换新 Cookie（严格单实例串行，失效账号彻底跳过）
+        """
         now = time.time()
         with self._lock:
             accounts = self._load()
@@ -540,18 +588,37 @@ class AccountPool:
             if changed:
                 self._save(accounts)
 
-        # 遍历所有可用账号进行心跳探活（防凭证休眠过期）
+        # 阶段一：轻量 HTTP 心跳探活（仅针对活跃健康账号，已失效/已封禁账号彻底跳过）
         accounts = self._load()
         for acc in accounts:
             if self._stop_keepalive.is_set():
                 break
-            if acc.get("status") == "banned":
+            # 严格过滤：失效/封禁账号不重复发送心跳
+            if acc.get("status") in ("invalid", "banned") or acc.get("health_status") == "invalid":
                 continue
             last_ver = acc.get("last_verified_at", 0)
-            if now - last_ver >= 20 * 60:  # 距上次验证超 20 分钟才发送心跳
-                logger.info("账号池自动心跳保活: [%s] (ID: %s)", acc.get("nickname"), acc["id"])
+            if now - last_ver >= 15 * 60:  # 距上次验证超 15 分钟才发送心跳
+                logger.info("账号池自动心跳探活: [%s] (ID: %s)", acc.get("nickname"), acc["id"])
                 self.verify_account(acc["id"])
                 time.sleep(2)  # 账号间间隔 2 秒避开频控
+
+        # 阶段二：对健康活跃账号进行定期浏览器深度会话换新（>45分钟自动换新一次，串行单实例执行）
+        accounts = self._load()
+        for acc in accounts:
+            if self._stop_keepalive.is_set():
+                break
+            # 严格过滤：仅对正常活跃、未失效账号启动无头浏览器保活
+            if acc.get("status") != "active" or acc.get("health_status") != "valid":
+                continue
+            last_browser_ref = acc.get("last_browser_refreshed_at", 0)
+            # 微信读书凭证周期约 1~2 小时，设置 45 分钟深度换新一次，保障始终处于新鲜有效期
+            if now - last_browser_ref >= 45 * 60:
+                logger.info("账号池自动浏览器深度保活换新: [%s] (ID: %s)", acc.get("nickname"), acc["id"])
+                try:
+                    self.browser_refresh_account(acc["id"])
+                except Exception as e:
+                    logger.warning("账号 [%s] 浏览器保活换新异常: %s", acc.get("nickname"), e)
+                time.sleep(5)  # 账号间间隔 5 秒，充分释放浏览器资源
 
 
 # ── 全局单例 ──────────────────────────────────────────

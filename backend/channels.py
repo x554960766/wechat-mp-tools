@@ -681,9 +681,50 @@ def open_folder():
 
 @channels_bp.route("/history", methods=["GET"])
 def get_history():
-    """获取视频号下载历史记录"""
-    from backend.config import load_json
+    """获取视频号下载历史记录 (自动同步磁盘已下载视频)"""
+    import os
+    from backend.config import load_json, save_json
     history = load_json(CHANNELS_HISTORY_FILE, [])
+
+    # 自动扫描本地 channels 下载目录，补充未记录或历史文件丢失的记录
+    settings = get_settings()
+    base_download_dir = Path(settings.get("download_dir") or str(OUTPUT_DIR))
+    channels_dirs = [base_download_dir / "channels"]
+    if OUTPUT_DIR.exists() and (OUTPUT_DIR / "channels") != channels_dirs[0]:
+        channels_dirs.append(OUTPUT_DIR / "channels")
+
+    existing_paths = {str(Path(item.get("path", "")).resolve()) for item in history if isinstance(item, dict) and item.get("path")}
+    new_items = []
+
+    for c_dir in channels_dirs:
+        if c_dir.exists():
+            for root, _, files in os.walk(str(c_dir)):
+                for f in files:
+                    if f.lower().endswith((".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv", ".ts")):
+                        f_path = Path(root) / f
+                        resolved_str = str(f_path.resolve())
+                        if resolved_str not in existing_paths:
+                            existing_paths.add(resolved_str)
+                            try:
+                                st = f_path.stat()
+                                new_items.append({
+                                    "title": f_path.stem,
+                                    "type": "视频",
+                                    "path": resolved_str,
+                                    "size": f"{st.st_size / (1024 * 1024):.2f} MB",
+                                    "time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
+                                    "_mtime": st.st_mtime
+                                })
+                            except Exception:
+                                pass
+
+    if new_items:
+        new_items.sort(key=lambda x: x.get("_mtime", 0), reverse=True)
+        for item in new_items:
+            item.pop("_mtime", None)
+            history.append(item)
+        save_json(CHANNELS_HISTORY_FILE, history[:200])
+
     return jsonify(history)
 
 

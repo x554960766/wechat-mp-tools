@@ -158,6 +158,42 @@ def launch_chromium(chromium, **launch_kwargs):
     ) from last_error
 
 
+def launch_persistent_context(chromium, user_data_dir, **launch_kwargs):
+    """Launch persistent browser context when present, otherwise fall back to system browsers."""
+    attempts = []
+    if "channel" in launch_kwargs:
+        attempts.append({})
+    elif bundled_browsers_available():
+        if launch_kwargs.get("headless"):
+            attempts.append({"channel": "chromium"})
+        else:
+            attempts.append({})
+        attempts.extend({"channel": channel} for channel in _system_browser_channels())
+        attempts.append({})
+    else:
+        attempts.extend({"channel": channel} for channel in _system_browser_channels())
+        attempts.append({})
+
+    seen = set()
+    last_error = None
+    for override in attempts:
+        key = tuple(sorted(override.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        kwargs = launch_kwargs.copy()
+        kwargs.update(override)
+        try:
+            return chromium.launch_persistent_context(str(user_data_dir), **kwargs)
+        except Exception as exc:
+            last_error = exc
+
+    raise RuntimeError(
+        "未检测到可用浏览器。请安装 Google Chrome / Microsoft Edge，"
+        "或使用内置 Chromium 的完整版安装包。"
+    ) from last_error
+
+
 def write_startup_error(exc: BaseException):
     try:
         target = log_file()

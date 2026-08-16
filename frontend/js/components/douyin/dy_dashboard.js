@@ -26,8 +26,8 @@ const DyDashboardPage = {
                             <svg viewBox="0 0 24 24" fill="none" style="width: 24px; height: 24px;"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
                         </div>
                     </div>
-                    <h3 style="font-size: 1.2rem; margin-bottom: 4px;">解析链接</h3>
-                    <p style="color: var(--text-muted); font-size: 0.9rem;">解析分享链接，一键下载视频</p>
+                    <h3 style="font-size: 1.2rem; margin-bottom: 4px;">解析下载</h3>
+                    <p style="color: var(--text-muted); font-size: 0.9rem;">支持视频、图文、直播回放与合集下载</p>
                 </div>
 
                 <div class="card" style="cursor: pointer;" onclick="Router.navigate('dy_recommend')">

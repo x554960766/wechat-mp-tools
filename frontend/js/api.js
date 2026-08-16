@@ -76,6 +76,7 @@ const API = {
         remove(id)     { return API.delete(`/api/account-pool/${id}`); },
         update(id, data) { return API.put(`/api/account-pool/${id}`, data); },
         verify(id)     { return API.post(`/api/account-pool/${id}/verify`); },
+        browserRefresh(id) { return API.post(`/api/account-pool/${id}/browser-refresh`); },
         verifyAll()    { return API.post('/api/account-pool/verify-all'); },
         revive(id)     { return API.post(`/api/account-pool/${id}/revive`); },
         events()       { return API.get('/api/account-pool/events', { showError: false }); },
@@ -226,7 +227,12 @@ const API = {
         downloadFFmpegStatus() { return API.get('/api/transcode/download-ffmpeg-status', { showError: false }); },
         scanDownloads() { return API.get('/api/transcode/scan-downloads'); },
         videoInfo(path) { return API.post('/api/transcode/video-info', { path }); },
-        start(inputPath, params) { return API.post('/api/transcode/start', { input_path: inputPath, params }); },
+        start(inputPath, params) {
+            if (typeof inputPath === 'object' && inputPath !== null && !params) {
+                return API.post('/api/transcode/start', inputPath);
+            }
+            return API.post('/api/transcode/start', { input_path: inputPath, params });
+        },
         status() { return API.get('/api/transcode/status', { showError: false }); },
         clearCompleted() { return API.post('/api/transcode/clear-completed'); },
         openParent(path) { return API.post('/api/transcode/open-parent', { path }); },

@@ -90,15 +90,12 @@ const Router = {
             return;
         }
 
-        // 依据当前激活路由，动态切换主题色系 (微信绿色系 vs 抖音暗黑极致灰)
+        // 依据当前激活路由，动态切换主题色系
         if (pageKey.startsWith('dy_')) {
             document.body.classList.add('dy-theme');
             document.body.classList.remove('wechat-theme');
-        } else if (['login', 'accounts', 'articles', 'download', 'history', 'channels'].includes(pageKey) || pageKey.startsWith('channels_') || pageKey.startsWith('xhs_') || pageKey.startsWith('ks_') || pageKey.startsWith('bili_')) {
+        } else {
             document.body.classList.remove('dy-theme');
-            document.body.classList.add('wechat-theme');
-        } else if (!document.body.classList.contains('dy-theme') && !document.body.classList.contains('wechat-theme')) {
-            // Cold boot on a common page: default to wechat-theme
             document.body.classList.add('wechat-theme');
         }
 

@@ -146,9 +146,10 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
-          name: "WeChat MP Tools v${{ github.ref_name }}"
+          name: "WeChat MP Tools ${{ startsWith(github.ref_name, 'v') && github.ref_name || format('v{0}', github.ref_name) }}"
           draft: false
           prerelease: false
+          generate_release_notes: true
           files: |
             artifacts/WeChat-MP-Tools-Windows-Full/WeChat_MP_Tools_Windows_Full.zip
             artifacts/WeChat-MP-Tools-Windows-Lite/WeChat_MP_Tools_Windows_Lite.zip

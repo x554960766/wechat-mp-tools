@@ -256,6 +256,7 @@ const LoginPage = {
 
         // 探活时间文字
         const verifyText = acc.last_verified_at ? `${this.formatTimeAgo(acc.last_verified_at)}验证` : '未检测';
+        const browserRefreshText = acc.last_browser_refreshed_at ? `${this.formatTimeAgo(acc.last_browser_refreshed_at)}刷新` : '待保活';
 
         // 异常信息展示
         let alertHtml = '';
@@ -320,20 +321,20 @@ const LoginPage = {
                 <!-- 健康与状态明细表格 -->
                 <div style="background: var(--bg-tertiary, #f9fafb); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; font-size: 0.8rem; display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; color: var(--text-secondary);">
                     <div>
-                        <span style="color: var(--text-muted);">探活检测:</span>
+                        <span style="color: var(--text-muted);">接口探活:</span>
                         <strong style="color: ${acc.status === 'active' ? '#07c160' : 'var(--text-primary)'};">${verifyText}</strong>
+                    </div>
+                    <div>
+                        <span style="color: var(--text-muted);">浏览器保活:</span>
+                        <span style="color: ${acc.last_browser_refreshed_at ? '#07c160' : 'inherit'}; font-weight: 500;">${browserRefreshText}</span>
                     </div>
                     <div>
                         <span style="color: var(--text-muted);">运行周期:</span>
                         <span>${this.formatUptime(acc.save_time)}</span>
                     </div>
                     <div>
-                        <span style="color: var(--text-muted);">失败计数:</span>
-                        <span style="color: ${acc.failures > 0 ? 'var(--warning)' : 'inherit'};">${acc.failures} 次</span>
-                    </div>
-                    <div>
-                        <span style="color: var(--text-muted);">风控频次:</span>
-                        <span style="color: ${acc.risk_hits > 0 ? 'var(--error)' : 'inherit'};">${acc.risk_hits} 次</span>
+                        <span style="color: var(--text-muted);">风控/失败:</span>
+                        <span style="color: ${(acc.failures > 0 || acc.risk_hits > 0) ? 'var(--warning)' : 'inherit'};">${acc.failures}失 / ${acc.risk_hits}控</span>
                     </div>
                 </div>
 
@@ -343,6 +344,9 @@ const LoginPage = {
                 <div style="display: flex; gap: 6px; align-items: center; justify-content: flex-end; flex-wrap: wrap;">
                     <button class="btn btn-secondary btn-sm" onclick="LoginPage.verifyAccount('${acc.id}', this)" ${isVerifying ? 'disabled' : ''} style="font-size: 0.78rem; padding: 4px 10px;">
                         ${isVerifying ? '<span class="spinner" style="width: 12px; height: 12px; margin-right: 4px; border-width: 2px;"></span>检测中' : '🔍 检测'}
+                    </button>
+                    <button class="btn btn-secondary btn-sm" onclick="LoginPage.browserRefreshAccount('${acc.id}', this)" style="font-size: 0.78rem; padding: 4px 10px;" title="使用专属独立Profile启动无头浏览器换取最新Session">
+                        🌐 深度保活
                     </button>
                     <button class="btn btn-secondary btn-sm" onclick="LoginPage.editRemark('${acc.id}', '${this._esc(acc.remark || '')}', '${this._esc(acc.nickname)}')" style="font-size: 0.78rem; padding: 4px 10px;">
                         ✏️ 备注
@@ -365,6 +369,33 @@ const LoginPage = {
         const div = document.createElement('div');
         div.textContent = s;
         return div.innerHTML;
+    },
+
+    // ── 浏览器会话保活刷新 ──────────────────────────────
+    async browserRefreshAccount(id, btn) {
+        if (btn) {
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner" style="width: 12px; height: 12px; margin-right: 4px; border-width: 2px;"></span>保活中...';
+        }
+
+        try {
+            Toast.info('正在后台使用独立 Profile 启动无头浏览器换新会话...');
+            const res = await API.accountPool.browserRefresh(id);
+            if (res.ok) {
+                Toast.success(`账号保活成功：${res.message || '已成功换取最新凭证'}`);
+            } else {
+                Toast.warning(`保活反馈：${res.message || '未能换取新凭证'}`);
+            }
+            await this.loadAccounts();
+            App.checkAuthStatus();
+        } catch (err) {
+            Toast.error('浏览器保活失败: ' + (err.message || '网络异常'));
+        } finally {
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '🌐 深度保活';
+            }
+        }
     },
 
     // ── 单账号探活检测 ──────────────────────────────

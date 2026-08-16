@@ -744,52 +744,67 @@ def start_worker():
 
 @transcode_bp.route("/scan-downloads", methods=["GET"])
 def scan_downloads():
-    """扫描 WeChat 和 Douyin 文件夹下的所有视频文件"""
+    """扫描 WeChat 视频号和 Douyin 抖音文件夹下的所有视频文件"""
     ensure_dirs()
     video_list = []
+    seen_paths = set()
     
-    # 1. 递归扫描微信及视频号视频 (wechat)
-    if OUTPUT_DIR.exists():
-        for root, dirs, files in os.walk(str(OUTPUT_DIR)):
+    # 1. 递归扫描微信视频号已下载视频 (wechat)
+    settings = get_settings()
+    base_download_dir = Path(settings.get("download_dir") or str(OUTPUT_DIR))
+    channels_dirs = [base_download_dir / "channels"]
+    if OUTPUT_DIR.exists() and (OUTPUT_DIR / "channels") != channels_dirs[0]:
+        channels_dirs.append(OUTPUT_DIR / "channels")
+
+    for c_dir in channels_dirs:
+        if c_dir.exists():
+            for root, dirs, files in os.walk(str(c_dir)):
+                for file in files:
+                    if file.lower().endswith((".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv", ".ts")):
+                        f_path = Path(root) / file
+                        if "temp_uploads" in f_path.parts or "transcoded" in f_path.parts:
+                            continue
+                        resolved_str = str(f_path.resolve())
+                        if resolved_str in seen_paths:
+                            continue
+                        seen_paths.add(resolved_str)
+
+                        video_list.append({
+                            "name": file,
+                            "parent_name": "视频号已下载",
+                            "path": resolved_str,
+                            "size_bytes": f_path.stat().st_size,
+                            "source": "wechat",
+                            "created_at": f_path.stat().st_mtime
+                        })
+                            
+    # 2. 递归扫描抖音视频与直播录制 (douyin)
+    if DOUYIN_DIR.exists():
+        for root, dirs, files in os.walk(str(DOUYIN_DIR)):
             for file in files:
-                if file.lower().endswith((".mp4", ".mov", ".mkv", ".avi", ".webm")):
+                if file.lower().endswith((".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv", ".ts")):
                     f_path = Path(root) / file
-                    
-                    # 排除临时上传及转码输出目录，防自身循环干扰
                     if "temp_uploads" in f_path.parts or "transcoded" in f_path.parts:
                         continue
-                        
-                    # 仅限视频号已下载的视频，排除公众号文章目录中的视频（公众号下载不能转码）
-                    try:
-                        rel_parts = f_path.relative_to(OUTPUT_DIR).parts
-                        if "channels" not in rel_parts:
-                            continue
-                        parent_name = "视频号已下载"
-                    except Exception:
+                    resolved_str = str(f_path.resolve())
+                    if resolved_str in seen_paths:
                         continue
-                        
+                    seen_paths.add(resolved_str)
+
+                    try:
+                        rel = f_path.relative_to(DOUYIN_DIR)
+                        parent_name = rel.parts[0] if len(rel.parts) > 1 else "抖音已下载"
+                    except Exception:
+                        parent_name = "抖音已下载"
+
                     video_list.append({
                         "name": file,
                         "parent_name": parent_name,
-                        "path": str(f_path.resolve()),
+                        "path": resolved_str,
                         "size_bytes": f_path.stat().st_size,
-                        "source": "wechat",
+                        "source": "douyin",
                         "created_at": f_path.stat().st_mtime
                     })
-                            
-    # 2. 扫描抖音视频 (douyin)
-    # 路径为 data/douyin_downloads/*.mp4
-    if DOUYIN_DIR.exists():
-        for f in DOUYIN_DIR.iterdir():
-            if f.is_file() and f.suffix.lower() in (".mp4", ".mov", ".mkv", ".avi", ".webm"):
-                video_list.append({
-                    "name": f.name,
-                    "parent_name": "抖音已下载",
-                    "path": str(f.resolve()),
-                    "size_bytes": f.stat().st_size,
-                    "source": "douyin",
-                    "created_at": f.stat().st_mtime
-                })
                 
     # 降序排列 (按创建时间)
     video_list.sort(key=lambda x: x["created_at"], reverse=True)
@@ -840,21 +855,38 @@ def start_transcode():
     
     data = request.get_json() or {}
     input_path = data.get("input_path", "")
-    params = data.get("params", {})
-    
-    if not input_path or not os.path.exists(input_path):
-        return jsonify({"error": "找不到输入的视频文件"}), 400
+    if isinstance(input_path, dict):
+        data = input_path
+        input_path = data.get("input_path", "")
         
+    if not isinstance(input_path, str) or not input_path:
+        return jsonify({"error": "视频路径不能为空"}), 400
+
+    if not os.path.exists(input_path):
+        return jsonify({"error": f"找不到输入的视频文件: {input_path}"}), 400
+        
+    params = data.get("params")
+    if not isinstance(params, dict):
+        params = {
+            "output_format": data.get("output_format", "mp4"),
+            "video_codec": data.get("video_codec", "h264"),
+            "quality": data.get("quality", "medium"),
+            "resolution": data.get("resolution", "keep"),
+            "audio_mode": data.get("audio_mode", "keep"),
+            "hw_accel": data.get("hw_accel", True)
+        }
+
     # 参数预校验与默认值
     output_format = params.get("output_format", "mp4").lower()
     if output_format not in ("mp4", "mkv", "mov", "webm", "mp3"):
         return jsonify({"error": "不支持的输出格式"}), 400
         
     job_id = uuid.uuid4().hex[:12]
+    input_name = data.get("input_name") or Path(input_path).name
     
     job = {
         "id": job_id,
-        "input_name": Path(input_path).name,
+        "input_name": input_name,
         "input_path": input_path,
         "input_size": os.path.getsize(input_path),
         "output_path": None,
@@ -959,7 +991,7 @@ def resolve_path():
             print(f"检查路径归属失败: {e}")
             
         if path.is_file():
-            if path.suffix.lower() in (".mp4", ".mov", ".mkv", ".avi", ".webm"):
+            if path.suffix.lower() in (".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv", ".ts"):
                 return jsonify({
                     "success": True,
                     "path": str(path.resolve()),
@@ -972,7 +1004,7 @@ def resolve_path():
         # 如果是文件夹，递归寻找第一个视频
         for root, dirs, files in os.walk(str(path)):
             for file in files:
-                if file.lower().endswith((".mp4", ".mov", ".mkv", ".avi", ".webm")):
+                if file.lower().endswith((".mp4", ".mov", ".mkv", ".avi", ".webm", ".flv", ".ts")):
                     f_path = Path(root) / file
                     return jsonify({
                         "success": True,

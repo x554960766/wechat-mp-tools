@@ -18,6 +18,7 @@ import string
 import threading
 import urllib.parse
 from pathlib import Path
+from typing import Any
 from flask import Blueprint, jsonify, request
 
 import requests as http_requests
@@ -50,17 +51,24 @@ API_MULTI_DETAIL = "https://www.douyin.com/aweme/v1/web/multi/aweme/detail/"
 API_USER_POST = "https://www.douyin.com/aweme/v1/web/aweme/post/"
 API_MIX_AWEME = "https://www.douyin.com/aweme/v1/web/mix/aweme/"
 API_MUSIC_DETAIL = "https://www.douyin.com/aweme/v1/web/music/detail/"
+API_WEBCAST_ROOM = "https://live.douyin.com/webcast/room/web/enter/"
+API_REFLOW_EPISODE = "https://webcast.amemv.com/webcast/reflow/episode/info/"
 
 # ── 全局任务状态管理 ──────────────────────────────────────
 
 _task_state = {
     "status": "idle",          # idle / running / completed / failed / cancelled
+    "task_type": "batch",      # batch / single / live
     "total": 0,
     "current_index": 0,
     "current_title": "",
     "logs": [],
     "downloaded_count": 0,
     "failed_count": 0,
+    "start_time": 0,
+    "duration_seconds": 0,
+    "recorded_size": 0,
+    "last_saved_path": "",
 }
 _task_lock = threading.Lock()
 _task_cancel_event = threading.Event()  # 取消标志
@@ -75,7 +83,9 @@ def _add_log(message: str):
 
 
 def _set_task_state(status: str = None, total: int = None, current_index: int = None,
-                     current_title: str = None, downloaded_count: int = None, failed_count: int = None):
+                     current_title: str = None, downloaded_count: int = None, failed_count: int = None,
+                     task_type: str = None, duration_seconds: int = None, recorded_size: int = None,
+                     last_saved_path: str = None):
     with _task_lock:
         if status is not None:
             _task_state["status"] = status
@@ -89,18 +99,31 @@ def _set_task_state(status: str = None, total: int = None, current_index: int = 
             _task_state["downloaded_count"] = downloaded_count
         if failed_count is not None:
             _task_state["failed_count"] = failed_count
+        if task_type is not None:
+            _task_state["task_type"] = task_type
+        if duration_seconds is not None:
+            _task_state["duration_seconds"] = duration_seconds
+        if recorded_size is not None:
+            _task_state["recorded_size"] = recorded_size
+        if last_saved_path is not None:
+            _task_state["last_saved_path"] = last_saved_path
 
 
-def _reset_task_state(total: int = 0):
+def _reset_task_state(total: int = 0, task_type: str = "batch"):
     with _task_lock:
         _task_state["status"] = "running"
+        _task_state["task_type"] = task_type
         _task_state["total"] = total
         _task_state["current_index"] = 0
         _task_state["current_title"] = ""
         _task_state["logs"] = []
         _task_state["downloaded_count"] = 0
         _task_state["failed_count"] = 0
-    _add_log(f"任务启动，共计需要处理 {total} 项内容")
+        _task_state["start_time"] = time.time()
+        _task_state["duration_seconds"] = 0
+        _task_state["recorded_size"] = 0
+        _task_state["last_saved_path"] = ""
+    _add_log(f"任务启动，共计需要处理 {total} 项内容" if task_type != "live" else "🔴 直播录制任务已启动")
 
 
 def ensure_douyin_dirs():
@@ -176,6 +199,8 @@ class DouyinClient:
         proxies = get_proxies_dict()
         if proxies:
             self.session.proxies.update(proxies)
+        else:
+            self.session.trust_env = False
 
     def _get_common_headers(self) -> dict:
         """通用请求头"""
@@ -428,18 +453,39 @@ class DouyinClient:
 
     @staticmethod
     def extract_aweme_id(url: str) -> str:
-        """从 URL 中提取 aweme_id"""
+        """从 URL 中提取 aweme_id 或回放 ID"""
         url = url.strip()
         # 纯数字
         if re.match(r"^\d+$", url):
             return url
-        # 各种 URL 格式
+        # 各种 URL 格式（含短视频、图文、直播回放 vsdetail 与 episode）
         patterns = [
+            r"vsdetail/(\d+)",
+            r"reflow/episode/(\d+)",
+            r"episode/(\d+)",
+            r"episode_id=(\d+)",
             r"video/(\d+)",
             r"note/(\d+)",
             r"aweme_id=(\d+)",
             r"modal_id=(\d+)",
             r"/(\d{18,21})",
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, url)
+            if m:
+                return m.group(1)
+        return ""
+
+    @staticmethod
+    def extract_live_room_id(url: str) -> str:
+        """从 URL 中提取直播间 room_id / web_rid"""
+        url = url.strip()
+        patterns = [
+            r"live\.douyin\.com/(\d+)",
+            r"/follow/live/(\d+)",
+            r"webcast/reflow/(\d+)",
+            r"room_id=(\d+)",
+            r"web_rid=(\d+)",
         ]
         for pattern in patterns:
             m = re.search(pattern, url)
@@ -499,6 +545,252 @@ class DouyinClient:
             pass
 
         raise Exception(f"无法获取作品 {aweme_id} 的详情，可能需要有效的 Cookie 或作品已删除")
+
+    # ── 直播与回放 API ──────────────────────────────────
+
+    def get_live_room_info(self, room_id: str, sec_user_id: str = "") -> dict:
+        """获取直播间信息与实时流地址（多通道兜底）"""
+        # 1. 尝试从 webcast.amemv.com/douyin/webcast/reflow/ 提取 RSC 页面渲染数据
+        try:
+            room = self._extract_room_from_webcast(room_id, sec_user_id)
+            if room:
+                return {"room": room, "user": room.get("owner") or room.get("ownerUser") or {}}
+        except Exception:
+            pass
+
+        # 2. 尝试 live.douyin.com 网页 HTML 提取
+        try:
+            room = self._extract_room_from_live_web(room_id)
+            if room:
+                return {"room": room, "user": room.get("owner") or room.get("ownerUser") or {}}
+        except Exception:
+            pass
+
+        # 3. 尝试 live.douyin.com API 接口
+        self.session.headers["Referer"] = f"https://live.douyin.com/{room_id}"
+        params = {
+            "aid": "6383",
+            "app_name": "douyin_web",
+            "live_id": "1",
+            "device_platform": "web",
+            "language": "zh-CN",
+            "enter_from": "web_live",
+            "cookie_enabled": "true",
+            "screen_width": "1920",
+            "screen_height": "1080",
+            "browser_language": "zh-CN",
+            "browser_platform": "MacIntel",
+            "browser_name": "Chrome",
+            "browser_version": "120.0.0.0",
+            "web_rid": room_id,
+            "room_id_str": room_id,
+        }
+        if sec_user_id:
+            params["sec_user_id"] = sec_user_id
+
+        try:
+            res = self.api_get(API_WEBCAST_ROOM, params, skip_sign=True)
+            if res.get("status_code") == 0 and "data" in res:
+                data_obj = res.get("data", {})
+                if "data" in data_obj and isinstance(data_obj["data"], list) and len(data_obj["data"]) > 0:
+                    return data_obj["data"][0]
+                return data_obj
+        except Exception:
+            pass
+
+        return {}
+
+    def _extract_room_from_webcast(self, room_id: str, sec_user_id: str = "") -> dict:
+        """从 webcast.amemv.com reflow 页面提取直播间数据"""
+        url = f"https://webcast.amemv.com/douyin/webcast/reflow/{room_id}"
+        if sec_user_id:
+            url += f"?sec_user_id={sec_user_id}"
+        resp = self.session.get(url, timeout=10)
+        resp.encoding = "utf-8"
+        html = resp.text
+
+        # 1. 查找 RSC payload (self.__rsc_f.push)
+        rsc_chunks = re.findall(r"self\.__rsc_f\.push\(\[1,\s*\"(.*?)\"\]\)", html, re.DOTALL)
+        if rsc_chunks:
+            full_text = ""
+            for c in rsc_chunks:
+                try:
+                    full_text += json.loads(f"\"{c}\"")
+                except Exception:
+                    full_text += c
+            idx = full_text.find("\"room\":{")
+            if idx != -1:
+                start = idx + 7
+                depth = 0
+                end = start
+                for i in range(start, len(full_text)):
+                    if full_text[i] == "{":
+                        depth += 1
+                    elif full_text[i] == "}":
+                        depth -= 1
+                        if depth == 0:
+                            end = i + 1
+                            break
+                room_str = full_text[start:end]
+                room = json.loads(room_str)
+                return room
+
+        # 2. 查找 RENDER_DATA
+        render_match = re.search(r'<script\s+id="RENDER_DATA"\s+type="application/json">([^<]+)</script>', html)
+        if render_match:
+            raw_data = urllib.parse.unquote(render_match.group(1))
+            data = json.loads(raw_data)
+            if isinstance(data, dict):
+                for v in data.values():
+                    if isinstance(v, dict) and "room" in v:
+                        return v["room"]
+        return {}
+
+    def _extract_room_from_live_web(self, room_id: str) -> dict:
+        """从 live.douyin.com 页面提取直播间数据"""
+        url = f"https://live.douyin.com/{room_id}"
+        resp = self.session.get(url, timeout=10)
+        resp.encoding = "utf-8"
+        html = resp.text
+
+        render_match = re.search(r'<script\s+id="RENDER_DATA"\s+type="application/json">([^<]+)</script>', html)
+        if render_match:
+            raw_data = urllib.parse.unquote(render_match.group(1))
+            data = json.loads(raw_data)
+            if isinstance(data, dict):
+                for v in data.values():
+                    if isinstance(v, dict) and "room" in v:
+                        return v["room"]
+        return {}
+
+    def get_replay_detail(self, replay_id: str) -> dict:
+        """获取直播回放/剧集详情（多通道兜底）"""
+        # 1. 首先尝试普通 video_detail (很多 vsdetail 在 aweme/detail 中可直接查到)
+        try:
+            detail = self.get_video_detail(replay_id)
+            if detail:
+                detail["is_live_replay"] = True
+                return detail
+        except Exception:
+            pass
+
+        # 2. 尝试 webcast episode info 接口
+        try:
+            res = self.api_get(API_REFLOW_EPISODE, {
+                "episode_id": replay_id,
+            }, skip_sign=True)
+            if res.get("status_code") == 0 and "data" in res:
+                ep_data = res.get("data", {})
+                detail = self._adapt_episode_to_aweme(ep_data, replay_id)
+                if detail:
+                    return detail
+        except Exception:
+            pass
+
+        # 3. 尝试网页 HTML 提取渲染数据 (RENDER_DATA / _ROUTER_DATA)
+        try:
+            detail = self._fetch_vsdetail_from_html(replay_id)
+            if detail:
+                return detail
+        except Exception:
+            pass
+
+        raise Exception(f"无法获取回放作品 {replay_id} 的详情，可能需要有效的 Cookie 或回放已过期/被删除")
+
+    def _adapt_episode_to_aweme(self, ep_data: dict, replay_id: str) -> dict:
+        """将 webcast episode 数据格式适配为标准 aweme_detail"""
+        item = ep_data.get("episode") or ep_data.get("item") or ep_data
+        user = ep_data.get("user") or item.get("user") or item.get("author") or {}
+        title = item.get("title") or item.get("desc") or f"直播回放_{replay_id}"
+
+        video_info = item.get("video") or {}
+        play_addr = video_info.get("play_addr") or {}
+        url_list = play_addr.get("url_list") or []
+        if not url_list and "stream_url" in item:
+            flv_map = item["stream_url"].get("flv_pull_url") or {}
+            url_list = list(flv_map.values())
+
+        return {
+            "aweme_id": replay_id,
+            "desc": title,
+            "author": {
+                "nickname": user.get("nickname") or "未知主播",
+                "sec_uid": user.get("sec_uid") or "",
+            },
+            "video": {
+                "play_addr": {
+                    "url_list": url_list
+                },
+                "bit_rate": video_info.get("bit_rate") or [],
+                "duration": item.get("duration", 0),
+            },
+            "is_live_replay": True,
+        }
+
+    def _fetch_vsdetail_from_html(self, vs_id: str) -> dict:
+        """从 vsdetail 网页 HTML 提取渲染数据"""
+        urls_to_try = [
+            f"https://www.douyin.com/vsdetail/{vs_id}",
+            f"https://live.douyin.com/vsdetail/{vs_id}",
+        ]
+        for page_url in urls_to_try:
+            try:
+                resp = self.session.get(page_url, timeout=10)
+                if resp.status_code != 200 or not resp.text:
+                    continue
+                html = resp.text
+
+                # 1. 尝试 RENDER_DATA
+                render_match = re.search(r'<script\s+id="RENDER_DATA"\s+type="application/json">([^<]+)</script>', html)
+                if render_match:
+                    raw_data = urllib.parse.unquote(render_match.group(1))
+                    data = json.loads(raw_data)
+                    aweme = self._find_aweme_in_dict(data)
+                    if aweme:
+                        aweme["is_live_replay"] = True
+                        return aweme
+
+                # 2. 尝试 _ROUTER_DATA
+                router_match = re.search(r'window\._ROUTER_DATA\s*=\s*(\{.+?\});?</script>', html)
+                if router_match:
+                    data = json.loads(router_match.group(1))
+                    aweme = self._find_aweme_in_dict(data)
+                    if aweme:
+                        aweme["is_live_replay"] = True
+                        return aweme
+
+                # 3. 尝试 __UNIVERSAL_DATA_FOR_REHYDRATION__
+                univ_match = re.search(r'window\.__UNIVERSAL_DATA_FOR_REHYDRATION__\s*=\s*(\{.+?\});?</script>', html)
+                if univ_match:
+                    data = json.loads(univ_match.group(1))
+                    aweme = self._find_aweme_in_dict(data)
+                    if aweme:
+                        aweme["is_live_replay"] = True
+                        return aweme
+            except Exception as e:
+                _add_log(f"⚠️ 网页回放数据解析尝试失败: {e}")
+        return {}
+
+    @staticmethod
+    def _find_aweme_in_dict(obj: Any) -> dict:
+        """递归查找字典中的 aweme 或 video 结构"""
+        if isinstance(obj, dict):
+            if "aweme_detail" in obj and isinstance(obj["aweme_detail"], dict):
+                return obj["aweme_detail"]
+            if "aweme" in obj and isinstance(obj["aweme"], dict):
+                return obj["aweme"]
+            if "video" in obj and "desc" in obj:
+                return obj
+            for v in obj.values():
+                res = DouyinClient._find_aweme_in_dict(v)
+                if res:
+                    return res
+        elif isinstance(obj, list):
+            for item in obj:
+                res = DouyinClient._find_aweme_in_dict(item)
+                if res:
+                    return res
+        return {}
 
     def get_mix_videos(self, mix_id: str, cursor: int = 0, count: int = 20) -> tuple:
         """获取合集作品列表，返回 (aweme_list, next_cursor, has_more)"""
@@ -625,6 +917,40 @@ class DouyinClient:
 
         return aweme_list, next_cursor, has_more
 
+    def get_user_replays(self, sec_uid: str, max_cursor: int = 0, count: int = 18) -> tuple:
+        """获取博主直播回放列表，返回 (aweme_list, next_cursor, has_more)"""
+        data = self.api_get(API_USER_POST, {
+            "publish_video_strategy_type": "2",
+            "sec_user_id": sec_uid,
+            "max_cursor": str(max_cursor),
+            "locate_query": "false",
+            "show_live_replay_strategy": "1",
+            "need_time_list": "0",
+            "time_list_query": "0",
+            "whale_cut_token": "",
+            "count": str(count),
+        }, skip_sign=True)
+
+        if data.get("status_code") != 0:
+            msg = data.get("status_msg", "未知错误")
+            raise Exception(f"获取用户回放列表失败: {msg}")
+
+        all_aweme = data.get("aweme_list") or []
+        replays = []
+        for item in all_aweme:
+            if item.get("aweme_type") in [101, 103] or item.get("is_live_replay") is True or item.get("vs_entry") is not None:
+                item["is_live_replay"] = True
+                replays.append(item)
+
+        has_more = data.get("has_more", 0)
+        if isinstance(has_more, bool):
+            has_more = has_more
+        else:
+            has_more = int(has_more) == 1
+        next_cursor = data.get("max_cursor", 0)
+
+        return replays, next_cursor, has_more
+
 
     # ── 解析资源信息 ──────────────────────────────────────
 
@@ -651,6 +977,8 @@ class DouyinClient:
             image_post_info = detail.get("image_post_info")
             if isinstance(image_post_info, dict):
                 images = image_post_info.get("images")
+
+        is_replay = bool(detail.get("is_live_replay") or detail.get("aweme_type") == 101)
 
         if images and isinstance(images, list) and len(images) > 0:
             # 图文类型
@@ -682,6 +1010,7 @@ class DouyinClient:
 
             return {
                 "type": "image",
+                "is_replay": False,
                 "title": title,
                 "urls": urls,
                 "aweme_id": aweme_id,
@@ -751,6 +1080,7 @@ class DouyinClient:
 
             return {
                 "type": "video",
+                "is_replay": is_replay,
                 "title": title,
                 "urls": [chosen_url] if chosen_url else [],
                 "aweme_id": aweme_id,
@@ -761,7 +1091,7 @@ class DouyinClient:
 # ── 文件下载 ──────────────────────────────────────────────
 
 def download_file(url: str, save_path: Path) -> int:
-    """下载文件到指定路径，返回文件大小(bytes)"""
+    """下载文件到指定路径，返回文件大小(bytes)，支持流式读取中断自动重试与断点续传"""
     headers = {
         "User-Agent": USER_AGENT,
         "Referer": REFERER,
@@ -769,22 +1099,81 @@ def download_file(url: str, save_path: Path) -> int:
 
     proxies = get_proxies_dict()
     proxy_url = proxies.get("http") if proxies else None
+    temp_path = save_path.with_suffix(save_path.suffix + ".tmp")
+    save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    try:
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        r = http_requests.get(url, headers=headers, proxies=proxies, stream=True, timeout=30)
-        if r.status_code == 200:
-            with open(save_path, 'wb') as f:
+    max_retries = 3
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            req_headers = headers.copy()
+            start_byte = 0
+            if temp_path.exists() and temp_path.stat().st_size > 0:
+                start_byte = temp_path.stat().st_size
+                req_headers["Range"] = f"bytes={start_byte}-"
+
+            r = http_requests.get(url, headers=req_headers, proxies=proxies, stream=True, timeout=30)
+            if r.status_code == 206:
+                open_mode = "ab"
+            elif r.status_code == 200:
+                open_mode = "wb"
+                start_byte = 0
+            else:
+                if temp_path.exists() and start_byte > 0:
+                    try:
+                        temp_path.unlink()
+                    except Exception:
+                        pass
+                raise Exception(f"HTTP {r.status_code}")
+
+            with open(temp_path, open_mode) as f:
                 for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if _task_cancel_event.is_set():
+                        raise Exception("用户取消了任务")
                     if chunk:
                         f.write(chunk)
-            report_proxy_status(proxy_url, success=True)
-            return save_path.stat().st_size
-        else:
-            raise Exception(f"HTTP {r.status_code}")
-    except Exception as e:
-        report_proxy_status(proxy_url, success=False)
-        raise e
+
+            if temp_path.exists() and temp_path.stat().st_size > 0:
+                if save_path.exists():
+                    try:
+                        save_path.unlink()
+                    except Exception:
+                        pass
+                temp_path.rename(save_path)
+                report_proxy_status(proxy_url, success=True)
+                return save_path.stat().st_size
+
+        except Exception as e:
+            last_error = e
+            err_msg = str(e)
+            if "用户取消" in err_msg or _task_cancel_event.is_set():
+                if temp_path.exists():
+                    try:
+                        temp_path.unlink()
+                    except Exception:
+                        pass
+                raise e
+            # 遇到 stream reading error: unexpected EOF 或连接中断，等待 1 秒后自动重试
+            if "unexpected EOF" in err_msg or "IncompleteRead" in err_msg or "ChunkedEncodingError" in err_msg or "Connection" in err_msg or "timeout" in err_msg:
+                time.sleep(1.0)
+                continue
+            else:
+                if temp_path.exists():
+                    try:
+                        temp_path.unlink()
+                    except Exception:
+                        pass
+                report_proxy_status(proxy_url, success=False)
+                time.sleep(1.0)
+
+    if temp_path.exists():
+        try:
+            temp_path.unlink()
+        except Exception:
+            pass
+    report_proxy_status(proxy_url, success=False)
+    raise last_error or Exception("下载流读取失败: unexpected EOF")
 
 
 def download_media(media_info: dict, target_dir: Path, custom_dir: Path = None) -> dict:
@@ -794,6 +1183,7 @@ def download_media(media_info: dict, target_dir: Path, custom_dir: Path = None) 
     item_type = media_info["type"]
     urls = media_info["urls"]
     nickname = media_info.get("nickname", "未知用户")
+    is_replay = media_info.get("is_replay", False)
 
     if not urls:
         raise Exception("无法获取资源下载链接")
@@ -805,11 +1195,21 @@ def download_media(media_info: dict, target_dir: Path, custom_dir: Path = None) 
     user_dir.mkdir(parents=True, exist_ok=True)
 
     if item_type == "video":
-        save_file = user_dir / f"{title_with_id}.mp4"
-        _add_log(f"🎬 正在下载无水印视频: {save_file.name}")
+        type_label = "直播回放" if is_replay else "无水印视频"
+        history_type = "直播回放" if is_replay else "视频"
+
+        # 如果是回放且未指定 custom_dir，放入作者的 回放/ 子目录
+        if is_replay and not custom_dir:
+            save_dir = user_dir / "回放"
+            save_dir.mkdir(parents=True, exist_ok=True)
+            save_file = save_dir / f"{title_with_id}.mp4"
+        else:
+            save_file = user_dir / f"{title_with_id}.mp4"
+
+        _add_log(f"🎬 正在下载{type_label}: {save_file.name}")
         total_bytes = download_file(urls[0], save_file)
-        _add_log(f"✅ 视频下载完成! 大小: {total_bytes / (1024 * 1024):.2f} MB")
-        add_history_item(title, "视频", save_file, total_bytes)
+        _add_log(f"✅ {type_label}下载完成! 大小: {total_bytes / (1024 * 1024):.2f} MB")
+        add_history_item(title, history_type, save_file, total_bytes)
     else:
         folder_path = user_dir / title_with_id
         folder_path.mkdir(parents=True, exist_ok=True)
@@ -837,7 +1237,127 @@ def download_media(media_info: dict, target_dir: Path, custom_dir: Path = None) 
     return {
         "id": aweme_id,
         "title": title,
-        "type": item_type,
+        "type": "replay" if is_replay else item_type,
+        "size_bytes": total_bytes,
+    }
+
+
+def download_live_stream(room_info: dict, target_dir: Path, custom_dir: Path = None, max_duration: int = 0, quality: str = "") -> dict:
+    """下载/录制抖音直播间实时流 (FLV)，支持自选清晰度/码率"""
+    room = room_info.get("room") or room_info
+    user = room_info.get("user") or room.get("owner") or room.get("ownerUser") or {}
+    room_id = str(room.get("idStr") or room.get("id_str") or room.get("room_id") or room.get("id") or "live")
+    title = clean_filename(room.get("title") or f"直播_{room_id}")
+    author = clean_filename(user.get("nickname") or "未知主播")
+
+    # 提取多清晰度流地址
+    stream_url = ""
+    stream_url_dict = room.get("stream_url") or room.get("streamUrl") or {}
+    flv_map = stream_url_dict.get("flv_pull_url") or stream_url_dict.get("flvPullUrl") or {}
+    hls_map = stream_url_dict.get("hls_pull_url_map") or stream_url_dict.get("hlsPullUrlMap") or {}
+
+    # 如果用户指定了具体码率/清晰度
+    if quality and quality != "auto":
+        # 1. 精确匹配 FLV
+        if quality in flv_map and flv_map[quality]:
+            stream_url = flv_map[quality]
+        # 2. 精确匹配 HLS
+        elif quality in hls_map and hls_map[quality]:
+            stream_url = hls_map[quality]
+        # 3. 模糊匹配 (例如 'HD' 匹配 'HD1', 'SD' 匹配 'SD2', 'FULL_HD' 匹配 'FULL_HD1')
+        else:
+            for k in flv_map:
+                if quality in k or k in quality:
+                    stream_url = flv_map[k]
+                    break
+            if not stream_url:
+                for k in hls_map:
+                    if quality in k or k in quality:
+                        stream_url = hls_map[k]
+                        break
+
+    # 兜底：如果未指定或没匹配到，按画质优先级选取
+    if not stream_url:
+        for q in ["HD", "SD2", "HD1", "FULL_HD1", "FULL_HD", "ORIGIN", "SD1", "SD", "LD"]:
+            if q in flv_map and flv_map[q]:
+                stream_url = flv_map[q]
+                break
+        if not stream_url and flv_map:
+            stream_url = next(iter(flv_map.values()))
+        if not stream_url:
+            for q in ["HD", "SD2", "HD1", "FULL_HD1", "FULL_HD", "ORIGIN", "SD1", "SD", "LD"]:
+                if q in hls_map and hls_map[q]:
+                    stream_url = hls_map[q]
+                    break
+            if not stream_url and hls_map:
+                stream_url = next(iter(hls_map.values()))
+
+    if not stream_url:
+        raise Exception(f"未找到直播间 {room_id} 的可用播放流地址，可能主播尚未开播或已下播")
+
+    user_dir = custom_dir if custom_dir else (target_dir / author / "直播")
+    user_dir.mkdir(parents=True, exist_ok=True)
+
+    is_hls = ".m3u8" in stream_url.split("?")[0]
+    ext = ".m3u8" if is_hls else ".flv"
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    file_name = f"{timestamp}_{title}_{room_id}{ext}"
+    save_file = user_dir / file_name
+
+    _add_log(f"🔴 正在连接并录制直播流: {file_name}")
+    total_bytes = 0
+    headers = {
+        "User-Agent": USER_AGENT,
+        "Referer": "https://live.douyin.com/",
+    }
+    proxies = get_proxies_dict()
+    s = http_requests.Session()
+    if proxies:
+        s.proxies.update(proxies)
+    else:
+        s.trust_env = False
+
+    try:
+        r = s.get(stream_url, headers=headers, stream=True, timeout=15)
+        if r.status_code == 200:
+            with open(save_file, "wb") as f:
+                start_time = time.time()
+                last_update = start_time
+                for chunk in r.iter_content(chunk_size=128 * 1024):
+                    if _task_cancel_event.is_set():
+                        _add_log("⚠️ 收到取消信号，已停止直播录制")
+                        break
+                    if max_duration > 0 and (time.time() - start_time) > max_duration:
+                        _add_log(f"⏰ 达到最大录制时长 {max_duration} 秒，停止录制")
+                        break
+                    if chunk:
+                        f.write(chunk)
+                        total_bytes += len(chunk)
+                        now = time.time()
+                        if now - last_update >= 0.8:
+                            _set_task_state(
+                                duration_seconds=int(now - start_time),
+                                recorded_size=total_bytes
+                            )
+                            last_update = now
+            total_bytes = save_file.stat().st_size if save_file.exists() else total_bytes
+            _set_task_state(duration_seconds=int(time.time() - start_time), recorded_size=total_bytes, last_saved_path=str(save_file))
+            _add_log(f"✅ 直播录制完成! 大小: {total_bytes / (1024 * 1024):.2f} MB")
+            add_history_item(title, "直播", save_file, total_bytes)
+        else:
+            raise Exception(f"直播流 HTTP 错误 {r.status_code}")
+    except Exception as e:
+        if total_bytes > 0:
+            _set_task_state(recorded_size=total_bytes, last_saved_path=str(save_file))
+            _add_log(f"⚠️ 直播流断开，已保存录制内容: {total_bytes / (1024 * 1024):.2f} MB")
+            add_history_item(title, "直播", save_file, total_bytes)
+        else:
+            raise e
+
+    return {
+        "id": room_id,
+        "title": title,
+        "type": "live",
         "size_bytes": total_bytes,
     }
 
@@ -1176,10 +1696,18 @@ def _run_user_download_task(sec_uid: str, types: list, max_pages: int, target_di
                         downloaded += 1
                         _set_task_state(downloaded_count=downloaded, current_title=result["title"])
                     except Exception as e:
+                        if _task_cancel_event.is_set() or "用户取消" in str(e):
+                            _add_log("⚠️ 用户取消了任务")
+                            _set_task_state(status="cancelled")
+                            return
                         failed += 1
                         _set_task_state(failed_count=failed)
                         _add_log(f"❌ 第 {idx} 项作品下载失败: {e}")
-                    time.sleep(random.uniform(0.5, 1.5))
+                    if _task_cancel_event.is_set():
+                        _add_log("⚠️ 用户取消了任务")
+                        _set_task_state(status="cancelled")
+                        return
+                    time.sleep(random.uniform(0.3, 0.8))
                 _add_log(f"🎉 博主作品下载结束! 成功: {downloaded}，失败: {failed}")
                 add_history_item(f"{nickname}的作品", "批量", target_dir / nickname, downloaded)
             else:
@@ -1247,6 +1775,8 @@ def _run_user_download_task(sec_uid: str, types: list, max_pages: int, target_di
                     time.sleep(random.uniform(0.5, 1.5))
                 _add_log(f"🎉 博主喜欢下载结束! 成功: {downloaded}，失败: {failed}")
                 add_history_item(f"{nickname}的喜欢", "批量", target_dir / f"{nickname}的喜欢", downloaded)
+                add_history_item(f"{nickname}的喜欢", "批量", like_dir, downloaded)
+                _set_task_state(last_saved_path=str(like_dir))
             else:
                 _add_log("该博主未公开喜欢列表，或喜欢列表为空。")
 
@@ -1312,7 +1842,7 @@ def _run_user_download_task(sec_uid: str, types: list, max_pages: int, target_di
                                 _add_log(f"[{idx}/{len(mix_items)}] 正在下载合集视频: {media_info['title'][:30]}")
                                 result = download_media(media_info, target_dir, custom_dir=mix_dir)
                                 downloaded += 1
-                                _set_task_state(downloaded_count=downloaded, current_title=result["title"])
+                                _set_task_state(downloaded_count=downloaded, current_title=result["title"], last_saved_path=str(mix_dir))
                             except Exception as e:
                                 failed += 1
                                 _set_task_state(failed_count=failed)
@@ -1429,7 +1959,6 @@ def _run_user_download_task(sec_uid: str, types: list, max_pages: int, target_di
                         return
                     _set_task_state(current_index=idx)
                     try:
-                        media_info = DouyinClient.parse_media_info(item)
                         _add_log(f"[{idx}/{len(all_items)}] 正在下载收藏: {media_info['title'][:30]}")
                         result = download_media(media_info, target_dir, custom_dir=collect_dir)
                         downloaded += 1
@@ -1441,8 +1970,71 @@ def _run_user_download_task(sec_uid: str, types: list, max_pages: int, target_di
                     time.sleep(random.uniform(0.5, 1.5))
                 _add_log(f"🎉 个人收藏下载结束! 成功: {downloaded}，失败: {failed}")
                 add_history_item(f"{nickname}的收藏", "批量", collect_dir, downloaded)
+                _set_task_state(last_saved_path=str(collect_dir))
             else:
                 _add_log("您的收藏列表为空。")
+
+        # 6. 下载直播回放 (Replay)
+        if "replay" in types:
+            if _task_cancel_event.is_set():
+                _add_log("⚠️ 用户取消了任务")
+                _set_task_state(status="cancelled")
+                return
+
+            _add_log(f"🚀 开始抓取博主直播回放列表...")
+            all_items = []
+            cursor = 0
+            page = 0
+            while page < max_pages if max_pages > 0 else True:
+                if _task_cancel_event.is_set():
+                    _add_log("⚠️ 用户取消了任务")
+                    _set_task_state(status="cancelled")
+                    return
+                page += 1
+                _add_log(f"正在获取直播回放第 {page} 页 (cursor={cursor})...")
+                try:
+                    aweme_list, next_cursor, has_more = client.get_user_replays(sec_uid, cursor)
+                except Exception as e:
+                    _add_log(f"⚠️ 获取直播回放第 {page} 页失败: {e}")
+                    break
+                if not aweme_list:
+                    break
+                all_items.extend(aweme_list)
+                if not has_more:
+                    break
+                cursor = next_cursor
+                time.sleep(random.uniform(1.0, 2.5))
+
+            if all_items:
+                _add_log(f"直播回放列表获取完成！共 {len(all_items)} 个回放待下载。")
+                _reset_task_state(total=len(all_items))
+                downloaded = 0
+                failed = 0
+                replay_dir = target_dir / f"{nickname}的直播回放"
+                replay_dir.mkdir(parents=True, exist_ok=True)
+                for idx, item in enumerate(all_items, 1):
+                    if _task_cancel_event.is_set():
+                        _add_log("⚠️ 用户取消了任务")
+                        _set_task_state(status="cancelled")
+                        return
+                    _set_task_state(current_index=idx)
+                    try:
+                        media_info = DouyinClient.parse_media_info(item)
+                        media_info["is_replay"] = True
+                        _add_log(f"[{idx}/{len(all_items)}] 正在下载直播回放: {media_info['title'][:30]}")
+                        result = download_media(media_info, target_dir, custom_dir=replay_dir)
+                        downloaded += 1
+                        _set_task_state(downloaded_count=downloaded, current_title=result["title"], last_saved_path=str(replay_dir))
+                    except Exception as e:
+                        failed += 1
+                        _set_task_state(failed_count=failed)
+                        _add_log(f"❌ 第 {idx} 项直播回放下载失败: {e}")
+                    time.sleep(random.uniform(0.5, 1.5))
+                _add_log(f"🎉 博主直播回放下载结束! 成功: {downloaded}，失败: {failed}")
+                add_history_item(f"{nickname}的直播回放", "批量", replay_dir, downloaded)
+                _set_task_state(last_saved_path=str(replay_dir))
+            else:
+                _add_log("该博主暂无公开直播回放记录。")
 
         _add_log(f"🎉 博主 「{nickname}」 的所有抓取下载任务已全部完成！")
         _set_task_state(status="completed")
@@ -1627,14 +2219,28 @@ def _run_batch_items_download_task(items: list, target_dir: Path, source_name: s
     _set_task_state(status="completed")
 
 
+def _run_live_download_task(room_info: dict, target_dir: Path, quality: str = ""):
+    """后台线程：实时录制直播流"""
+    try:
+        download_live_stream(room_info, target_dir, quality=quality)
+        if _task_cancel_event.is_set():
+            _set_task_state(status="cancelled", task_type="live")
+        else:
+            _set_task_state(status="completed", task_type="live")
+    except Exception as e:
+        _add_log(f"💥 直播录制任务异常: {e}")
+        _set_task_state(status="failed", task_type="live")
+
+
 
 # ── Blueprint API 路由 ────────────────────────────────────
 
 @douyin_bp.route("/download-single", methods=["POST"])
 def download_single():
-    """解析并下载单条抖音视频/图文"""
+    """解析并下载单条抖音视频/图文/直播回放/实时直播"""
     data = request.get_json() or {}
     raw_url = data.get("url", "").strip()
+    quality = data.get("quality", "").strip()
 
     if not raw_url:
         return jsonify({"error": "请输入有效的链接"}), 400
@@ -1657,6 +2263,20 @@ def download_single():
         music_match = re.search(r"music/(\d+)", final_url)
         if not music_match:
             music_match = re.search(r"music_id=(\d+)", final_url)
+
+        # Check if it is a live replay (vsdetail / reflow episode)
+        replay_match = re.search(r"vsdetail/(\d+)", final_url)
+        if not replay_match:
+            replay_match = re.search(r"(?:reflow/)?episode/(\d+)", final_url)
+        if not replay_match:
+            replay_match = re.search(r"episode_id=(\d+)", final_url)
+
+        # Check if it is a live room
+        live_match = re.search(r"live\.douyin\.com/(\d+)", final_url)
+        if not live_match:
+            live_match = re.search(r"/follow/live/(\d+)", final_url)
+        if not live_match:
+            live_match = re.search(r"webcast/reflow/(\d+)", final_url)
 
         if mix_match:
             mix_id = mix_match.group(1)
@@ -1691,6 +2311,62 @@ def download_single():
                 "message": "下载成功",
                 "data": result,
                 "title": result["title"]
+            })
+
+        elif replay_match:
+            replay_id = replay_match.group(1)
+            _add_log(f"提取到直播回放 ID: {replay_id}")
+            detail = client.get_replay_detail(replay_id)
+            _add_log("成功获取直播回放详情")
+            media_info = DouyinClient.parse_media_info(detail)
+            media_info["is_replay"] = True
+            if not media_info["urls"]:
+                return jsonify({"error": "无法获取回放视频下载链接，可能需要有效 Cookie 或回放已过期/删除"}), 400
+            result = download_media(media_info, DOUYIN_DIR)
+            return jsonify({
+                "message": "回放下载成功",
+                "data": result,
+                "title": media_info["title"]
+            })
+
+        elif live_match:
+            room_id = live_match.group(1)
+            sec_user_match = re.search(r"sec_user_id=([A-Za-z0-9_\-]+)", final_url)
+            sec_uid = sec_user_match.group(1) if sec_user_match else ""
+            _add_log(f"提取到直播间 ID: {room_id}")
+            room_info = client.get_live_room_info(room_id, sec_uid)
+            if not room_info:
+                return jsonify({"error": f"无法获取直播间 {room_id} 的信息，可能主播尚未开播或链接已失效"}), 400
+
+            room = room_info.get("room") or room_info
+            user = room_info.get("user") or room.get("owner") or room.get("ownerUser") or {}
+            live_title = room.get("title") or f"直播_{room_id}"
+            anchor_name = user.get("nickname") or "未知主播"
+
+            if _task_state["status"] == "running":
+                return jsonify({"error": "当前已有正在运行的任务，请等待完成或先取消"}), 400
+
+            _task_cancel_event.clear()
+            _reset_task_state(total=1, task_type="live")
+            _set_task_state(
+                status="running",
+                task_type="live",
+                current_title=f"正在录制直播: {anchor_name} - {live_title}",
+                duration_seconds=0,
+                recorded_size=0
+            )
+
+            thread = threading.Thread(
+                target=_run_live_download_task,
+                args=(room_info, DOUYIN_DIR, quality)
+            )
+            thread.daemon = True
+            thread.start()
+
+            return jsonify({
+                "message": f"已启动直播间「{anchor_name}」的实时录制，可在下方实时查看并随时停止",
+                "task_started": True,
+                "title": live_title
             })
 
         # 2. 提取 aweme_id
@@ -1739,27 +2415,161 @@ def detect_url():
         final_url = client.resolve_share_url(raw_url)
 
         # 2. 类型识别
-        # Check User Profile
-        user_match = re.search(r"user/([A-Za-z0-9_\-]+)", final_url)
-        if not user_match:
-            user_match = re.search(r"sec_user_id=([A-Za-z0-9_\-]+)", final_url)
+        # Check Live Replay (https://www.douyin.com/vsdetail/{id} or /reflow/episode/{id})
+        replay_match = re.search(r"vsdetail/(\d+)", final_url)
+        if not replay_match:
+            replay_match = re.search(r"(?:reflow/)?episode/(\d+)", final_url)
+        if not replay_match:
+            replay_match = re.search(r"episode_id=(\d+)", final_url)
 
-        if user_match:
-            sec_uid = user_match.group(1)
-            nickname = "未知用户"
+        if replay_match:
+            replay_id = replay_match.group(1)
+            replay_title = ""
+            author_name = "未知主播"
+            cover = ""
             try:
-                # Try to fetch user profile details
-                user_res = client.get_user_detail(sec_uid)
-                if user_res and user_res.get("user"):
-                    nickname = user_res["user"].get("nickname", "未知用户")
+                detail = client.get_replay_detail(replay_id)
+                media_info = DouyinClient.parse_media_info(detail)
+                replay_title = media_info.get("title", "")
+                author_name = media_info.get("nickname", "未知主播")
+                cover = media_info.get("cover", "")
             except Exception:
                 pass
+            name_str = f"「{replay_title}」" if replay_title else ""
             return jsonify({
-                "type": "user",
-                "id": sec_uid,
-                "nickname": nickname,
+                "type": "replay",
+                "id": replay_id,
+                "title": replay_title,
+                "nickname": author_name,
+                "cover": cover,
+                "item_type": "video",
                 "resolved_url": final_url,
-                "message": f"博主 「{nickname}」 的主页"
+                "message": f"直播回放 {name_str}"
+            })
+
+        # Check Live Room (https://live.douyin.com/{room_id} or webcast/reflow/{room_id})
+        live_match = re.search(r"live\.douyin\.com/(\d+)", final_url)
+        if not live_match:
+            live_match = re.search(r"/follow/live/(\d+)", final_url)
+        if not live_match:
+            live_match = re.search(r"webcast/reflow/(\d+)", final_url)
+
+        if live_match:
+            room_id = live_match.group(1)
+            sec_user_match = re.search(r"sec_user_id=([A-Za-z0-9_\-]+)", final_url)
+            sec_uid = sec_user_match.group(1) if sec_user_match else ""
+            room_title = ""
+            anchor_name = "未知主播"
+            is_live = False
+            avatar = ""
+            cover = ""
+            signature = ""
+            unique_id = ""
+            follower_count = 0
+            total_favorited = 0
+            aweme_count = 0
+
+            # 1. 尝试获取博主完整主页信息
+            if sec_uid:
+                try:
+                    user_res = client.get_user_detail(sec_uid)
+                    if user_res and user_res.get("user"):
+                        u = user_res["user"]
+                        anchor_name = u.get("nickname", "未知主播")
+                        signature = u.get("signature", "")
+                        unique_id = u.get("unique_id") or u.get("short_id") or ""
+                        follower_count = u.get("follower_count") or u.get("mplatform_followers_count") or 0
+                        total_favorited = u.get("total_favorited", 0)
+                        aweme_count = u.get("aweme_count", 0)
+                        avatar_thumb = u.get("avatar_thumb", {})
+                        avatar_urls = avatar_thumb.get("url_list", []) if isinstance(avatar_thumb, dict) else []
+                        if avatar_urls:
+                            avatar = avatar_urls[0]
+                except Exception:
+                    pass
+
+            # 2. 获取直播间状态和流信息
+            live_qualities = []
+            try:
+                room_info = client.get_live_room_info(room_id, sec_uid)
+                room = room_info.get("room") or room_info
+                user = room_info.get("user") or room.get("owner") or room.get("ownerUser") or {}
+                room_title = room.get("title", "")
+                if not anchor_name or anchor_name == "未知主播":
+                    anchor_name = user.get("nickname", "未知主播")
+                status = room.get("status")
+                is_live = (status == 2)
+                if not avatar:
+                    avatar_thumb = user.get("avatar_thumb") or user.get("avatarThumb") or {}
+                    avatar_urls = avatar_thumb.get("url_list") or avatar_thumb.get("urlList") or []
+                    avatar = avatar_urls[0] if avatar_urls else ""
+                cover_dict = room.get("cover") or {}
+                cover_urls = cover_dict.get("url_list") or cover_dict.get("urlList") or []
+                cover = cover_urls[0] if cover_urls else ""
+
+                # 解析多码率清晰度
+                stream_dict = room.get("stream_url") or room.get("streamUrl") or {}
+                flv_map = stream_dict.get("flv_pull_url") or stream_dict.get("flvPullUrl") or {}
+                hls_map = stream_dict.get("hls_pull_url_map") or stream_dict.get("hlsPullUrlMap") or {}
+                avail_keys = list(flv_map.keys()) if flv_map else list(hls_map.keys())
+
+                quality_labels = {
+                    "FULL_HD1": "1080P 蓝光 / 原画 (最高画质 / 文件较大)",
+                    "FULL_HD": "1080P 超清 (最高画质 / 文件较大)",
+                    "ORIGIN": "1080P 原画 (最高画质 / 占用极大)",
+                    "HD1": "720P 超清 60帧 (中高画质)",
+                    "HD": "720P 高清 (推荐 / 体积画质平衡)",
+                    "SD2": "720P 高清 30帧 (推荐 / 节省内存与磁盘空间)",
+                    "SD1": "540P 标清 (极小体积 / 最省内存与磁盘)",
+                    "SD": "480P 标清 (极小体积 / 最省空间)",
+                    "LD": "360P 流畅 (极低码率)"
+                }
+                for qk in ["SD2", "HD", "SD1", "HD1", "FULL_HD1", "FULL_HD", "ORIGIN", "SD", "LD"]:
+                    if qk in avail_keys:
+                        live_qualities.append({
+                            "key": qk,
+                            "name": quality_labels.get(qk, qk),
+                            "is_default": (qk in ["SD2", "HD", "SD1"])
+                        })
+            except Exception:
+                pass
+
+            if not live_qualities:
+                live_qualities = [
+                    {"key": "SD2", "name": "720P 高清 (推荐 / 节省内存与体积)", "is_default": True},
+                    {"key": "FULL_HD1", "name": "1080P 蓝光 / 原画 (最高画质 / 文件较大)", "is_default": False},
+                    {"key": "SD1", "name": "540P 标清 (极小体积 / 最省空间)", "is_default": False},
+                    {"key": "auto", "name": "自动选择最高清晰度", "is_default": False}
+                ]
+
+            name_str = f"「{anchor_name}」- {room_title}" if room_title else f"「{anchor_name}」"
+            live_status = "(正在直播)" if is_live else "(已下播/待开播)"
+            has_replays = False
+            if sec_uid:
+                try:
+                    sample_replays, _, _ = client.get_user_replays(sec_uid, count=18)
+                    has_replays = bool(sample_replays)
+                except Exception:
+                    has_replays = False
+
+            return jsonify({
+                "type": "live",
+                "id": room_id,
+                "sec_uid": sec_uid,
+                "title": room_title,
+                "nickname": anchor_name,
+                "signature": signature,
+                "unique_id": unique_id,
+                "follower_count": follower_count,
+                "total_favorited": total_favorited,
+                "aweme_count": aweme_count,
+                "avatar": avatar,
+                "cover": cover,
+                "is_live": is_live,
+                "has_replays": has_replays,
+                "live_qualities": live_qualities,
+                "resolved_url": final_url,
+                "message": f"抖音直播间 {name_str} {live_status}"
             })
 
         # Check Mix/Collection
@@ -1812,11 +2622,15 @@ def detect_url():
         if aweme_id:
             title = ""
             item_type = "video"
+            nickname = "未知作者"
+            cover = ""
             try:
                 detail = client.get_video_detail(aweme_id)
                 media_info = DouyinClient.parse_media_info(detail)
                 title = media_info.get("title", "")
                 item_type = media_info.get("type", "video")
+                nickname = media_info.get("nickname", "未知作者")
+                cover = media_info.get("cover", "")
             except Exception:
                 pass
             type_name = "图文" if item_type == "image" else "视频"
@@ -1825,9 +2639,62 @@ def detect_url():
                 "type": "single",
                 "id": aweme_id,
                 "title": title,
+                "nickname": nickname,
+                "cover": cover,
                 "item_type": item_type,
                 "resolved_url": final_url,
                 "message": f"单个{type_name} {name_str}"
+            })
+
+        # Check User Profile
+        user_match = re.search(r"(?:/user/|/share/user/)([A-Za-z0-9_\-]+)", final_url)
+        if not user_match:
+            user_match = re.search(r"sec_user_id=([A-Za-z0-9_\-]+)", final_url)
+
+        if user_match:
+            sec_uid = user_match.group(1)
+            nickname = "未知用户"
+            avatar = ""
+            signature = ""
+            unique_id = ""
+            follower_count = 0
+            total_favorited = 0
+            aweme_count = 0
+            try:
+                user_res = client.get_user_detail(sec_uid)
+                if user_res and user_res.get("user"):
+                    u = user_res["user"]
+                    nickname = u.get("nickname", "未知用户")
+                    signature = u.get("signature", "")
+                    unique_id = u.get("unique_id") or u.get("short_id") or ""
+                    follower_count = u.get("follower_count") or u.get("mplatform_followers_count") or 0
+                    total_favorited = u.get("total_favorited", 0)
+                    aweme_count = u.get("aweme_count", 0)
+                    avatar_thumb = u.get("avatar_thumb", {})
+                    avatar_urls = avatar_thumb.get("url_list", []) if isinstance(avatar_thumb, dict) else []
+                    avatar = avatar_urls[0] if avatar_urls else ""
+            except Exception:
+                pass
+            has_replays = False
+            try:
+                sample_replays, _, _ = client.get_user_replays(sec_uid, count=18)
+                has_replays = bool(sample_replays)
+            except Exception:
+                has_replays = False
+
+            return jsonify({
+                "type": "user",
+                "id": sec_uid,
+                "nickname": nickname,
+                "signature": signature,
+                "unique_id": unique_id,
+                "follower_count": follower_count,
+                "total_favorited": total_favorited,
+                "aweme_count": aweme_count,
+                "avatar": avatar,
+                "has_replays": has_replays,
+                "resolved_url": final_url,
+                "message": f"博主 「{nickname}」 的主页"
             })
 
         return jsonify({"error": "无法识别此链接类型，请检查输入"}), 400
@@ -2017,19 +2884,36 @@ def clear_history():
 
 @douyin_bp.route("/open-folder", methods=["POST"])
 def open_folder():
-    """在系统文件管理器中打开抖音下载目录"""
+    """在系统文件管理器中打开抖音下载目录或定位指定文件"""
     import subprocess
     import sys
 
-    path_str = str(DOUYIN_DIR)
+    data = request.get_json() or {}
+    custom_path = data.get("path", "").strip()
+
+    target_path = Path(custom_path) if custom_path else DOUYIN_DIR
+    if not target_path.exists():
+        if target_path.parent.exists():
+            target_path = target_path.parent
+        else:
+            target_path = DOUYIN_DIR
+    target_path.mkdir(parents=True, exist_ok=True)
+
+    path_str = str(target_path)
     try:
         if sys.platform == "darwin":
-            subprocess.run(["open", path_str])
+            if target_path.is_file():
+                subprocess.run(["open", "-R", path_str])
+            else:
+                subprocess.run(["open", path_str])
         elif sys.platform == "win32":
-            subprocess.run(["explorer", path_str])
+            if target_path.is_file():
+                subprocess.run(["explorer", f"/select,{path_str}"])
+            else:
+                subprocess.run(["explorer", path_str])
         else:
-            subprocess.run(["xdg-open", path_str])
-        return jsonify({"message": "文件夹已打开"})
+            subprocess.run(["xdg-open", path_str if target_path.is_dir() else str(target_path.parent)])
+        return jsonify({"message": "已打开对应目录"})
     except Exception as e:
         return jsonify({"error": f"打开文件夹失败: {str(e)}"}), 500
 
@@ -2110,7 +2994,37 @@ def api_search():
             return jsonify({
                 "error": "由于抖音安全验证拦截，无法进行模糊搜索。请直接复制该博主的「主页链接」或「sec_uid」在此搜索，我们将自动解析并跳转！"
             }), 400
-            
+
+        # 3. 补全搜索结果中的博主作品数、粉丝数等数据 (抖音搜索接口默认不返回 aweme_count)
+        user_list = res.get("user_list") if isinstance(res, dict) else []
+        if isinstance(user_list, list) and user_list:
+            from concurrent.futures import ThreadPoolExecutor
+
+            def _enrich_user(item):
+                if not isinstance(item, dict):
+                    return
+                user_info = item.get("user_info") if isinstance(item.get("user_info"), dict) else item
+                sec_uid = user_info.get("sec_uid")
+                # 如果 aweme_count 为 0 或未提供，通过详情接口补全
+                if sec_uid and not user_info.get("aweme_count"):
+                    try:
+                        u_res = api.get_user_detail(sec_uid)
+                        if u_res and isinstance(u_res.get("user"), dict):
+                            real_user = u_res["user"]
+                            if "aweme_count" in real_user:
+                                user_info["aweme_count"] = real_user["aweme_count"]
+                            if "follower_count" in real_user and not user_info.get("follower_count"):
+                                user_info["follower_count"] = real_user["follower_count"]
+                            if "total_favorited" in real_user and not user_info.get("total_favorited"):
+                                user_info["total_favorited"] = real_user["total_favorited"]
+                            if "following_count" in real_user and not user_info.get("following_count"):
+                                user_info["following_count"] = real_user["following_count"]
+                    except Exception:
+                        pass
+
+            with ThreadPoolExecutor(max_workers=min(len(user_list), 6)) as executor:
+                list(executor.map(_enrich_user, user_list))
+
         return jsonify(res)
     except Exception as e:
         return jsonify({"error": str(e)}), 500

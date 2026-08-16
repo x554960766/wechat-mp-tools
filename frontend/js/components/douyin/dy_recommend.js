@@ -215,8 +215,12 @@ const DyRecommendPage = {
     },
 
     formatNumber(num) {
+        if (!num || isNaN(num)) return '0';
+        num = Number(num);
         if (num >= 10000) {
             return (num / 10000).toFixed(1) + 'w';
+        } else if (num >= 1000) {
+            return (num / 1000).toFixed(1) + 'k';
         }
         return num.toString();
     },

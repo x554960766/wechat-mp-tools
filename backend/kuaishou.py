@@ -402,29 +402,78 @@ class KuaishouClient:
 # ── 下载执行 ──────────────────────────────────────────────
 
 def download_file(url: str, save_path: Path) -> int:
-    """下载文件到指定路径，返回文件大小(bytes)"""
+    """下载文件到指定路径，返回文件大小(bytes)，支持流式读取中断自动重试与断点续传"""
     headers = {
         "User-Agent": USER_AGENT,
         "Referer": "https://www.kuaishou.com/",
     }
     proxies = get_proxies_dict()
     proxy_url = proxies.get("http") if proxies else None
+    temp_path = save_path.with_suffix(save_path.suffix + ".tmp")
+    save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    try:
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        r = http_requests.get(url, headers=headers, proxies=proxies, stream=True, timeout=30)
-        if r.status_code == 200:
-            with open(save_path, 'wb') as f:
+    max_retries = 3
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            req_headers = headers.copy()
+            start_byte = 0
+            if temp_path.exists() and temp_path.stat().st_size > 0:
+                start_byte = temp_path.stat().st_size
+                req_headers["Range"] = f"bytes={start_byte}-"
+
+            r = http_requests.get(url, headers=req_headers, proxies=proxies, stream=True, timeout=30)
+            if r.status_code == 206:
+                open_mode = "ab"
+            elif r.status_code == 200:
+                open_mode = "wb"
+                start_byte = 0
+            else:
+                if temp_path.exists() and start_byte > 0:
+                    try:
+                        temp_path.unlink()
+                    except Exception:
+                        pass
+                raise Exception(f"HTTP {r.status_code}")
+
+            with open(temp_path, open_mode) as f:
                 for chunk in r.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         f.write(chunk)
-            report_proxy_status(proxy_url, success=True)
-            return save_path.stat().st_size
-        else:
-            raise Exception(f"HTTP {r.status_code}")
-    except Exception as e:
-        report_proxy_status(proxy_url, success=False)
-        raise e
+
+            if temp_path.exists() and temp_path.stat().st_size > 0:
+                if save_path.exists():
+                    try:
+                        save_path.unlink()
+                    except Exception:
+                        pass
+                temp_path.rename(save_path)
+                report_proxy_status(proxy_url, success=True)
+                return save_path.stat().st_size
+
+        except Exception as e:
+            last_error = e
+            err_msg = str(e)
+            if "unexpected EOF" in err_msg or "IncompleteRead" in err_msg or "ChunkedEncodingError" in err_msg or "Connection" in err_msg or "timeout" in err_msg:
+                time.sleep(1.0)
+                continue
+            else:
+                if temp_path.exists():
+                    try:
+                        temp_path.unlink()
+                    except Exception:
+                        pass
+                report_proxy_status(proxy_url, success=False)
+                time.sleep(1.0)
+
+    if temp_path.exists():
+        try:
+            temp_path.unlink()
+        except Exception:
+            pass
+    report_proxy_status(proxy_url, success=False)
+    raise last_error or Exception("下载流读取失败: unexpected EOF")
 
 
 def download_media(media_info: dict, target_dir: Path) -> dict:

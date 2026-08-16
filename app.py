@@ -106,6 +106,10 @@ rss_scheduler.start()
 
 # ── 前端路由 ──────────────────────────────────────────────
 
+@app.route("/favicon.ico")
+def favicon():
+    return ("", 204)
+
 @app.route("/")
 def serve_index():
     """SPA 主页面"""

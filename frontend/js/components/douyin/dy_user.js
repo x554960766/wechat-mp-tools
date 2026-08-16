@@ -368,12 +368,17 @@ const DyUserPage = {
         const awemeId = video.aweme_id;
         const likes = this.formatNumber(video.statistics?.digg_count || 0);
         const comments = this.formatNumber(video.statistics?.comment_count || 0);
+        const isReplay = Boolean(video.is_live_replay || video.aweme_type === 101);
+        const badgeHtml = isReplay 
+            ? `<div style="position: absolute; top: 8px; left: ${this.isSelectMode ? '34px' : '8px'}; background: #6366f1; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.72rem; z-index: 3; font-weight: 600;">直播回放</div>` 
+            : '';
 
         return `
             <div class="video-card" style="border-radius: 12px; overflow: hidden; background: var(--bg-secondary); transition: transform 0.3s, box-shadow 0.3s; cursor: pointer;" onmouseenter="this.style.transform='translateY(-4px)'; this.style.boxShadow='0 8px 24px rgba(0,0,0,0.15)';" onmouseleave="this.style.transform=''; this.style.boxShadow='';" onclick="DyUserPage.handleCardClick(event, '${awemeId}')">
                 <div style="position: relative; padding-top: 56.25%; background: var(--bg-body);">
                     <img src="${cover}" alt="${title}" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover;">
                     <input type="checkbox" id="dy-user-check-${awemeId}" class="dy-user-checkbox" style="position: absolute; top: 8px; left: 8px; width: 18px; height: 18px; cursor: pointer; z-index: 5; display: ${this.isSelectMode ? 'block' : 'none'};" onclick="event.stopPropagation(); DyUserPage.updateDownloadButton();" />
+                    ${badgeHtml}
                     <div style="position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.6); color: white; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; z-index: 2;">
                         ${this.formatDuration(video.video?.duration || 0)}
                     </div>
@@ -384,7 +389,7 @@ const DyUserPage = {
                         <span>❤️ ${likes}</span>
                         <span>💬 ${comments}</span>
                     </div>
-                    <button class="btn btn-primary btn-sm" onclick="DyUserPage.downloadVideo('${awemeId}')" style="width: 100%;">下载视频</button>
+                    <button class="btn btn-primary btn-sm" onclick="DyUserPage.downloadVideo('${awemeId}')" style="width: 100%;">${isReplay ? '下载回放' : '下载视频'}</button>
                 </div>
             </div>
         `;
@@ -669,8 +674,12 @@ const DyUserPage = {
     },
 
     formatNumber(num) {
+        if (!num || isNaN(num)) return '0';
+        num = Number(num);
         if (num >= 10000) {
             return (num / 10000).toFixed(1) + 'w';
+        } else if (num >= 1000) {
+            return (num / 1000).toFixed(1) + 'k';
         }
         return num.toString();
     },
