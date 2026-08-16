@@ -25,6 +25,7 @@ flowchart LR
         config["backend/config.py<br/>settings, proxies, storage paths"]
         account_pool["backend/account_pool.py<br/>WeChat Reading credential scheduling"]
         rss["backend/rss_scheduler.py<br/>background fetch and upload"]
+        downloader["backend/downloader.py<br/>article and resource downloads"]
         proxy_manager["backend/mitm_proxy.py<br/>traffic interception"]
         transcode["backend/transcode.py<br/>media conversion"]
     end
@@ -83,6 +84,7 @@ flowchart LR
     blueprints --> config
     blueprints --> account_pool
     blueprints --> rss
+    blueprints --> downloader
     blueprints --> proxy_manager
     blueprints --> transcode
 
@@ -97,12 +99,16 @@ flowchart LR
     mp_client --> wechat
     reading_client --> wechat
     video_clients --> media_sites
+    rss --> downloader
+    downloader --> mp_client
     mp_client --> cdn
+    downloader --> cdn
     video_clients --> cdn
 
     config --> settings_store
     account_pool --> account_store
     rss --> file_store
+    downloader --> file_store
     channels_client --> history_store
     video_clients --> history_store
     transcode --> ffmpeg

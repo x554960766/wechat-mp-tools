@@ -15,7 +15,7 @@ flowchart TD
     render_page["Render or restore<br/>the mapped page object"]
     action["Page action calls<br/>api.js fetch wrapper"]
     api["Flask blueprint handles<br/>the API request"]
-    auth_required{"Login or account<br/>acquisition required?"}
+    auth_type{"Required platform<br/>and auth type?"}
 
     qr_login["Show platform QR or<br/>credential login flow"]
     reading_account["account_pool schedules<br/>a WeChat Reading credential"]
@@ -54,15 +54,14 @@ flowchart TD
     hash --> route_lookup
     route_lookup -- "unknown" --> login_route --> hash
     route_lookup -- "known" --> render_page --> action --> api
-    api --> auth_required
-    auth_required -- "yes" --> qr_login
-    qr_login --> reading_account
-    qr_login --> channels_cookie
-    qr_login --> auth_ok
+    api --> auth_type
+    auth_type -- "already authenticated" --> parse
+    auth_type -- "WeChat Reading credential" --> reading_account
+    auth_type -- "Channels cookie" --> channels_cookie
+    auth_type -- "platform login" --> qr_login
     reading_account --> auth_ok
     channels_cookie --> auth_ok
     auth_ok -- "no" --> auth_error --> retry
-    auth_required -- "no" --> parse
     auth_ok -- "yes" --> parse
 
     parse --> external --> parse_ok
@@ -82,6 +81,6 @@ flowchart TD
     classDef failure fill:#ffeceb,stroke:#d64545,color:#3d1717
     classDef success fill:#eaf7ef,stroke:#2f9e44,color:#15291a
     class start,app_start startNode
-    class ready,fallback,route_lookup,auth_required,auth_ok,parse_ok,progress decision
+    class ready,fallback,route_lookup,auth_type,auth_ok,parse_ok,progress decision
     class startup_error,auth_error,parse_error,cancelled,failed,retry failure
     class complete,persist,ui_done success
