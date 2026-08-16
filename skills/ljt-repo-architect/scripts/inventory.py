@@ -4,8 +4,9 @@
 Classifies Git-visible files into groups and emits deterministic, sorted JSON.
 Uses only the Python standard library.
 
-Output groups (first-party): entrypoints, backend, frontend, injection, docs, build, other.
-Internal classification (excluded from output): vendored, ignored (returns None).
+Output groups: entrypoints, backend, frontend, injection, docs, build, vendored, other.
+graphify-out paths remain in tracked_files but are excluded from all groups.
+Ignored paths (return None): __pycache__, data, build, dist, .superpowers.
 """
 
 import argparse
@@ -57,10 +58,6 @@ def classify_path(path: PurePosixPath) -> str | None:
     for pfx in IGNORED_PREFIXES:
         if parts[0] == pfx.parts[0] and path.is_relative_to(pfx):
             return None
-    # Also catch bare top-level ignored dirs.
-    for pfx in IGNORED_PREFIXES:
-        if len(pfx.parts) == 1 and parts[0] == pfx.parts[0]:
-            return None
 
     # Check vendored prefixes.
     for pfx in VENDORED_PREFIXES:
@@ -92,31 +89,40 @@ def classify_path(path: PurePosixPath) -> str | None:
     return "other"
 
 
-_FIRST_PARTY_GROUPS = {
+_OUTPUT_GROUPS = {
     "entrypoints",
     "backend",
     "frontend",
     "injection",
     "docs",
     "build",
+    "vendored",
     "other",
 }
+
+# Prefixes whose files stay in tracked_files but never enter any output group.
+_EXCLUDED_FROM_GROUPS = (
+    PurePosixPath("graphify-out"),
+)
 
 
 def _git_files(root: str) -> list[str]:
     """Return sorted list of Git-visible relative paths (POSIX separators)."""
     result = subprocess.run(
-        ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+        ["git", "-c", "core.quotePath=false", "ls-files", "-z",
+         "--cached", "--others", "--exclude-standard"],
         capture_output=True,
-        text=True,
         cwd=root,
     )
     if result.returncode != 0:
-        print(f"git ls-files failed: {result.stderr.strip()}", file=sys.stderr)
+        print(f"git ls-files failed: {result.stderr.decode(errors='replace').strip()}",
+              file=sys.stderr)
         sys.exit(1)
-    lines = result.stdout.splitlines()
+    raw = result.stdout
+    # Split on NUL; filter empty trailing entry.
+    entries = [e.decode() for e in raw.split(b"\x00") if e]
     # Normalize to POSIX separators and sort deterministically.
-    return sorted(line.replace(os.sep, "/") for line in lines if line)
+    return sorted(entry.replace(os.sep, "/") for entry in entries)
 
 
 def build_inventory(root: str) -> dict:
@@ -127,7 +133,10 @@ def build_inventory(root: str) -> dict:
     for f in files:
         p = PurePosixPath(f)
         group = classify_path(p)
-        if group is None or group not in _FIRST_PARTY_GROUPS:
+        if group is None or group not in _OUTPUT_GROUPS:
+            continue
+        # graphify-out stays in tracked_files but never enters any group
+        if any(p.is_relative_to(excl) for excl in _EXCLUDED_FROM_GROUPS):
             continue
         groups.setdefault(group, []).append(f)
     # Sort each group for determinism.

@@ -74,9 +74,32 @@ def test_cli_json_output():
     assert len(data["tracked_files"]) > 100, f"expected >100 tracked files, got {len(data['tracked_files'])}"
     groups = data["groups"]
     assert "backend/douyin.py" in groups["backend"], "backend/douyin.py missing from backend group"
-    # Vendored group must not appear in output
-    assert "vendored" not in groups, "vendored group must not appear in first-party output"
+    # Vendored group must appear in output with tracked vendored files
+    assert "vendored" in groups, "vendored group must appear in output"
+    assert any(f.startswith("backend/subtitle_remover/") for f in groups["vendored"]), \
+        "vendored group must contain backend/subtitle_remover files"
+    assert any(f.startswith("injection_scripts/lib/") for f in groups["vendored"]), \
+        "vendored group must contain injection_scripts/lib files"
     # No group should contain graphify-out paths
     for group_name, files in groups.items():
         for f in files:
             assert not f.startswith("graphify-out/"), f"graphify-out found in {group_name}: {f}"
+
+
+def test_cli_non_ascii_paths_preserved():
+    """C-quoted non-ASCII paths like docs/B站模块设计实现文档.md must appear in groups.docs."""
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--root", str(ROOT), "--json"],
+        capture_output=True,
+        text=True,
+        cwd=str(ROOT),
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    data = json.loads(result.stdout)
+    docs_files = data["groups"].get("docs", [])
+    # At least one Chinese-named doc file must be present and unescaped
+    cn_docs = [f for f in docs_files if any(ord(c) > 127 for c in f)]
+    assert len(cn_docs) >= 1, f"no unescaped CJK paths in docs group; docs={docs_files}"
+    # The specific file must be present with its real Unicode name
+    assert "docs/B站模块设计实现文档.md" in docs_files, \
+        "docs/B站模块设计实现文档.md missing from docs group (C-quoting bug)"
