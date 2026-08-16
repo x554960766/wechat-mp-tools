@@ -20,8 +20,12 @@
    - 打开您的 GitHub 仓库页面，点击顶部的 **Actions** 标签。
    - 看到名为 `Build WeChat MP Tools Executables` 的工作流，点击进入最新的一条记录。
    - 滚动到页面底部，即可在 **Artifacts (产物)** 栏直接下载已经打包压缩好的：
-     - 🎁 `WeChat-MP-Tools-Windows-Full` / `WeChat-MP-Tools-macOS-Full`：内置 Chromium，体积较大，用户无需额外安装浏览器。
-     - 🎁 `WeChat-MP-Tools-Windows-Lite` / `WeChat-MP-Tools-macOS-Lite`：不内置 Chromium，体积更小，需要用户电脑已安装 Google Chrome 或 Microsoft Edge。
+     - 🎁 `WeChat-MP-Tools-Windows-Full` / `WeChat-MP-Tools-Windows-Lite`
+     - 🎁 macOS 四个版本：
+       - `WeChat-MP-Tools-macOS-ARM64-Full` / `WeChat-MP-Tools-macOS-ARM64-Lite`（Apple Silicon M1/M2/M3/M4）
+       - `WeChat-MP-Tools-macOS-x86-64-Full` / `WeChat-MP-Tools-macOS-x86-64-Lite`（Intel 芯片）
+     - Full 版本内置 Chromium，体积较大；Lite 版本不内置，需要系统已安装 Chrome 或 Edge。
+     - CI 中 Intel 版本使用 `macos-15-large` 原生 x86_64 运行器构建，确保产出原生 Intel 二进制。
 
 ---
 
@@ -39,6 +43,24 @@ pyinstaller wechat_mp_tools.spec
 ```bash
 WECHAT_MP_TOOLS_BUNDLE_BROWSER=0 pyinstaller wechat_mp_tools.spec
 ```
+
+#### Intel Mac（x86_64）本地打包
+
+在 Intel Mac 上本地打包时，必须显式指定目标架构，否则 PyInstaller 可能生成通用二进制（Universal Binary）导致体积异常：
+
+```bash
+PLAYWRIGHT_BROWSERS_PATH=ms-playwright python3 -m playwright install chromium --no-shell
+WECHAT_MP_TOOLS_TARGET_ARCH=x86_64 pyinstaller wechat_mp_tools.spec
+```
+
+轻量版：
+
+```bash
+WECHAT_MP_TOOLS_BUNDLE_BROWSER=0 WECHAT_MP_TOOLS_TARGET_ARCH=x86_64 pyinstaller wechat_mp_tools.spec
+```
+
+> **说明**：CI 使用 `macos-15-large` 原生 Intel 运行器构建 x86_64 产物，避免交叉编译问题。如果您在 Apple Silicon Mac 上需要 x86_64 产物，建议直接下载 CI 产物而非本地交叉编译。
+
 
 ### 1. 打包成果位置
 打包生成的文件位于项目根目录的：

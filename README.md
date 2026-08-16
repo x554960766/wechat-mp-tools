@@ -7,7 +7,14 @@
 > [!TIP]
 > **开箱即用，无需配置本地 Python 开发环境！**
 > 本项目已通过 GitHub Actions 自动构建 Windows 与 macOS 双平台客户端。请直接前往 [👉 GitHub Releases 下载最新版本](https://github.com/x554960766/wechat-mp-tools/releases)。
+### macOS 版本选择
 
+| Mac 类型 | 下载版本 |
+|----------|----------|
+| **Apple Silicon**（M1/M2/M3/M4 芯片） | `ARM64` 系列产物 |
+| **Intel** 芯片 | `x86-64` 系列产物 |
+
+如果不确定自己的芯片类型，点击屏幕左上角  &#x1F5A5;  →「关于本机」即可查看。ARM64 产物无法在 Intel Mac 上运行，x86-64 产物虽然可以通过 Rosetta 在 Apple Silicon 上运行，但推荐使用原生 ARM64 版本以获得最佳性能。
 ---
 
 ## 核心功能
