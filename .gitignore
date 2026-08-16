@@ -28,6 +28,9 @@ venv*/
 .claude/
 .superpowers/
 
+# Local architecture-analysis graph
+graphify-out/
+
 # Subtitle remover models and binaries
 backend/subtitle_remover/backend/models/
 backend/subtitle_remover/backend/ffmpeg/

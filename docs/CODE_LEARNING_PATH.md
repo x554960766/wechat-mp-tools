@@ -17,7 +17,7 @@
 
 ## 练习 1：建立目录与组件地图
 
-目标：把 249 个跟踪文件压缩成少数几个真实架构边界，并确认没有把 vendored 代码当作第一方教学材料。
+目标：把 256 个跟踪文件压缩成少数几个真实架构边界，并确认没有把 vendored 代码当作第一方教学材料。
 
 ```bash
 git ls-files | wc -l
@@ -29,7 +29,7 @@ printf '\nFrontend entry and components:\n'
 git ls-files 'frontend/js/*.js' 'frontend/js/components/*.js' | sort
 ```
 
-**预期观察**：第一行输出 `249`。`backend/` 文件最多，但核心 Python 模块排除 `backend/subtitle_remover/` 后只有 28 个左右；前端入口只有 `frontend/js/app.js`、`frontend/js/router.js`、`frontend/js/api.js` 三个全局文件。这个结果与 [软件架构图](docs/diagrams/software-architecture.mmd) 的 frontend、Flask、domain、clients 分层一致。
+**预期观察**：第一行输出 `256`。`backend/` 文件最多，但核心 Python 模块排除 `backend/subtitle_remover/` 后只有 28 个左右；前端入口只有 `frontend/js/app.js`、`frontend/js/router.js`、`frontend/js/api.js` 三个全局文件。这个结果与 [软件架构图](docs/diagrams/software-architecture.mmd) 的 frontend、Flask、domain、clients 分层一致。
 
 继续打开 `docs/diagrams/software-architecture.mmd`，查找 `main`、`registry`、`blueprints`、`account_pool`、`rss`、`proxy_manager`、`transcode`、`injection` 八个节点。预期它们分别指向本文列出的具体源码路径，而不是抽象组织名。
 
@@ -135,14 +135,14 @@ printf '%s\n' '--- PyInstaller inputs ---'
 sed -n '1,60p' wechat_mp_tools.spec
 grep -nE 'Analysis\(|datas=|name=.WeChat MP Tools.|console=False' wechat_mp_tools.spec
 printf '%s\n' '--- workflow variants ---'
-grep -nE 'runs-on:|python-version|playwright install|Build (Windows|macOS)|WECHAT_MP_TOOLS_BUNDLE_BROWSER|pyinstaller|codesign|ditto|artifact' .github/workflows/build.yml
+grep -nE 'runs-on:|matrix:|pyinstaller_arch|platform_machine|WECHAT_MP_TOOLS_TARGET_ARCH|verify_macos_bundle|WECHAT_MP_TOOLS_BUNDLE_BROWSER|pyinstaller|codesign|ditto|artifact' .github/workflows/build.yml
 printf '%s\n' '--- intended mac architecture branches ---'
 grep -nE 'macOS ARM64|macOS x86_64|architecture is (arm64|x86_64)|architecture check' docs/diagrams/build-flow.mmd
 printf '%s\n' '--- repository documentation tests ---'
 python3 -m pytest tests/test_architecture_docs.py tests/test_architecture_diagrams.py -q
 ```
 
-**预期观察**：`backend/transcode.py` 使用单 worker 队列避免并发 ffmpeg；macOS 可选 VideoToolbox，低码率源会强制 CRF 软编，输出变大时还有软件兜底压缩阶段。`wechat_mp_tools.spec` 至少包含 `frontend/` 与 `injection_scripts/`，Full 版包含 Playwright Chromium；workflow 当前产出 Windows/macOS Full 与 Lite。`docs/diagrams/build-flow.mmd` 的目标 macOS 路径是 ARM64 和 x86_64 各自原生构建、签名、ditto 打包并做 Mach-O 架构检查，全部通过才发布。
+**预期观察**：`backend/transcode.py` 使用单 worker 队列避免并发 ffmpeg；macOS 可选 VideoToolbox，低码率源会强制 CRF 软编，输出变大时还有软件兜底压缩阶段。`wechat_mp_tools.spec` 至少包含 `frontend/` 与 `injection_scripts/`，Full 版包含 Playwright Chromium。workflow 当前产出 Windows Full/Lite、macOS ARM64 Full/Lite、macOS x86_64 Full/Lite；两个 macOS 架构都在原生 runner 上构建，并通过 `scripts/verify_macos_bundle.py` 检查主程序、原生扩展和内置 Chromium。
 
 ## 验收清单
 

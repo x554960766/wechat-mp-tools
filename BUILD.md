@@ -46,7 +46,7 @@ WECHAT_MP_TOOLS_BUNDLE_BROWSER=0 pyinstaller wechat_mp_tools.spec
 
 #### Intel Mac（x86_64）本地打包
 
-在 Intel Mac 上本地打包时，必须显式指定目标架构，否则 PyInstaller 可能生成通用二进制（Universal Binary）导致体积异常：
+在 Intel Mac 上本地打包时，应显式指定目标架构，避免依赖当前 Python/PyInstaller 的默认架构选择：
 
 ```bash
 PLAYWRIGHT_BROWSERS_PATH=ms-playwright python3 -m playwright install chromium --no-shell

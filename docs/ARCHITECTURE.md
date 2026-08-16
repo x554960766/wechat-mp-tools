@@ -10,16 +10,16 @@
 
 ## 库存与边界
 
-当前 Git 跟踪文件共 249 个，按主要用途分类如下：
+当前 Git 跟踪文件共 256 个，按主要用途分类如下：
 
 | 类别 | 数量 | 代表路径 | 结论 |
 |---|---:|---|---|
-| 第一方源码 | 85 | `main.py`、`app.py`、`backend/`、`frontend/`、`injection_scripts/src/` | 日常修改集中在这里 |
+| 第一方运行时代码 | 86 | `main.py`、`app.py`、`backend/`、`frontend/`、`injection_scripts/src/` | 日常功能修改集中在这里 |
 | vendored 代码 | 134 | `backend/subtitle_remover/`、`injection_scripts/lib/` | 保留原样，不作为扩展模板 |
-| 生成文件 | 4 | `docs/diagrams/*.svg` | 由 Mermaid 源文件生成 |
-| 配置/CI | 4 | `.github/workflows/build.yml`、`requirements.txt`、`wechat_mp_tools.spec`、`.gitignore` | 依赖与打包入口 |
-| 文档/测试/技能 | 21 | `docs/`、`tests/`、`skills/ljt-repo-architect/` | 说明与验证 |
-| 数据/静态资产 | 1 | `frontend/img/dy_logo.svg` | 运行时代码不写入这里 |
+| 架构文档与图表 | 15 | `docs/ARCHITECTURE.md`、`docs/diagrams/` | 学习、维护和沟通入口 |
+| 构建/CI/测试/Skill | 14 | `.github/workflows/build.yml`、`tests/`、`skills/ljt-repo-architect/` | 行为验证与自动化 |
+| 根目录配置与工具 | 6 | `README.md`、`BUILD.md`、`requirements.txt`、`scripts/verify_macos_bundle.py` | 使用说明、依赖和检查工具 |
+| PyInstaller spec | 1 | `wechat_mp_tools.spec` | 桌面打包单一定义 |
 
 这个分类只描述 Git 跟踪内容；用户本机 `data/`、`dist/`、`build/`、`__pycache__/` 和未跟踪的 `graphify-out/` 不属于发布库存。
 
@@ -162,7 +162,7 @@
 
 `wechat_mp_tools.spec` 是 PyInstaller 单一定义：打包 `frontend/`、`injection_scripts/`，Full 构建额外打包 `ms-playwright/`，Windows Full 还包含 WebView2 bootstrapper；`collect_all("mitmproxy")` 补齐动态依赖；macOS 生成 `.app`，Windows 生成无控制台可执行目录。
 
-`.github/workflows/build.yml` 安装 Python 3.12 和 PyInstaller，为 Full 构建安装 Playwright Chromium，执行同一个 spec，分别产出 Windows Full/Lite 与 macOS Full/Lite，并用 artifact 或 tag release 发布。`docs/diagrams/build-flow.mmd` 记录的目标路径进一步要求 **macOS ARM64 与 macOS x86_64 分别原生构建 Full/Lite 六个平台变体**：每个原生架构独立运行 PyInstaller、ad-hoc codesign、ditto 打包，并在发布前检查产物 Mach-O 架构；所有架构检查通过才允许进入 release 分支。也就是说，macOS 双架构不是通用二进制合并，而是 ARM64 与 x86_64 各自的可复现流水线。
+`.github/workflows/build.yml` 安装 Python 3.12 和 PyInstaller，为 Full 构建安装 Playwright Chromium，执行同一个 spec。当前流水线产出六个平台变体：Windows Full/Lite、macOS ARM64 Full/Lite、macOS x86_64 Full/Lite。macOS job 使用矩阵分别选择 `macos-latest`（ARM64）和 `macos-15-large`（x86_64）原生 runner，先校验 `uname -m`，再为 Full/Lite 设置 `WECHAT_MP_TOOLS_TARGET_ARCH`，构建后运行 `scripts/verify_macos_bundle.py` 检查主程序、原生扩展和内置 Chromium 的 Mach-O 架构，最后用 ditto 打包并发布 artifact 或 tag release。也就是说，macOS 双架构不是通用二进制合并，而是 ARM64 与 x86_64 各自的可复测流水线。
 
 ## 扩展路径
 
@@ -203,6 +203,6 @@
 | B 站音视频/字幕异常 | `backend/bilibili.py`、`backend/bilibili_sign.py` | view/playurl 返回、DASH 视频/音频 URL、ffmpeg 合并日志 |
 | 转码卡住或体积变大 | `backend/transcode.py` | `/status` 中实际编码策略、stderr 最后 500 字符、ffprobe 输出 |
 | 打包缺文件或浏览器不可用 | `wechat_mp_tools.spec`、`backend/runtime.py`、`.github/workflows/build.yml` | `frontend`/`injection_scripts`/`ms-playwright` 是否进入 datas、运行时 PATH 与 PLAYWRIGHT_BROWSERS_PATH |
-| mac 包在错误架构机器上运行 | `docs/diagrams/build-flow.mmd`、`.github/workflows/build.yml` | Mach-O `file`/architecture gate、ARM64/x86_64 原生 job 产物 |
+| mac 包在错误架构机器上运行 | `scripts/verify_macos_bundle.py`、`.github/workflows/build.yml` | 主程序/扩展/Chromium 架构 gate、ARM64/x86_64 原生 job 产物 |
 
 调试原则：先确定请求已经到达哪一层，再看对应 JSON 状态文件；平台解析失败优先抓响应体，文件异常先看磁盘产物和 metadata，UI 状态异常再看 `frontend/js/api.js` 是否把错误吞掉或降级。

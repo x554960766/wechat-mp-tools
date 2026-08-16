@@ -29,6 +29,7 @@ def resolver_for(platform: str, environment: dict[str, str]):
 
 def test_target_arch_resolver_accepts_explicit_macos_architectures():
     assert resolver_for("darwin", {})() is None
+    assert resolver_for("darwin", {})("x86_64") == "x86_64"
     assert resolver_for("darwin", {"WECHAT_MP_TOOLS_TARGET_ARCH": "arm64"})() == "arm64"
     assert resolver_for("darwin", {"WECHAT_MP_TOOLS_TARGET_ARCH": "x86_64"})() == "x86_64"
 
