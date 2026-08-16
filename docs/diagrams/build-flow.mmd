@@ -1,0 +1,70 @@
+flowchart TD
+    trigger([Build trigger<br/>push, tag, or manual dispatch])
+    checkout["Checkout source"]
+    python["Install Python 3.12<br/>and project dependencies"]
+    playwright["Install Playwright<br/>Chromium for Full builds"]
+
+    subgraph windows["Windows Path"]
+        win_full["Windows Full<br/>bundle Chromium and WebView2 bootstrapper"]
+        win_lite["Windows Lite<br/>WECHAT_MP_TOOLS_BUNDLE_BROWSER=0"]
+        win_build["Run PyInstaller<br/>with wechat_mp_tools.spec"]
+        win_verify["Verify Windows executable<br/>and x64 machine type"]
+        win_zip["Compress Full and Lite<br/>application directories"]
+    end
+
+    subgraph mac_arm["Native macOS ARM64 Path"]
+        arm_full["macOS ARM64 Full<br/>bundle Chromium"]
+        arm_lite["macOS ARM64 Lite<br/>do not bundle Chromium"]
+        arm_build["Run PyInstaller and<br/>ad-hoc codesign the app"]
+        arm_verify["Verify executable<br/>architecture is arm64"]
+        arm_zip["Package each app<br/>with ditto"]
+    end
+
+    subgraph mac_x86["Native macOS x86_64 Path"]
+        x86_full["macOS x86_64 Full<br/>bundle Chromium"]
+        x86_lite["macOS x86_64 Lite<br/>do not bundle Chromium"]
+        x86_build["Run PyInstaller and<br/>ad-hoc codesign the app"]
+        x86_verify["Verify executable<br/>architecture is x86_64"]
+        x86_zip["Package each app<br/>with ditto"]
+    end
+
+    artifacts["Collect workflow artifacts<br/>for all six variants"]
+    architecture_gate{"Every artifact passed<br/>its architecture check?"}
+    build_failed["Fail the workflow<br/>before publication"]
+    release_trigger{"Tagged release<br/>build?"}
+    retain["Retain untagged<br/>workflow artifacts"]
+    release["Attach zips and publish<br/>the GitHub release"]
+
+    trigger --> checkout --> python --> playwright
+
+    playwright --> win_full --> win_build
+    playwright --> win_lite --> win_build
+    win_build --> win_verify --> win_zip
+
+    playwright --> arm_full --> arm_build
+    playwright --> arm_lite --> arm_build
+    arm_build --> arm_verify --> arm_zip
+
+    playwright --> x86_full --> x86_build
+    playwright --> x86_lite --> x86_build
+    x86_build --> x86_verify --> x86_zip
+
+    win_zip --> artifacts
+    arm_zip --> artifacts
+    x86_zip --> artifacts
+    artifacts --> architecture_gate
+    architecture_gate -- "no" --> build_failed
+    architecture_gate -- "yes" --> release_trigger
+    release_trigger -- "no" --> retain
+    release_trigger -- "yes" --> release
+
+    classDef source fill:#e8f1ff,stroke:#4c6ef5,color:#172038
+    classDef platform fill:#f5f7fb,stroke:#667085,color:#172038
+    classDef gate fill:#fff7e2,stroke:#d97706,color:#372a10
+    classDef failure fill:#ffeceb,stroke:#d64545,color:#3d1717
+    classDef output fill:#eaf7ef,stroke:#2f9e44,color:#15291a
+    class trigger,checkout,python,playwright source
+    class windows,mac_arm,mac_x86 platform
+    class architecture_gate,release_trigger gate
+    class build_failed failure
+    class artifacts,retain,release output
