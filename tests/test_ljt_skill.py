@@ -33,3 +33,15 @@ def test_progressive_disclosure_files_exist_and_skill_is_compact():
     ):
         assert (SKILL_DIR / relative).is_file(), relative
     assert len(SKILL_FILE.read_text(encoding="utf-8").splitlines()) <= 500
+
+
+def test_skill_enforces_source_evidence_and_rejects_filename_only_claims():
+    skill = SKILL_FILE.read_text(encoding="utf-8")
+    guide = (SKILL_DIR / "references/architecture-guide.md").read_text(encoding="utf-8")
+    checklist = (SKILL_DIR / "references/quality-checklist.md").read_text(encoding="utf-8")
+
+    for text in (skill, guide, checklist):
+        lowered = text.lower()
+        assert "source evidence" in lowered
+        assert "filename-only" in lowered or "filename only" in lowered
+        assert "unresolved" in lowered

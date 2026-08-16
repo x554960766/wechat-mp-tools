@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Repository inventory helper for the ljt-repo-architect skill.
 
-Classifies Git-visible files into groups and emits deterministic, sorted JSON.
+Classifies Git-tracked files into groups and emits deterministic, sorted JSON.
 Uses only the Python standard library.
 
 Output groups: entrypoints, backend, frontend, injection, docs, build, vendored, other.
-graphify-out paths remain in tracked_files but are excluded from all groups.
+Untracked scratch files are excluded. Tracked graphify-out paths remain in
+tracked_files but are excluded from all groups.
 Ignored paths (return None): __pycache__, data, build, dist, .superpowers.
 """
 
@@ -107,10 +108,10 @@ _EXCLUDED_FROM_GROUPS = (
 
 
 def _git_files(root: str) -> list[str]:
-    """Return sorted list of Git-visible relative paths (POSIX separators)."""
+    """Return sorted list of Git-tracked relative paths (POSIX separators)."""
     result = subprocess.run(
         ["git", "-c", "core.quotePath=false", "ls-files", "-z",
-         "--cached", "--others", "--exclude-standard"],
+         "--cached"],
         capture_output=True,
         cwd=root,
     )

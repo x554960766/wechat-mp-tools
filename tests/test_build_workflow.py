@@ -134,6 +134,18 @@ class TestMacOSBuildSteps:
                     f"Verify step '{step['name']}' must use matrix.platform_machine"
                 )
 
+    def test_full_verify_requires_bundled_chromium(self, macos_job: dict):
+        run = self._step_run(macos_job, "Verify macOS Full Bundle")
+        assert "--require-chromium" in run, (
+            "Full build verification must fail if Playwright Chromium was not bundled"
+        )
+
+    def test_lite_verify_does_not_require_chromium(self, macos_job: dict):
+        run = self._step_run(macos_job, "Verify macOS Lite Bundle")
+        assert "--require-chromium" not in run, (
+            "Lite builds intentionally omit Chromium and must not require it"
+        )
+
     def test_full_zip_has_arch_label(self, macos_job: dict):
         run = self._step_run(macos_job, "Compress macOS Full Build")
         assert "${{ matrix.arch_label }}" in run, (

@@ -4,8 +4,8 @@ Public API
 -----------
 ``architectures(path) -> set[str]``: return the set of CPU architectures
 reported by ``lipo -archs`` for a single binary.
-``verify(bundle, requested_arch) -> list[str]``: return a (possibly
-empty) list of human-readable error strings.
+``verify(bundle, requested_arch, require_chromium=False) -> list[str]``:
+return a (possibly empty) list of human-readable error strings.
 ``main(argv)``: CLI entry-point; calls ``sys.exit``.
 
 Process execution is isolated behind the module-level ``_run`` callable
@@ -13,6 +13,7 @@ so that tests can inject a fake without touching ``subprocess``.
 """
 from __future__ import annotations
 
+import argparse
 import fnmatch
 import os
 import plistlib
@@ -163,7 +164,12 @@ def _find_chromium_executables(bundle: Path) -> list[Path]:
 # ---------------------------------------------------------------------------
 
 
-def verify(bundle: Path, requested_arch: str) -> list[str]:
+def verify(
+    bundle: Path,
+    requested_arch: str,
+    *,
+    require_chromium: bool = False,
+) -> list[str]:
     """Check *bundle* for *requested_arch* support.
 
     Returns a list of error strings.  An empty list means success.
@@ -211,6 +217,10 @@ def verify(bundle: Path, requested_arch: str) -> list[str]:
 
     # --- 4. Chromium (optional, Playwright layout) ---
     chromium_exes = _find_chromium_executables(bundle)
+    if require_chromium and not chromium_exes:
+        errors.append(
+            "Full build requires bundled Chromium executable, but none was found"
+        )
     for cexe in chromium_exes:
         chrom_arches = architectures(cexe)
         if requested_arch not in chrom_arches:
@@ -230,18 +240,28 @@ def main(argv: list[str] | None = None) -> None:
     """CLI entry-point."""
     if argv is None:
         argv = sys.argv[1:]
-    if len(argv) != 2:
-        print(f"Usage: {sys.argv[0]} <WeChat MP Tools.app> <arm64|x86_64>",
-              file=sys.stderr)
-        sys.exit(2)
-    bundle_path = Path(argv[0])
-    requested = argv[1]
-    errors = verify(bundle_path, requested)
+    parser = argparse.ArgumentParser(
+        description="Verify that a macOS app bundle supports a requested architecture"
+    )
+    parser.add_argument("bundle", help="Path to the .app bundle")
+    parser.add_argument("requested_arch", choices=sorted(SUPPORTED_ARCHES))
+    parser.add_argument(
+        "--require-chromium",
+        action="store_true",
+        help="Fail when no Playwright Chromium executable is bundled (Full builds)",
+    )
+    args = parser.parse_args(argv)
+
+    errors = verify(
+        Path(args.bundle),
+        args.requested_arch,
+        require_chromium=args.require_chromium,
+    )
     if errors:
         for e in errors:
             print(e, file=sys.stderr)
         sys.exit(1)
-    print(f"OK: bundle supports {requested}", file=sys.stderr)
+    print(f"OK: bundle supports {args.requested_arch}")
     sys.exit(0)
 
 

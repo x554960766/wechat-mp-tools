@@ -86,6 +86,28 @@ def test_cli_json_output():
             assert not f.startswith("graphify-out/"), f"graphify-out found in {group_name}: {f}"
 
 
+def test_cli_excludes_untracked_scratch_files():
+    probe = ROOT / "__ljt_inventory_untracked_probe__.tmp"
+    probe.write_text("temporary untracked file\n", encoding="utf-8")
+    try:
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), "--root", str(ROOT), "--json"],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+        )
+        assert result.returncode == 0, f"stderr: {result.stderr}"
+        data = json.loads(result.stdout)
+        assert probe.name not in data["tracked_files"]
+        assert all(
+            not path.endswith(probe.name)
+            for paths in data["groups"].values()
+            for path in paths
+        )
+    finally:
+        probe.unlink(missing_ok=True)
+
+
 def test_cli_non_ascii_paths_preserved():
     """C-quoted non-ASCII paths like docs/B站模块设计实现文档.md must appear in groups.docs."""
     result = subprocess.run(

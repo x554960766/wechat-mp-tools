@@ -8,28 +8,31 @@ flowchart TD
         win_full["Windows Full<br/>bundle Chromium and WebView2 bootstrapper"]
         win_lite["Windows Lite<br/>WECHAT_MP_TOOLS_BUNDLE_BROWSER=0"]
         win_build["Run PyInstaller<br/>with wechat_mp_tools.spec"]
-        win_verify["Verify Windows executable<br/>and x64 machine type"]
         win_zip["Compress Full and Lite<br/>application directories"]
     end
 
     subgraph mac_arm["Native macOS ARM64 Path"]
         arm_full["macOS ARM64 Full<br/>bundle Chromium"]
         arm_lite["macOS ARM64 Lite<br/>do not bundle Chromium"]
-        arm_build["Run PyInstaller and<br/>ad-hoc codesign the app"]
-        arm_verify["Verify executable<br/>architecture is arm64"]
+        arm_full_build["Run Full PyInstaller and<br/>ad-hoc codesign the app"]
+        arm_full_verify["Verify main, extension,<br/>and Chromium arm64"]
+        arm_lite_build["Run Lite PyInstaller and<br/>ad-hoc codesign the app"]
+        arm_lite_verify["Verify main and extension<br/>arm64; Chromium omitted"]
         arm_zip["Package each app<br/>with ditto"]
     end
 
     subgraph mac_x86["Native macOS x86_64 Path"]
         x86_full["macOS x86_64 Full<br/>bundle Chromium"]
         x86_lite["macOS x86_64 Lite<br/>do not bundle Chromium"]
-        x86_build["Run PyInstaller and<br/>ad-hoc codesign the app"]
-        x86_verify["Verify executable<br/>architecture is x86_64"]
+        x86_full_build["Run Full PyInstaller and<br/>ad-hoc codesign the app"]
+        x86_full_verify["Verify main, extension,<br/>and Chromium x86_64"]
+        x86_lite_build["Run Lite PyInstaller and<br/>ad-hoc codesign the app"]
+        x86_lite_verify["Verify main and extension<br/>x86_64; Chromium omitted"]
         x86_zip["Package each app<br/>with ditto"]
     end
 
     artifacts["Collect workflow artifacts<br/>for all six variants"]
-    architecture_gate{"Every artifact passed<br/>its architecture check?"}
+    architecture_gate{"Every macOS artifact passed<br/>its architecture check?"}
     build_failed["Fail the workflow<br/>before publication"]
     release_trigger{"Tagged release<br/>build?"}
     retain["Retain untagged<br/>workflow artifacts"]
@@ -39,22 +42,20 @@ flowchart TD
 
     playwright --> win_full --> win_build
     playwright --> win_lite --> win_build
-    win_build --> win_verify --> win_zip
+    win_build --> win_zip
 
-    playwright --> arm_full --> arm_build
-    playwright --> arm_lite --> arm_build
-    arm_build --> arm_verify --> arm_zip
+    playwright --> arm_full --> arm_full_build --> arm_full_verify --> arm_zip
+    playwright --> arm_lite --> arm_lite_build --> arm_lite_verify --> arm_zip
 
-    playwright --> x86_full --> x86_build
-    playwright --> x86_lite --> x86_build
-    x86_build --> x86_verify --> x86_zip
+    playwright --> x86_full --> x86_full_build --> x86_full_verify --> x86_zip
+    playwright --> x86_lite --> x86_lite_build --> x86_lite_verify --> x86_zip
 
     win_zip --> artifacts
-    arm_zip --> artifacts
-    x86_zip --> artifacts
-    artifacts --> architecture_gate
+    arm_zip --> architecture_gate
+    x86_zip --> architecture_gate
     architecture_gate -- "no" --> build_failed
-    architecture_gate -- "yes" --> release_trigger
+    architecture_gate -- "yes" --> artifacts
+    artifacts --> release_trigger
     release_trigger -- "no" --> retain
     release_trigger -- "yes" --> release
 

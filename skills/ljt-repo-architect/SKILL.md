@@ -32,6 +32,10 @@ classification taxonomy and inventory template.
    and any other runtime triggers.
 2. Trace the call chain from each entry point through at least three layers.
 3. Note async boundaries, thread models, and process isolation.
+4. Require **source evidence** for every runtime, dependency, or threading
+   claim: cite a concrete file plus symbol, route, import, configuration entry,
+   or command result. Do not make a filename-only claim; label unsupported
+   possibilities as **Unresolved** instead.
 
 See [references/architecture-guide.md](references/architecture-guide.md) for
 tracing procedures and patterns.
@@ -43,6 +47,9 @@ tracing procedures and patterns.
    contracts).
 3. Map cross-module dependencies; identify coupling hotspots.
 4. Catalog storage backends, caches, and external system integrations.
+5. Apply the same source-evidence gate to interfaces, dependencies, storage,
+   and packaging claims. Filename-only assumptions remain unresolved and must
+   not be presented as observed behavior.
 
 ### Phase 4 — Diagrams
 
@@ -73,6 +80,8 @@ Produce a progressive reading order:
 2. Confirm every external service listed is reachable or documented.
 3. Run `git ls-files | grep -c ''` and compare against inventory totals.
 4. Validate all Mermaid diagrams render without errors.
+5. Reject any major architectural claim without inline source evidence or an
+   explicit **Unresolved** marker.
 
 See [references/quality-checklist.md](references/quality-checklist.md) for the
 complete verification checklist.

@@ -16,6 +16,10 @@ the final architecture document.
 - [ ] Each declared entry point has a file path that exists.
 - [ ] At least one call chain of depth >= 2 is traced for every entry point.
 - [ ] Async boundaries are annotated.
+- [ ] Every runtime, dependency, threading, storage, and packaging claim has
+      source evidence (path + symbol/route/import/config/command result).
+- [ ] No filename-only inference is presented as observed behavior.
+- [ ] Claims without source evidence are explicitly marked **Unresolved**.
 
 ## Module Verification
 

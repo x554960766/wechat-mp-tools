@@ -274,6 +274,18 @@ class TestChromiumCheck:
             errs = vmb.verify(app, "arm64")
         assert not any("chromium" in e.lower() for e in errs)
 
+    def test_require_chromium_fails_when_missing(self, tmp_path):
+        app = _fake_bundle(tmp_path, has_chromium_browser=False, has_headless_shell=False)
+        with patch.object(vmb, "_run", _make_run(stdout="arm64")):
+            errs = vmb.verify(app, "arm64", require_chromium=True)
+        assert any("requires bundled chromium" in e.lower() for e in errs)
+
+    def test_require_chromium_passes_when_present(self, tmp_path):
+        app = _fake_bundle(tmp_path, has_chromium_browser=True)
+        with patch.object(vmb, "_run", _make_run(stdout="arm64")):
+            errs = vmb.verify(app, "arm64", require_chromium=True)
+        assert not errs
+
     def test_all_chromium_executables_checked(self, tmp_path):
         """Both browser and headless shell are checked when present."""
         app = _fake_bundle(tmp_path, has_chromium_browser=True, has_headless_shell=True)
@@ -339,13 +351,16 @@ class TestUnsupportedArch:
 # ---------------------------------------------------------------------------
 
 class TestCLI:
-    def test_exit_zero_on_success(self, tmp_path):
+    def test_exit_zero_on_success(self, tmp_path, capsys):
         app = _fake_bundle(tmp_path)
         mock_run = _make_run(stdout="arm64")
         with patch.object(vmb, "_run", mock_run):
             with pytest.raises(SystemExit) as exc_info:
                 vmb.main([str(app), "arm64"])
         assert exc_info.value.code == 0
+        captured = capsys.readouterr()
+        assert "OK: bundle supports arm64" in captured.out
+        assert captured.err == ""
 
     def test_exit_nonzero_on_failure(self, tmp_path, capsys):
         app = _fake_bundle(tmp_path, has_main=False)

@@ -28,6 +28,20 @@ behavior, and document module interfaces (Phase 2 & 3).
    - Depth exceeds 3 (document the remaining as "delegates to").
 4. Record the chain as: `entry -> d1 -> d2 -> d3 -> [stop reason]`.
 
+## Source-Evidence Gate
+
+Every runtime, dependency, storage, threading, and packaging claim in the final
+document must include at least one of:
+
+- a source path plus symbol, route, decorator, import, or configuration key;
+- a build/workflow definition and the relevant command or job;
+- a reproducible command result with enough context to repeat it.
+
+Never infer behavior from a path or module name alone. Filename-only hypotheses
+must be moved to an **Unresolved** section and phrased as a question or follow-up
+check. If source evidence contradicts an existing design document, source
+evidence wins and the discrepancy must be called out.
+
 ## Module Mapping
 
 ### Grouping Heuristics

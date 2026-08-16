@@ -142,7 +142,7 @@ printf '%s\n' '--- repository documentation tests ---'
 python3 -m pytest tests/test_architecture_docs.py tests/test_architecture_diagrams.py -q
 ```
 
-**预期观察**：`backend/transcode.py` 使用单 worker 队列避免并发 ffmpeg；macOS 可选 VideoToolbox，低码率源会强制 CRF 软编，输出变大时还有软件兜底压缩阶段。`wechat_mp_tools.spec` 至少包含 `frontend/` 与 `injection_scripts/`，Full 版包含 Playwright Chromium。workflow 当前产出 Windows Full/Lite、macOS ARM64 Full/Lite、macOS x86_64 Full/Lite；两个 macOS 架构都在原生 runner 上构建，并通过 `scripts/verify_macos_bundle.py` 检查主程序、原生扩展和内置 Chromium。
+**预期观察**：`backend/transcode.py` 使用单 worker 队列避免并发 ffmpeg；macOS 可选 VideoToolbox，低码率源会强制 CRF 软编，输出变大时还有软件兜底压缩阶段。`wechat_mp_tools.spec` 至少包含 `frontend/` 与 `injection_scripts/`，Full 版包含 Playwright Chromium。workflow 当前产出 Windows Full/Lite、macOS ARM64 Full/Lite、macOS x86_64 Full/Lite；两个 macOS 架构都在原生 runner 上构建，并通过 `scripts/verify_macos_bundle.py` 检查主程序和原生扩展，Full 构建还以 `--require-chromium` 确认内置浏览器架构，Lite 构建不要求 Chromium。
 
 ## 验收清单
 
@@ -151,4 +151,4 @@ python3 -m pytest tests -q
 git diff --check
 ```
 
-**预期观察**：全部测试通过，`git diff --check` 没有输出。提交前再确认改动只涉及文档、文档测试和任务报告，没有改动 `docs/diagrams/*.mmd` 或运行时代码。
+**预期观察**：全部测试通过，`git diff --check` 没有输出。提交前确认架构论断仍有源码证据；如果改了 Mermaid 源文件，重新渲染对应 SVG，并重跑相关的架构、workflow 和 verifier 测试。

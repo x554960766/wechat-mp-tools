@@ -162,7 +162,7 @@
 
 `wechat_mp_tools.spec` 是 PyInstaller 单一定义：打包 `frontend/`、`injection_scripts/`，Full 构建额外打包 `ms-playwright/`，Windows Full 还包含 WebView2 bootstrapper；`collect_all("mitmproxy")` 补齐动态依赖；macOS 生成 `.app`，Windows 生成无控制台可执行目录。
 
-`.github/workflows/build.yml` 安装 Python 3.12 和 PyInstaller，为 Full 构建安装 Playwright Chromium，执行同一个 spec。当前流水线产出六个平台变体：Windows Full/Lite、macOS ARM64 Full/Lite、macOS x86_64 Full/Lite。macOS job 使用矩阵分别选择 `macos-latest`（ARM64）和 `macos-15-large`（x86_64）原生 runner，先校验 `uname -m`，再为 Full/Lite 设置 `WECHAT_MP_TOOLS_TARGET_ARCH`，构建后运行 `scripts/verify_macos_bundle.py` 检查主程序、原生扩展和内置 Chromium 的 Mach-O 架构，最后用 ditto 打包并发布 artifact 或 tag release。也就是说，macOS 双架构不是通用二进制合并，而是 ARM64 与 x86_64 各自的可复测流水线。
+`.github/workflows/build.yml` 安装 Python 3.12 和 PyInstaller，为 Full 构建安装 Playwright Chromium，执行同一个 spec。当前流水线产出六个平台变体：Windows Full/Lite、macOS ARM64 Full/Lite、macOS x86_64 Full/Lite。macOS job 使用矩阵分别选择 `macos-latest`（ARM64）和 `macos-15-large`（x86_64）原生 runner，先校验 `uname -m`，再为 Full/Lite 设置 `WECHAT_MP_TOOLS_TARGET_ARCH`；构建后运行 `scripts/verify_macos_bundle.py` 检查主程序与原生扩展，Full 构建还带 `--require-chromium` 强制确认内置 Chromium 的 Mach-O 架构，Lite 则不要求浏览器，最后用 ditto 打包并发布 artifact 或 tag release。也就是说，macOS 双架构不是通用二进制合并，而是 ARM64 与 x86_64 各自的可复测流水线。
 
 ## 扩展路径
 
