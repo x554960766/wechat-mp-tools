@@ -26,6 +26,7 @@ venv*/
 
 # Claude agent config
 .claude/
+.superpowers/
 
 # Subtitle remover models and binaries
 backend/subtitle_remover/backend/models/
@@ -45,4 +46,3 @@ wechat-mp-server/
 *.recovered
 *.spec.bak
 *.pyc
-
