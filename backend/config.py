@@ -14,7 +14,7 @@ from pathlib import Path
 from backend.runtime import app_dir
 
 # ── 版本号 ────────────────────────────────────────────────
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 
 # ── 路径配置 ──────────────────────────────────────────────
 if getattr(sys, 'frozen', False):
@@ -75,8 +75,9 @@ def load_json(filepath: Path, default=None):
         default = {}
     try:
         if filepath.exists():
-            return json.loads(filepath.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, IOError):
+            content = filepath.read_bytes().decode("utf-8", errors="replace")
+            return json.loads(content)
+    except Exception:
         pass
     return default
 

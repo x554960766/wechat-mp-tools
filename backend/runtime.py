@@ -45,6 +45,29 @@ def log_file() -> Path:
 
 
 def configure_runtime():
+    # 修复在 Windows / 临时解压目录（如 360zip / PyInstaller）运行时，
+    # 环境变量 REQUESTS_CA_BUNDLE / SSL_CERT_FILE / CURL_CA_BUNDLE 指向已失效临时路径导致的 TLS 证书报错
+    for env_var in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE"):
+        val = os.environ.get(env_var)
+        if val and not os.path.exists(val):
+            os.environ.pop(env_var, None)
+
+    try:
+        import certifi
+        ca_path = certifi.where()
+        if ca_path and not os.path.exists(ca_path):
+            res_dir = resource_dir()
+            for candidate in (
+                res_dir / "_internal" / "certifi" / "cacert.pem",
+                res_dir / "certifi" / "cacert.pem",
+            ):
+                if candidate.exists():
+                    os.environ["REQUESTS_CA_BUNDLE"] = str(candidate)
+                    os.environ["SSL_CERT_FILE"] = str(candidate)
+                    break
+    except Exception:
+        pass
+
     bundled_browsers = resource_dir() / "ms-playwright"
     if bundled_browsers.exists():
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(bundled_browsers)

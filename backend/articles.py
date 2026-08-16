@@ -104,8 +104,20 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "")
                 last_exc = exc
                 continue
 
+        # 安全提取响应正文，防止代理返回 gzip 或非 UTF-8 字节触发 UnicodeDecodeError
+        try:
+            if hasattr(resp, "text") and resp.text:
+                err_body = resp.text
+            else:
+                err_body = resp.content.decode("utf-8", errors="replace")
+        except Exception:
+            try:
+                import gzip
+                err_body = gzip.decompress(resp.content).decode("utf-8", errors="replace")
+            except Exception:
+                err_body = resp.content.decode("utf-8", errors="replace")
+
         if resp.status_code != 200:
-            err_body = resp.text
             report_proxy_status(proxy_url, success=False)
             account_pool.report(account_id, http_ok=False, error=f"WeReadError: HTTP {resp.status_code} {err_body}")
 
@@ -122,7 +134,16 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "")
                 continue
 
         report_proxy_status(proxy_url, success=True)
-        raw_data = resp.json()
+        try:
+            raw_data = resp.json()
+        except Exception:
+            try:
+                import gzip
+                decompressed = gzip.decompress(resp.content)
+                raw_data = json.loads(decompressed.decode("utf-8", errors="replace"))
+            except Exception:
+                raw_data = json.loads(resp.content.decode("utf-8", errors="replace"))
+
         account_pool.report(account_id, ret=0)
 
         if isinstance(raw_data, list):

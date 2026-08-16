@@ -74,6 +74,10 @@ const API = {
         list()         { return API.get('/api/account-pool'); },
         summary()      { return API.get('/api/account-pool/summary', { showError: false }); },
         remove(id)     { return API.delete(`/api/account-pool/${id}`); },
+        update(id, data) { return API.put(`/api/account-pool/${id}`, data); },
+        verify(id)     { return API.post(`/api/account-pool/${id}/verify`); },
+        verifyAll()    { return API.post('/api/account-pool/verify-all'); },
+        revive(id)     { return API.post(`/api/account-pool/${id}/revive`); },
         events()       { return API.get('/api/account-pool/events', { showError: false }); },
     },
 

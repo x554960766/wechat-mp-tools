@@ -383,8 +383,13 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         )
         resp.raise_for_status()
         report_proxy_status(proxy_url, success=True)
-        resp.encoding = "utf-8"
-        raw_html = resp.text
+        try:
+            raw_html = resp.content.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                raw_html = resp.content.decode("gb18030", errors="replace")
+            except Exception:
+                raw_html = resp.content.decode("utf-8", errors="replace")
 
         # 检测是否为微信屏蔽、删除或出错页面（贴图画廊类型可能不含 js_content/js_article，但含有 picture_page_info_list）
         has_js_content = 'id="js_content"' in raw_html or 'id="js_article"' in raw_html or 'picture_page_info_list' in raw_html

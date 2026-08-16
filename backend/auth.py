@@ -14,11 +14,9 @@ from backend.config import (
     CONFIG_FILE, DATA_DIR, load_json, save_json,
     get_settings, WEREAD_PLATFORM_URL, get_proxies_dict, report_proxy_status
 )
-from backend.account_pool import account_pool, LOGIN_VALID_SECONDS as POOL_LOGIN_VALID_SECONDS
+from backend.account_pool import account_pool
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
-
-LOGIN_VALID_SECONDS = 30 * 24 * 60 * 60  # 凭证延长保存
 
 # 登录状态管理
 _login_state = {
@@ -108,6 +106,20 @@ def start_browser_login():
     return start_login()
 
 
+def _safe_req_get(url: str, **kwargs):
+    """带 TLS CA 路径自动容错的 requests.get"""
+    try:
+        return req.get(url, **kwargs)
+    except OSError as e:
+        if "TLS CA certificate" in str(e) or "cacert.pem" in str(e):
+            import os
+            for env_var in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE"):
+                os.environ.pop(env_var, None)
+            kwargs["verify"] = False
+            return req.get(url, **kwargs)
+        raise
+
+
 def _do_login():
     """执行微信读书扫码登录（后台线程轮询，不弹出浏览器窗口）"""
     platform_url = get_settings().get("weread_platform_url") or WEREAD_PLATFORM_URL
@@ -115,7 +127,7 @@ def _do_login():
     _set_login_state("scanning", "正在从微信读书获取登录二维码...", 10)
 
     try:
-        resp = req.get(f"{platform_url}/api/v2/login/platform", timeout=15)
+        resp = _safe_req_get(f"{platform_url}/api/v2/login/platform", timeout=15)
         if resp.status_code != 200:
             _set_login_state("failed", f"获取二维码失败 (HTTP {resp.status_code})")
             return
@@ -136,7 +148,7 @@ def _do_login():
 
             time.sleep(3)
             try:
-                r = req.get(f"{platform_url}/api/v2/login/platform/{uuid_str}", timeout=30)
+                r = _safe_req_get(f"{platform_url}/api/v2/login/platform/{uuid_str}", timeout=30)
                 if r.status_code == 200:
                     r_data = r.json()
                     vid = r_data.get("vid")
@@ -157,7 +169,10 @@ def _do_login():
                             "token": token,
                             "vid": str(vid),
                             "nickname": username,
+                            "type": "weread_platform",
                             "save_time": time.time(),
+                            "last_verified_at": time.time(),
+                            "health_status": "valid",
                         })
                         
                         _set_login_state("success", f"登录成功！欢迎，{username}", 100)
@@ -195,12 +210,18 @@ def logout():
 
 @auth_bp.route("/check-credentials", methods=["GET"])
 def check_credentials():
-    """验证账号池凭证有效性"""
-    from backend.account_pool import borrow_session
+    """验证账号池凭证有效性（调用真实探活）"""
+    from backend.account_pool import borrow_session, account_pool
 
     try:
         acc_id, token, cookie_str = borrow_session()
     except RuntimeError:
         return jsonify({"valid": False, "message": "账号池中无可用账号，请先添加微信读书账号"})
 
-    return jsonify({"valid": True, "message": f"账号 (ID: {acc_id}) 凭证正常可用"})
+    res = account_pool.verify_account(acc_id)
+    return jsonify({
+        "valid": res.get("valid", False),
+        "message": f"账号【{res.get('nickname', acc_id)}】: {res.get('message')}",
+        "verify_result": res,
+    })
+
