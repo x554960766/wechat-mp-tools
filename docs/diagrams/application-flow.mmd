@@ -1,0 +1,86 @@
+flowchart TD
+    start([Application start])
+    configure["main.py configures runtime<br/>for source or frozen execution"]
+    port["Find a free local port"]
+    flask["Start Flask app.py<br/>in a daemon thread"]
+    ready{"Server ready<br/>before timeout?"}
+    fallback{"WebView available?"}
+    webview["Open pywebview window<br/>with SPA URL"]
+    browser["Open system browser<br/>browser fallback"]
+    startup_error["Show startup error<br/>and write runtime log"]
+
+    hash["User changes hash route"]
+    route_lookup{"router.js has<br/>a registered page?"}
+    login_route["Show login page"]
+    render_page["Render or restore<br/>the mapped page object"]
+    action["Page action calls<br/>api.js fetch wrapper"]
+    api["Flask blueprint handles<br/>the API request"]
+    auth_type{"Required platform<br/>and auth type?"}
+
+    qr_login["Show platform QR or<br/>credential login flow"]
+    reading_account["account_pool schedules<br/>a WeChat Reading credential"]
+    channels_cookie["Channels acquisition uses<br/>Playwright, proxy, and injection"]
+    auth_ok{"Credentials<br/>acquired?"}
+    auth_error["Return login or<br/>acquisition error"]
+
+    parse["Platform client parses URL,<br/>metadata, media, or article content"]
+    external["Exchange requests with<br/>external site or CDN"]
+    parse_ok{"Parse and access<br/>checks pass?"}
+    parse_error["Normalize error and<br/>report it to the SPA"]
+
+    queue["Create background<br/>download or upload task"]
+    scheduler["rss_scheduler runs an<br/>automatic fetch and upload"]
+    background["Downloader fetches media<br/>and reports progress"]
+    poll["SPA polls task status<br/>without blocking the UI"]
+    progress{"Task state"}
+    running["Update progress and<br/>continue polling"]
+    cancel_request["User requests cancellation"]
+    cancelled["Stop work, mark task<br/>cancelled, clean partial file"]
+    failed["Capture error, mark task<br/>failed, retain diagnostics"]
+    complete["Write output file"]
+    persist["Persist history record<br/>and file metadata"]
+    ui_done["Show open-file and<br/>history actions"]
+    retry["User can retry after<br/>correcting the cause"]
+
+    start --> configure --> port --> flask --> ready
+    ready -- "yes" --> fallback
+    ready -- "no" --> startup_error
+    fallback -- "yes" --> webview
+    fallback -- "no" --> browser
+    webview --> hash
+    browser --> hash
+    app_start["Direct browser entry<br/>through app.py"] --> hash
+
+    hash --> route_lookup
+    route_lookup -- "unknown" --> login_route --> hash
+    route_lookup -- "known" --> render_page --> action --> api
+    api --> auth_type
+    auth_type -- "already authenticated" --> parse
+    auth_type -- "WeChat Reading credential" --> reading_account
+    auth_type -- "Channels cookie" --> channels_cookie
+    auth_type -- "platform login" --> qr_login
+    reading_account --> auth_ok
+    channels_cookie --> auth_ok
+    auth_ok -- "no" --> auth_error --> retry
+    auth_ok -- "yes" --> parse
+
+    parse --> external --> parse_ok
+    parse_ok -- "no" --> parse_error --> retry
+    parse_ok -- "yes" --> queue --> background
+    scheduler --> parse
+    scheduler --> queue
+    background --> poll --> progress
+    progress -- "running" --> running --> poll
+    progress -- "cancelled" --> cancelled
+    progress -- "failed" --> failed --> retry
+    progress -- "complete" --> complete --> persist --> ui_done
+    cancel_request --> background
+
+    classDef startNode fill:#e8f1ff,stroke:#4c6ef5,color:#172038
+    classDef decision fill:#fff7e2,stroke:#d97706,color:#372a10
+    classDef failure fill:#ffeceb,stroke:#d64545,color:#3d1717
+    classDef success fill:#eaf7ef,stroke:#2f9e44,color:#15291a
+    class start,app_start startNode
+    class ready,fallback,route_lookup,auth_type,auth_ok,parse_ok,progress decision
+    class startup_error,auth_error,parse_error,cancelled,failed,retry failure
+    class complete,persist,ui_done success

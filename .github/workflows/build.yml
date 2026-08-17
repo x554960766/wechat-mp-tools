@@ -74,7 +74,19 @@ jobs:
           retention-days: 7
 
   build-macos:
-    runs-on: macos-latest
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            pyinstaller_arch: arm64
+            platform_machine: arm64
+            arch_label: ARM64
+          - runner: macos-15-intel
+            pyinstaller_arch: x86_64
+            platform_machine: x86_64
+            arch_label: x86-64
     env:
       PLAYWRIGHT_BROWSERS_PATH: ms-playwright
     steps:
@@ -87,6 +99,15 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
+      - name: Check Runner Machine Architecture
+        run: |
+          echo "Runner uname -m: $(uname -m)"
+          echo "Expected platform.machine: ${{ matrix.platform_machine }}"
+          test "$(uname -m)" = "${{ matrix.platform_machine }}" || {
+            echo "ERROR: runner architecture $(uname -m) does not match expected ${{ matrix.platform_machine }}"
+            exit 1
+          }
+
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
@@ -96,38 +117,49 @@ jobs:
 
       - name: Build macOS APP (Full)
         run: |
-          pyinstaller --clean --noconfirm wechat_mp_tools.spec
+          WECHAT_MP_TOOLS_TARGET_ARCH="${{ matrix.pyinstaller_arch }}" \
+            pyinstaller --clean --noconfirm wechat_mp_tools.spec
           # codesign --deep often fails on nested Chromium symlinks. If it fails, we ignore it as PyInstaller's built-in ad-hoc signing is sufficient.
           codesign --force --deep --sign - "dist/WeChat MP Tools.app" || true
+
+      - name: Verify macOS Full Bundle
+        run: |
+          python scripts/verify_macos_bundle.py "dist/WeChat MP Tools.app" "${{ matrix.platform_machine }}" --require-chromium
 
       - name: Compress macOS Full Build
         run: |
           cd dist
-          ditto -c -k --keepParent "WeChat MP Tools.app" ../WeChat_MP_Tools_macOS_Full.zip
-
-      - name: Build macOS APP (Lite)
-        run: |
-          rm -rf build dist
-          WECHAT_MP_TOOLS_BUNDLE_BROWSER=0 pyinstaller --clean --noconfirm wechat_mp_tools.spec
-          codesign --force --deep --sign - "dist/WeChat MP Tools.app" || true
-
-      - name: Compress macOS Lite Build
-        run: |
-          cd dist
-          ditto -c -k --keepParent "WeChat MP Tools.app" ../WeChat_MP_Tools_macOS_Lite.zip
+          ditto -c -k --keepParent "WeChat MP Tools.app" "../WeChat_MP_Tools_macOS_${{ matrix.arch_label }}_Full.zip"
 
       - name: Upload macOS Full Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WeChat-MP-Tools-macOS-Full
-          path: WeChat_MP_Tools_macOS_Full.zip
+          name: WeChat-MP-Tools-macOS-${{ matrix.arch_label }}-Full
+          path: WeChat_MP_Tools_macOS_${{ matrix.arch_label }}_Full.zip
           retention-days: 7
+
+      - name: Build macOS APP (Lite)
+        run: |
+          rm -rf build dist
+          WECHAT_MP_TOOLS_BUNDLE_BROWSER=0 \
+            WECHAT_MP_TOOLS_TARGET_ARCH="${{ matrix.pyinstaller_arch }}" \
+            pyinstaller --clean --noconfirm wechat_mp_tools.spec
+          codesign --force --deep --sign - "dist/WeChat MP Tools.app" || true
+
+      - name: Verify macOS Lite Bundle
+        run: |
+          python scripts/verify_macos_bundle.py "dist/WeChat MP Tools.app" "${{ matrix.platform_machine }}"
+
+      - name: Compress macOS Lite Build
+        run: |
+          cd dist
+          ditto -c -k --keepParent "WeChat MP Tools.app" "../WeChat_MP_Tools_macOS_${{ matrix.arch_label }}_Lite.zip"
 
       - name: Upload macOS Lite Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WeChat-MP-Tools-macOS-Lite
-          path: WeChat_MP_Tools_macOS_Lite.zip
+          name: WeChat-MP-Tools-macOS-${{ matrix.arch_label }}-Lite
+          path: WeChat_MP_Tools_macOS_${{ matrix.arch_label }}_Lite.zip
           retention-days: 7
 
   create-release:
@@ -153,8 +185,9 @@ jobs:
           files: |
             artifacts/WeChat-MP-Tools-Windows-Full/WeChat_MP_Tools_Windows_Full.zip
             artifacts/WeChat-MP-Tools-Windows-Lite/WeChat_MP_Tools_Windows_Lite.zip
-            artifacts/WeChat-MP-Tools-macOS-Full/WeChat_MP_Tools_macOS_Full.zip
-            artifacts/WeChat-MP-Tools-macOS-Lite/WeChat_MP_Tools_macOS_Lite.zip
+            artifacts/WeChat-MP-Tools-macOS-ARM64-Full/WeChat_MP_Tools_macOS_ARM64_Full.zip
+            artifacts/WeChat-MP-Tools-macOS-ARM64-Lite/WeChat_MP_Tools_macOS_ARM64_Lite.zip
+            artifacts/WeChat-MP-Tools-macOS-x86-64-Full/WeChat_MP_Tools_macOS_x86-64_Full.zip
+            artifacts/WeChat-MP-Tools-macOS-x86-64-Lite/WeChat_MP_Tools_macOS_x86-64_Lite.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-

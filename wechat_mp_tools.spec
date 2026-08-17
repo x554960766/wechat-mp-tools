@@ -5,6 +5,22 @@ from pathlib import Path
 
 project_root = os.path.abspath('.')
 
+
+def macos_target_arch(value=None):
+    """Return an explicit PyInstaller macOS architecture, or None for native builds."""
+    if sys.platform != 'darwin':
+        return None
+    requested = (
+        value or os.environ.get('WECHAT_MP_TOOLS_TARGET_ARCH', '')
+    ).strip().lower()
+    if not requested:
+        return None
+    if requested not in {'arm64', 'x86_64'}:
+        raise ValueError(
+            'WECHAT_MP_TOOLS_TARGET_ARCH must be arm64 or x86_64 on macOS'
+        )
+    return requested
+
 # ── 资源文件配置 ──────────────────────────────────────────
 # 收集静态前端文件夹到包中
 datas = [
@@ -189,7 +205,7 @@ if sys.platform == 'darwin':
         console=False,  # 完全不显示后台终端窗口，纯 native 体验
         disable_windowed_traceback=False,
         argv_emulation=False,
-        target_arch=None,
+        target_arch=macos_target_arch(),
         codesign_identity=None,
         entitlements_file=None,
     )
