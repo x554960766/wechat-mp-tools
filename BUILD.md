@@ -25,7 +25,7 @@
        - `WeChat-MP-Tools-macOS-ARM64-Full` / `WeChat-MP-Tools-macOS-ARM64-Lite`（Apple Silicon M1/M2/M3/M4）
        - `WeChat-MP-Tools-macOS-x86-64-Full` / `WeChat-MP-Tools-macOS-x86-64-Lite`（Intel 芯片）
      - Full 版本内置 Chromium，体积较大；Lite 版本不内置，需要系统已安装 Chrome 或 Edge。
-     - CI 中 Intel 版本使用 `macos-15-large` 原生 x86_64 运行器构建，确保产出原生 Intel 二进制。
+     - CI 中 Intel 版本使用 `macos-15-intel` 原生 x86_64 运行器构建，确保产出原生 Intel 二进制。
 
 ---
 
@@ -61,7 +61,7 @@ WECHAT_MP_TOOLS_BUNDLE_BROWSER=0 WECHAT_MP_TOOLS_TARGET_ARCH=x86_64 pyinstaller 
 python3 scripts/verify_macos_bundle.py "dist/WeChat MP Tools.app" x86_64
 ```
 
-> **说明**：CI 使用 `macos-15-large` 原生 Intel 运行器构建 x86_64 产物，避免交叉编译问题。如果您在 Apple Silicon Mac 上需要 x86_64 产物，建议直接下载 CI 产物而非本地交叉编译。
+> **说明**：CI 使用 `macos-15-intel` 原生 Intel 运行器构建 x86_64 产物，避免交叉编译问题。如果您在 Apple Silicon Mac 上需要 x86_64 产物，建议直接下载 CI 产物而非本地交叉编译。
 
 
 ### 1. 打包成果位置

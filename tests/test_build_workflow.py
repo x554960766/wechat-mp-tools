@@ -66,12 +66,17 @@ class TestMacOSMatrixStructure:
         x86 = [e for e in macos_matrix if e.get("arch_label") == "x86-64"]
         assert len(x86) == 1, "Missing x86-64 matrix entry"
         entry = x86[0]
-        assert entry["runner"] == "macos-15-large"
+        assert entry["runner"] == "macos-15-intel"
         assert entry["pyinstaller_arch"] == "x86_64"
         assert entry["platform_machine"] == "x86_64"
 
     def test_runs_on_uses_matrix_runner(self, macos_job: dict):
         assert macos_job["runs-on"] == "${{ matrix.runner }}"
+
+    def test_matrix_does_not_cancel_other_architecture_on_failure(self, macos_job: dict):
+        assert macos_job["strategy"]["fail-fast"] is False, (
+            "One macOS architecture failure should not hide whether the other architecture builds"
+        )
 
 
 class TestMacOSBuildSteps:
@@ -242,7 +247,7 @@ class TestReleaseAssets:
 
 
 class TestDocumentation:
-    """Verify README and BUILD docs mention x86_64 and macos-15-large."""
+    """Verify README and BUILD docs mention x86_64 and macos-15-intel."""
 
     def test_readme_mentions_x86_64(self, readme: str):
         assert "x86_64" in readme or "x86-64" in readme, (
@@ -269,9 +274,9 @@ class TestDocumentation:
             "BUILD.md must document WECHAT_MP_TOOLS_TARGET_ARCH for local builds"
         )
 
-    def test_build_md_mentions_macos_15_large(self, build_md: str):
-        assert "macos-15-large" in build_md, (
-            "BUILD.md must explain that CI uses macos-15-large for Intel builds"
+    def test_build_md_mentions_macos_15_intel(self, build_md: str):
+        assert "macos-15-intel" in build_md, (
+            "BUILD.md must explain that CI uses macos-15-intel for Intel builds"
         )
 
     def test_build_md_documents_intel_local_build(self, build_md: str):

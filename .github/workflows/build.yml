@@ -76,13 +76,14 @@ jobs:
   build-macos:
     runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - runner: macos-latest
             pyinstaller_arch: arm64
             platform_machine: arm64
             arch_label: ARM64
-          - runner: macos-15-large
+          - runner: macos-15-intel
             pyinstaller_arch: x86_64
             platform_machine: x86_64
             arch_label: x86-64

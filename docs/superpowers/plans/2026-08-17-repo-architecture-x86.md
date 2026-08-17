@@ -482,12 +482,12 @@ Parse `.github/workflows/build.yml` with PyYAML and assert:
 
 - macOS job has a two-entry matrix
 - ARM64 uses `macos-latest`
-- x86_64 uses `macos-15-large`
+- x86_64 uses `macos-15-intel`
 - both Full and Lite build commands set `WECHAT_MP_TOOLS_TARGET_ARCH`
 - every build invokes the verifier
 - artifact names contain `ARM64` or `x86-64`
 - release file globs or explicit paths include all four variants
-- README and BUILD docs mention x86_64 and `macos-15-large`
+- README and BUILD docs mention x86_64 and `macos-15-intel`
 
 - [ ] **Step 2: Verify tests fail**
 

@@ -16,7 +16,7 @@ The selected x86 approach is **native x86_64 runner plus separately labeled inst
   - vendored/generated: `backend/subtitle_remover/`, `injection_scripts/lib/`, `graphify-out/`, build outputs
 - Architecture and flow diagrams must be committed as editable Mermaid plus rendered SVG.
 - The existing macOS workflow uses `macos-latest`, which is an ARM64 image. It cannot produce a reliable x86_64 full bundle because native wheels and bundled Chromium follow the runner architecture.
-- GitHub's current macOS Intel labels include `macos-15-large`; the workflow must keep the mapping explicit in a matrix instead of relying on a generic `macos-latest` alias.
+- GitHub's current macOS Intel labels include `macos-15-intel`; the workflow must keep the mapping explicit in a matrix instead of relying on a generic `macos-latest` alias.
 - Existing Full/Lite browser bundling behavior must remain unchanged.
 - Windows builds must remain unchanged.
 
@@ -58,7 +58,7 @@ Diagrams must cover:
 Replace the single macOS job with a matrix containing:
 
 - ARM64: `macos-latest`, expected PyInstaller target `arm64`
-- x86_64: `macos-15-large`, expected PyInstaller target `x86_64`
+- x86_64: `macos-15-intel`, expected PyInstaller target `x86_64`
 
 Set `WECHAT_MP_TOOLS_TARGET_ARCH` for every macOS build. Update `wechat_mp_tools.spec` so macOS `EXE(... target_arch=...)` consumes that environment value and rejects unsupported values. Leave non-macOS target selection as `None`.
 
@@ -95,7 +95,7 @@ The implementation is complete only when all of the following are true:
 
 | Risk | Mitigation |
 |---|---|
-| GitHub changes its Intel macOS label | Keep the architecture mapping explicit and documented; update one matrix entry when GitHub retires `macos-15-large`. |
+| GitHub changes its Intel macOS label | Keep the architecture mapping explicit and documented; update one matrix entry when GitHub retires `macos-15-intel`. |
 | A dependency installs an ARM wheel on the Intel runner | Install dependencies and Chromium natively on x86_64, then fail CI if executable/native extension architectures do not match. |
 | Full bundle includes wrong Chromium architecture | Verify bundled Chromium during the Full build; Lite builds omit it by design. |
 | Generated Graphify output obscures the real architecture | Exclude it from version control and separate first-party code from vendored code in the skill and docs. |
