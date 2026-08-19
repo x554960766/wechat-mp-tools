@@ -373,8 +373,6 @@ class DouyinClient:
         """获取点赞/喜欢视频列表 (支持本人及任意公开博主)"""
         if not sec_uid:
             sec_uid = self.get_self_sec_uid()
-            if not sec_uid:
-                raise Exception("未登录或获取个人信息失败，请先扫码登录获取 Cookie")
 
         params = {
             "sec_user_id": sec_uid,
@@ -386,18 +384,125 @@ class DouyinClient:
             "publish_video_strategy_type": "2",
             "locate_query": "false"
         }
-        ref_url = f"https://www.douyin.com/user/{sec_uid}?showTab=like"
+        ref_url = f"https://www.douyin.com/user/{sec_uid}" if sec_uid else "https://www.douyin.com/user/self"
         self.session.headers["Referer"] = ref_url
 
         try:
-            return self.api_get("https://www.douyin.com/aweme/v1/web/aweme/favorite/", params, skip_sign=True)
-        except Exception as e:
-            err_str = str(e)
-            if "403" in err_str or "Argus" in err_str or "Uifid" in err_str or "Forbidden" in err_str:
-                _add_log(f"⚠️ 抖音喜欢/点赞直连受风控拦截，自动切换至浏览器安全会话通道获取 (cursor={max_cursor})...")
-                res = self._fetch_via_browser("/aweme/v1/web/aweme/favorite/", method="GET", params=params, referer=ref_url)
+            res = self.api_get("https://www.douyin.com/aweme/v1/web/aweme/favorite/", params, skip_sign=True)
+            if res.get("status_code") == 0 and res.get("aweme_list"):
                 return res
-            raise
+        except Exception:
+            pass
+
+        # 切换至浏览器会话安全通道
+        return self._fetch_liked_via_browser(sec_uid=sec_uid, max_cursor=max_cursor, count=count)
+
+    def _fetch_liked_via_browser(self, sec_uid: str = "", max_cursor: int = 0, count: int = 18) -> dict:
+        """通过后台浏览器会话获取点赞/喜欢视频列表 (支持本人及公开博主，自动激活 Tab 与无限滚动翻页)"""
+        from playwright.sync_api import sync_playwright
+        from backend.runtime import launch_chromium
+
+        settings = get_settings()
+        cookie_str = settings.get("douyin_cookie", "").strip()
+        cookie_objs = []
+        for item in cookie_str.split(";"):
+            item = item.strip()
+            if "=" in item:
+                k, _, v = item.partition("=")
+                if k.strip() and v.strip():
+                    cookie_objs.append({
+                        "name": k.strip(),
+                        "value": v.strip(),
+                        "domain": ".douyin.com",
+                        "path": "/"
+                    })
+
+        self_uid = self.get_self_sec_uid()
+        is_self = not sec_uid or sec_uid == "self" or (self_uid and sec_uid == self_uid)
+        target_url = "https://www.douyin.com/user/self" if is_self else f"https://www.douyin.com/user/{sec_uid}"
+
+        with sync_playwright() as p:
+            browser = launch_chromium(p.chromium, headless=True, args=["--disable-blink-features=AutomationControlled"])
+            try:
+                context = browser.new_context(
+                    user_agent=USER_AGENT,
+                    viewport={"width": 1440, "height": 900}
+                )
+                if cookie_objs:
+                    context.add_cookies(cookie_objs)
+                page = context.new_page()
+
+                captured_pages = []
+                def on_res(resp):
+                    if "favorite" in resp.url and resp.status == 200:
+                        try:
+                            data = resp.json()
+                            if isinstance(data, dict) and data.get("status_code") == 0 and data.get("aweme_list"):
+                                if not any(cp.get("max_cursor") == data.get("max_cursor") and len(cp.get("aweme_list", [])) == len(data.get("aweme_list", [])) for cp in captured_pages):
+                                    captured_pages.append(data)
+                        except Exception:
+                            pass
+
+                page.on("response", on_res)
+                try:
+                    page.goto(target_url, wait_until="domcontentloaded", timeout=15000)
+                except Exception:
+                    pass
+
+                # 点击喜欢 Tab 触发第一页加载
+                for _ in range(8):
+                    if captured_pages:
+                        break
+                    try:
+                        tab = page.locator("#semiTablike")
+                        if tab.is_visible():
+                            tab.click(force=True)
+                    except Exception:
+                        pass
+                    time.sleep(0.8)
+
+                # 如果请求的是非首页游标（翻页），通过滚动页面触发后续游标请求
+                if max_cursor != 0 and str(max_cursor) != "0":
+                    for _ in range(8):
+                        found = False
+                        for idx in range(len(captured_pages) - 1):
+                            if str(captured_pages[idx].get("max_cursor")) == str(max_cursor):
+                                found = True
+                                break
+                        if found:
+                            break
+                        page.evaluate("() => window.scrollBy(0, 4000)")
+                        time.sleep(1.5)
+
+                # 提取匹配游标的页数据
+                result = None
+                if max_cursor == 0 or str(max_cursor) == "0":
+                    if captured_pages:
+                        result = captured_pages[0]
+                else:
+                    for idx in range(len(captured_pages) - 1):
+                        if str(captured_pages[idx].get("max_cursor")) == str(max_cursor):
+                            result = captured_pages[idx + 1]
+                            break
+                    if not result and captured_pages:
+                        result = captured_pages[-1]
+
+                if not result:
+                    result = {"status_code": 0, "aweme_list": [], "has_more": False, "max_cursor": 0}
+
+                # 自动将最新产生的 Cookie 回写设置
+                try:
+                    updated_cookies = context.cookies()
+                    if updated_cookies:
+                        new_ck = "; ".join([f"{c['name']}={c['value']}" for c in updated_cookies])
+                        settings["douyin_cookie"] = new_ck
+                        save_settings(settings)
+                except Exception:
+                    pass
+
+                return result
+            finally:
+                browser.close()
 
     def _fetch_via_browser(self, endpoint: str, method: str = "GET", params: dict = None, body: dict = None, referer: str = "") -> dict:
         """通过后台无头浏览器在已授权的上下文中执行 fetch 请求，以绕过 Argus/uifid 等高级风控拦截"""
