@@ -385,6 +385,91 @@ class DouyinClient:
         params["sec_user_id"] = sec_uid
         return self.api_get("https://www.douyin.com/aweme/v1/web/aweme/favorite/", params, skip_sign=True)
 
+    def _fetch_via_browser(self, endpoint: str, method: str = "GET", params: dict = None, body: dict = None, referer: str = "") -> dict:
+        """通过后台无头浏览器在已授权的上下文中执行 fetch 请求，以绕过 Argus/uifid 等高级风控拦截"""
+        from playwright.sync_api import sync_playwright
+        from backend.runtime import launch_chromium
+
+        settings = get_settings()
+        cookie_str = settings.get("douyin_cookie", "").strip()
+        cookie_objs = []
+        for item in cookie_str.split(";"):
+            item = item.strip()
+            if "=" in item:
+                k, _, v = item.partition("=")
+                if k.strip() and v.strip():
+                    cookie_objs.append({
+                        "name": k.strip(),
+                        "value": v.strip(),
+                        "domain": ".douyin.com",
+                        "path": "/"
+                    })
+
+        ref_url = referer or "https://www.douyin.com/user/self?showTab=favorite_collection"
+
+        with sync_playwright() as p:
+            browser = launch_chromium(p.chromium, headless=True, args=["--disable-blink-features=AutomationControlled"])
+            try:
+                context = browser.new_context(
+                    user_agent=USER_AGENT
+                )
+                if cookie_objs:
+                    context.add_cookies(cookie_objs)
+                page = context.new_page()
+                try:
+                    page.goto(ref_url, wait_until="commit", timeout=10000)
+                except Exception:
+                    pass
+
+                # 构建请求参数
+                fetch_url = endpoint
+                if params:
+                    import urllib.parse
+                    qs = urllib.parse.urlencode(params)
+                    fetch_url = f"{endpoint}?{qs}" if "?" not in endpoint else f"{endpoint}&{qs}"
+
+                body_str = None
+                if body:
+                    import urllib.parse
+                    body_str = urllib.parse.urlencode(body)
+
+                res = page.evaluate("""async ({url, method, bodyStr}) => {
+                    for (let i = 0; i < 6; i++) {
+                        try {
+                            const opts = {
+                                method: method,
+                                headers: {
+                                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+                                }
+                            };
+                            if (bodyStr && method.toUpperCase() !== 'GET') {
+                                opts.body = bodyStr;
+                            }
+                            const resp = await window.fetch(url, opts);
+                            const text = await resp.text();
+                            if (text.startsWith('{')) {
+                                return JSON.parse(text);
+                            }
+                        } catch (e) {}
+                        await new Promise(r => setTimeout(r, 600));
+                    }
+                    return { status_code: -1, error: 'SecSDK initialization timeout' };
+                }""", {"url": fetch_url, "method": method, "bodyStr": body_str})
+
+                # 自动将浏览器更新产生的最新 Cookie 写回设置
+                try:
+                    updated_cookies = context.cookies()
+                    if updated_cookies:
+                        new_ck = "; ".join([f"{c['name']}={c['value']}" for c in updated_cookies])
+                        settings["douyin_cookie"] = new_ck
+                        save_settings(settings)
+                except Exception:
+                    pass
+
+                return res or {}
+            finally:
+                browser.close()
+
     def get_collected_videos(self, cursor: int = 0, count: int = 18) -> dict:
         """获取收藏视频列表 (需要登录)"""
         params = {
@@ -404,8 +489,14 @@ class DouyinClient:
             "count": str(count)
         }
 
-        # 使用 POST 请求，query params 和 body params 分离
-        return self.api_post("https://www.douyin.com/aweme/v1/web/aweme/listcollection/", params, data=body_data)
+        try:
+            return self.api_post("https://www.douyin.com/aweme/v1/web/aweme/listcollection/", params, data=body_data)
+        except Exception as e:
+            err_str = str(e)
+            if "403" in err_str or "Argus" in err_str or "Uifid" in err_str or "Forbidden" in err_str:
+                _add_log(f"⚠️ 抖音收藏直连受风控拦截，自动切换至浏览器会话安全通道获取 (cursor={cursor})...")
+                return self._fetch_via_browser("/aweme/v1/web/aweme/listcollection/", method="POST", body=body_data)
+            raise
 
 
     def get_collect_folders(self, cursor: int = 0, count: int = 10) -> dict:
@@ -418,7 +509,14 @@ class DouyinClient:
             "Referer": "https://www.douyin.com/user/self?showTab=favorite_collection",
             "Origin": "https://www.douyin.com"
         })
-        return self.api_get("https://www.douyin.com/aweme/v1/web/collects/list/", params)
+        try:
+            return self.api_get("https://www.douyin.com/aweme/v1/web/collects/list/", params)
+        except Exception as e:
+            err_str = str(e)
+            if "403" in err_str or "Argus" in err_str or "Uifid" in err_str or "Forbidden" in err_str:
+                _add_log("⚠️ 抖音收藏夹直连受风控拦截，自动切换至浏览器会话安全通道获取...")
+                return self._fetch_via_browser("/aweme/v1/web/collects/list/", method="GET", params=params)
+            raise
 
 
     def get_collect_folder_videos(self, collect_id: str, cursor: int = 0, count: int = 18) -> dict:
@@ -433,7 +531,14 @@ class DouyinClient:
             "Referer": f"https://www.douyin.com/collection/{collect_id}",
             "Origin": "https://www.douyin.com"
         })
-        return self.api_get("https://www.douyin.com/aweme/v1/web/collects/video/list/", params)
+        try:
+            return self.api_get("https://www.douyin.com/aweme/v1/web/collects/video/list/", params)
+        except Exception as e:
+            err_str = str(e)
+            if "403" in err_str or "Argus" in err_str or "Uifid" in err_str or "Forbidden" in err_str:
+                _add_log(f"⚠️ 抖音收藏夹视频直连受风控拦截，自动切换至浏览器会话安全通道获取 (collect_id={collect_id})...")
+                return self._fetch_via_browser("/aweme/v1/web/collects/video/list/", method="GET", params=params, referer=f"https://www.douyin.com/collection/{collect_id}")
+            raise
 
 
     # ── 链接解析 ──────────────────────────────────────────
