@@ -370,20 +370,34 @@ class DouyinClient:
         return ""
 
     def get_liked_videos(self, sec_uid: str = "", max_cursor: int = 0, count: int = 18) -> dict:
-        """获取点赞视频列表"""
+        """获取点赞/喜欢视频列表 (支持本人及任意公开博主)"""
         if not sec_uid:
             sec_uid = self.get_self_sec_uid()
             if not sec_uid:
                 raise Exception("未登录或获取个人信息失败，请先扫码登录获取 Cookie")
 
         params = {
+            "sec_user_id": sec_uid,
             "max_cursor": str(max_cursor),
+            "min_cursor": "0",
             "count": str(count),
-            "locate_query": "false",
-            "publish_video_strategy_type": "2"
+            "whale_cut_token": "",
+            "cut_version": "1",
+            "publish_video_strategy_type": "2",
+            "locate_query": "false"
         }
-        params["sec_user_id"] = sec_uid
-        return self.api_get("https://www.douyin.com/aweme/v1/web/aweme/favorite/", params, skip_sign=True)
+        ref_url = f"https://www.douyin.com/user/{sec_uid}?showTab=like"
+        self.session.headers["Referer"] = ref_url
+
+        try:
+            return self.api_get("https://www.douyin.com/aweme/v1/web/aweme/favorite/", params, skip_sign=True)
+        except Exception as e:
+            err_str = str(e)
+            if "403" in err_str or "Argus" in err_str or "Uifid" in err_str or "Forbidden" in err_str:
+                _add_log(f"⚠️ 抖音喜欢/点赞直连受风控拦截，自动切换至浏览器安全会话通道获取 (cursor={max_cursor})...")
+                res = self._fetch_via_browser("/aweme/v1/web/aweme/favorite/", method="GET", params=params, referer=ref_url)
+                return res
+            raise
 
     def _fetch_via_browser(self, endpoint: str, method: str = "GET", params: dict = None, body: dict = None, referer: str = "") -> dict:
         """通过后台无头浏览器在已授权的上下文中执行 fetch 请求，以绕过 Argus/uifid 等高级风控拦截"""
@@ -417,7 +431,7 @@ class DouyinClient:
                     context.add_cookies(cookie_objs)
                 page = context.new_page()
                 try:
-                    page.goto(ref_url, wait_until="commit", timeout=10000)
+                    page.goto(ref_url, wait_until="domcontentloaded", timeout=12000)
                 except Exception:
                     pass
 
@@ -433,28 +447,37 @@ class DouyinClient:
                     import urllib.parse
                     body_str = urllib.parse.urlencode(body)
 
-                res = page.evaluate("""async ({url, method, bodyStr}) => {
-                    for (let i = 0; i < 6; i++) {
-                        try {
-                            const opts = {
-                                method: method,
-                                headers: {
-                                    'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
-                                }
-                            };
-                            if (bodyStr && method.toUpperCase() !== 'GET') {
-                                opts.body = bodyStr;
+                res = {}
+                for _ in range(3):
+                    try:
+                        res = page.evaluate("""async ({url, method, bodyStr}) => {
+                            for (let i = 0; i < 6; i++) {
+                                try {
+                                    const opts = {
+                                        method: method,
+                                        headers: {
+                                            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
+                                        }
+                                    };
+                                    if (bodyStr && method.toUpperCase() !== 'GET') {
+                                        opts.body = bodyStr;
+                                    }
+                                    const resp = await window.fetch(url, opts);
+                                    const text = await resp.text();
+                                    if (text.startsWith('{')) {
+                                        return JSON.parse(text);
+                                    }
+                                } catch (e) {}
+                                await new Promise(r => setTimeout(r, 600));
                             }
-                            const resp = await window.fetch(url, opts);
-                            const text = await resp.text();
-                            if (text.startsWith('{')) {
-                                return JSON.parse(text);
-                            }
-                        } catch (e) {}
-                        await new Promise(r => setTimeout(r, 600));
-                    }
-                    return { status_code: -1, error: 'SecSDK initialization timeout' };
-                }""", {"url": fetch_url, "method": method, "bodyStr": body_str})
+                            return { status_code: -1, error: 'SecSDK initialization timeout' };
+                        }""", {"url": fetch_url, "method": method, "bodyStr": body_str})
+                        break
+                    except Exception as eval_err:
+                        if "destroyed" in str(eval_err) or "navigation" in str(eval_err):
+                            time.sleep(1)
+                            continue
+                        raise eval_err
 
                 # 自动将浏览器更新产生的最新 Cookie 写回设置
                 try:
@@ -538,6 +561,26 @@ class DouyinClient:
             if "403" in err_str or "Argus" in err_str or "Uifid" in err_str or "Forbidden" in err_str:
                 _add_log(f"⚠️ 抖音收藏夹视频直连受风控拦截，自动切换至浏览器会话安全通道获取 (collect_id={collect_id})...")
                 return self._fetch_via_browser("/aweme/v1/web/collects/video/list/", method="GET", params=params, referer=f"https://www.douyin.com/collection/{collect_id}")
+            raise
+
+    def get_collected_mixes(self, cursor: int = 0, count: int = 18) -> dict:
+        """获取收藏合集列表 (对应 collectmix 模式，需要登录)"""
+        params = {
+            "cursor": str(cursor),
+            "count": str(count)
+        }
+        ref_url = "https://www.douyin.com/user/self?showTab=favorite_collection"
+        self.session.headers.update({
+            "Referer": ref_url,
+            "Origin": "https://www.douyin.com"
+        })
+        try:
+            return self.api_get("https://www.douyin.com/aweme/v1/web/mix/listcollection/", params)
+        except Exception as e:
+            err_str = str(e)
+            if "403" in err_str or "Argus" in err_str or "Uifid" in err_str or "Forbidden" in err_str:
+                _add_log(f"⚠️ 抖音收藏合集直连受风控拦截，自动切换至浏览器会话安全通道获取 (cursor={cursor})...")
+                return self._fetch_via_browser("/aweme/v1/web/mix/listcollection/", method="GET", params=params, referer=ref_url)
             raise
 
 
@@ -3165,12 +3208,21 @@ def api_feed():
 
 @douyin_bp.route("/liked", methods=["GET"])
 def api_liked():
-    sec_uid = request.args.get("sec_uid", "")
+    sec_uid = request.args.get("sec_uid", "").strip()
     max_cursor = int(request.args.get("max_cursor", 0))
     count = int(request.args.get("count", 18))
     try:
         api = DouyinClient()
         res = api.get_liked_videos(sec_uid, max_cursor, count)
+        if isinstance(res, dict):
+            if res.get("aweme_list") is None:
+                res["aweme_list"] = []
+            if res.get("has_more") is not None:
+                res["has_more"] = res["has_more"] if isinstance(res["has_more"], bool) else int(res["has_more"]) == 1
+            else:
+                res["has_more"] = False
+            if res.get("max_cursor") is None:
+                res["max_cursor"] = res.get("cursor") or 0
         return jsonify(res)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
@@ -3283,6 +3335,25 @@ def api_collects_video_list():
     try:
         api = DouyinClient()
         res = api.get_collect_folder_videos(collect_id, cursor, count)
+        if isinstance(res, dict):
+            next_cursor = res.get("cursor") if res.get("cursor") is not None else res.get("max_cursor", 0)
+            res["max_cursor"] = next_cursor
+            if res.get("has_more") is not None:
+                res["has_more"] = res["has_more"] if isinstance(res["has_more"], bool) else int(res["has_more"]) == 1
+            else:
+                res["has_more"] = False
+        return jsonify(res)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@douyin_bp.route("/collects/mixes", methods=["GET"])
+def api_collects_mixes():
+    cursor = int(request.args.get("cursor", 0))
+    count = int(request.args.get("count", 18))
+    try:
+        api = DouyinClient()
+        res = api.get_collected_mixes(cursor, count)
         if isinstance(res, dict):
             next_cursor = res.get("cursor") if res.get("cursor") is not None else res.get("max_cursor", 0)
             res["max_cursor"] = next_cursor
