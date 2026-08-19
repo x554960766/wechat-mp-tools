@@ -60,6 +60,7 @@ DEFAULT_SETTINGS = {
     "rss_end_minute": 0,
     "rss_upload_enabled": False,
     "rss_upload_url": "",
+    "weread_platform_url": WEREAD_PLATFORM_URL,
 }
 
 

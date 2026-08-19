@@ -107,6 +107,20 @@ const SettingsPage = {
                     </div>
                 </div>
 
+                <!-- 微信读书中转服务配置 -->
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">📖 微信读书中转服务配置</h3>
+                    </div>
+                    <div class="card-body" style="padding: 0 var(--spacing-md) var(--spacing-md);">
+                        <div class="form-group" style="margin-top: var(--spacing-md);">
+                            <label class="form-label" for="setting-weread-url">中转服务地址 (weread_platform_url)</label>
+                            <input type="text" class="form-input" id="setting-weread-url" placeholder="https://weread.111965.xyz" />
+                            <div class="form-hint">默认为公共中转站。如遇频繁限流或超时，可自建 we-mp-rss 并在填入私有服务地址（如 http://IP:8080）。</div>
+                        </div>
+                    </div>
+                </div>
+
                 <!-- B站下载配置 -->
                 <div class="card">
                     <div class="card-header">
@@ -249,6 +263,7 @@ const SettingsPage = {
         const maxArticlesInput = document.getElementById('setting-max-articles');
         const maxRetriesInput = document.getElementById('setting-max-retries');
         const chWorkerInput = document.getElementById('setting-channels-worker');
+        const wereadUrlInput = document.getElementById('setting-weread-url');
         const deviceIdInput = document.getElementById('setting-device-id');
         const rssStartHour = document.getElementById('setting-rss-start-hour');
         const rssStartMinute = document.getElementById('setting-rss-start-minute');
@@ -271,6 +286,7 @@ const SettingsPage = {
         if (maxArticlesInput) maxArticlesInput.value = data.max_articles || 50;
         if (maxRetriesInput) maxRetriesInput.value = data.max_retries || 3;
         if (chWorkerInput) chWorkerInput.value = data.custom_channels_worker || '';
+        if (wereadUrlInput) wereadUrlInput.value = data.weread_platform_url || 'https://weread.111965.xyz';
         if (deviceIdInput) deviceIdInput.value = data.device_id || '公众号_caiji100';
         if (rssStartHour) rssStartHour.value = data.rss_start_hour !== undefined ? data.rss_start_hour : 0;
         if (rssStartMinute) rssStartMinute.value = data.rss_start_minute !== undefined ? data.rss_start_minute : 0;
@@ -349,6 +365,7 @@ const SettingsPage = {
             max_articles: parseInt(maxArticlesInput.value) || 50,
             max_retries: parseInt(maxRetriesInput.value) || 3,
             custom_channels_worker: chWorkerInput ? chWorkerInput.value.trim() : '',
+            weread_platform_url: (wereadUrlInput ? wereadUrlInput.value.trim() : '') || 'https://weread.111965.xyz',
             device_id: deviceIdInput ? (deviceIdInput.value.trim() || '公众号_caiji100') : '公众号_caiji100',
             rss_start_hour: rssStartHour ? parseInt(rssStartHour.value) : 0,
             rss_start_minute: rssStartMinute ? parseInt(rssStartMinute.value) : 0,

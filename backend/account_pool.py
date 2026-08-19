@@ -342,6 +342,37 @@ class AccountPool:
             if not target:
                 return {"ok": False, "message": "账号不存在"}
             existing_cookie = target.get("cookie_str", "")
+            acc_type = target.get("type", "weread_platform")
+            token = target.get("token", "")
+
+        # 如果账号属于 weread_platform (Token 模式) 且无本地浏览器 Cookie
+        # 无头浏览器无法凭空生成 Cookie，直接执行真实 API 探活与状态续期
+        if acc_type == "weread_platform" and not existing_cookie:
+            verify_res = self.verify_account(account_id)
+            if verify_res.get("valid"):
+                now = time.time()
+                with self._lock:
+                    accounts = self._load()
+                    for a in accounts:
+                        if a["id"] == account_id:
+                            a["last_browser_refreshed_at"] = now
+                            a["last_verified_at"] = now
+                            a["last_verified_result"] = "Token 探活验证通过（中转模式无需浏览器 Profile）"
+                            a["status"] = "active"
+                            a["health_status"] = "valid"
+                            break
+                    self._save(accounts)
+                return {
+                    "ok": True,
+                    "vid": target.get("vid", ""),
+                    "message": "账号为中转 Token 凭证模式，接口验证通过，状态正常（无需浏览器 Profile 换新）",
+                }
+            else:
+                return {
+                    "ok": False,
+                    "needs_scan": True,
+                    "message": verify_res.get("message", "登录凭证已失效，请重新扫码登录"),
+                }
 
         from backend.weread_browser import refresh_weread_account_browser
         res = refresh_weread_account_browser(account_id, existing_cookie=existing_cookie, headless=True)
@@ -361,11 +392,18 @@ class AccountPool:
                         a["failures"] = 0
                         a["last_error"] = None
                     elif res.get("needs_scan"):
-                        a["status"] = "invalid"
-                        a["health_status"] = "invalid"
-                        a["last_error"] = res.get("message", "登录凭证已过期，需重新扫码")
-                        a["last_verified_at"] = now
-                        a["last_verified_result"] = a["last_error"]
+                        # 二次防线：如果该账号还有有效的 Token，不轻易置为 invalid
+                        token_valid = False
+                        if a.get("token"):
+                            v_res = self.verify_account(account_id)
+                            if v_res.get("valid"):
+                                token_valid = True
+                        if not token_valid:
+                            a["status"] = "invalid"
+                            a["health_status"] = "invalid"
+                            a["last_error"] = res.get("message", "登录凭证已过期，需重新扫码")
+                            a["last_verified_at"] = now
+                            a["last_verified_result"] = a["last_error"]
                     break
             self._save(accounts)
 
@@ -602,13 +640,15 @@ class AccountPool:
                 self.verify_account(acc["id"])
                 time.sleep(2)  # 账号间间隔 2 秒避开频控
 
-        # 阶段二：对健康活跃账号进行定期浏览器深度会话换新（>45分钟自动换新一次，串行单实例执行）
+        # 阶段二：对含本地浏览器会话的健康活跃账号进行定期浏览器深度会话换新（>45分钟自动换新一次，串行单实例执行）
         accounts = self._load()
         for acc in accounts:
             if self._stop_keepalive.is_set():
                 break
-            # 严格过滤：仅对正常活跃、未失效账号启动无头浏览器保活
+            # 严格过滤：仅对正常活跃且含有 Cookie 的账号启动无头浏览器保活（纯 Token 账号由阶段一负责探活）
             if acc.get("status") != "active" or acc.get("health_status") != "valid":
+                continue
+            if not acc.get("cookie_str") and acc.get("type") == "weread_platform":
                 continue
             last_browser_ref = acc.get("last_browser_refreshed_at", 0)
             # 微信读书凭证周期约 1~2 小时，设置 45 分钟深度换新一次，保障始终处于新鲜有效期

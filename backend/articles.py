@@ -144,6 +144,24 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "")
             except Exception:
                 raw_data = json.loads(resp.content.decode("utf-8", errors="replace"))
 
+        # 校验响应数据中的业务错误码（防止中转服务返回 HTTP 200 但包含业务层错误）
+        if isinstance(raw_data, dict):
+            b_code = raw_data.get("errCode") or raw_data.get("errcode") or raw_data.get("code")
+            if b_code and b_code not in (0, 200, "0"):
+                b_msg = raw_data.get("errMsg") or raw_data.get("errmsg") or raw_data.get("msg") or raw_data.get("message") or f"错误码 {b_code}"
+                if b_code in (-2012, 401, -2002) or "401" in str(b_msg) or "登录" in str(b_msg) or "token" in str(b_msg).lower():
+                    account_pool.report(account_id, ret=200003, error=f"业务登录失效: {b_msg}")
+                    last_exc = PermissionError(f"微信读书账号登录失效 ({b_msg})，正在切换账号重试...")
+                    continue
+                elif b_code in (429, -2041) or "429" in str(b_msg) or "频繁" in str(b_msg):
+                    account_pool.report(account_id, ret=200013, error=f"业务频控: {b_msg}")
+                    last_exc = RuntimeError(f"触发微信读书频率控制 ({b_msg})，正在切换账号重试...")
+                    continue
+                else:
+                    account_pool.report(account_id, ret=int(b_code) if isinstance(b_code, int) else 1, error=str(b_msg))
+                    last_exc = RuntimeError(f"微信读书接口错误 ({b_msg})")
+                    continue
+
         account_pool.report(account_id, ret=0)
 
         if isinstance(raw_data, list):
