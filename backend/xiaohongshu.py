@@ -344,10 +344,17 @@ class XhsClient:
         if state_json_str.endswith(";"):
             state_json_str = state_json_str[:-1].strip()
             
-        cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", state_json_str)
-        
+        cleaned = state_json_str
+        cleaned = re.sub(r"\bundefined\b", "null", cleaned)
+        cleaned = re.sub(r"new\s+Map\(\s*(?:\[[^\]]*\])?\s*\)", "{}", cleaned)
+        cleaned = re.sub(r"new\s+Set\(\s*(?:\[[^\]]*\])?\s*\)", "[]", cleaned)
+        cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", cleaned)
+
         try:
-            state = yaml.safe_load(cleaned)
+            try:
+                state = json.loads(cleaned)
+            except Exception:
+                state = yaml.safe_load(cleaned)
             if not isinstance(state, dict):
                 raise ValueError("解析得到的数据类型不是 dict")
             return state
@@ -425,11 +432,8 @@ class XhsClient:
         if not isinstance(image_list, list):
             image_list = []
             
-        if note_type_raw == "video":
-            if len(image_list) > 1:
-                note_type = "图集"
-            else:
-                note_type = "视频"
+        if note_type_raw == "video" or note.get("video"):
+            note_type = "视频"
         else:
             note_type = "图文"
             
@@ -475,32 +479,62 @@ class XhsClient:
                 lives.append(live_url)
                 
         video = None
-        if note_type == "视频":
-            video_info = note.get("video")
-            if isinstance(video_info, dict):
-                origin_key = video_info.get("consumer", {}).get("originVideoKey")
-                if origin_key:
-                    video = f"https://sns-video-bd.xhscdn.com/{origin_key}"
-                else:
-                    media = video_info.get("media", {})
-                    stream = media.get("stream", {})
-                    h264_list = stream.get("h264", [])
-                    h265_list = stream.get("h265", [])
-                    all_streams = []
-                    if isinstance(h264_list, list):
-                        all_streams.extend(h264_list)
-                    if isinstance(h265_list, list):
-                        all_streams.extend(h265_list)
-                    
-                    valid_streams = [s for s in all_streams if isinstance(s, dict) and s.get("height")]
-                    if valid_streams:
-                        valid_streams.sort(key=lambda s: float(s.get("height", 0)), reverse=True)
-                        best_stream = valid_streams[0]
-                        backup_urls = best_stream.get("backupUrls", [])
-                        if isinstance(backup_urls, list) and len(backup_urls) > 0:
-                            video = backup_urls[0]
-                        else:
-                            video = best_stream.get("masterUrl")
+        video_candidates = []
+        video_info = note.get("video") or note.get("media") or {}
+        if isinstance(video_info, dict) and video_info:
+            media = video_info.get("media", {}) if isinstance(video_info.get("media"), dict) else (video_info if "stream" in video_info else {})
+            stream = media.get("stream", {}) if isinstance(media.get("stream"), dict) else (video_info.get("stream", {}) if isinstance(video_info.get("stream"), dict) else (note.get("stream", {}) if isinstance(note.get("stream"), dict) else {}))
+            
+            all_streams = []
+            if isinstance(stream, dict):
+                for k, v in stream.items():
+                    if isinstance(v, list):
+                        all_streams.extend(v)
+                    elif isinstance(v, dict):
+                        all_streams.append(v)
+
+            def stream_sort_key(s):
+                if not isinstance(s, dict):
+                    return (-1, 0, 0)
+                v_codec = str(s.get("videoCodec", "")).lower()
+                s_desc = str(s.get("streamDesc", "")).lower()
+                # 优先 H.264/AVC 编码（EF4 或包含 264），全设备与浏览器完美播放绝不黑屏
+                is_h264 = 1 if (v_codec in ("ef4", "h264", "avc", "avc1") or "264" in s_desc or s.get("streamType") == 259) else 0
+                res = float(s.get("height") or 0) * float(s.get("width") or 0) or float(s.get("height") or 0)
+                size = float(s.get("size") or s.get("videoBitrate") or 0)
+                return (is_h264, res, size)
+
+            valid_streams = [s for s in all_streams if isinstance(s, dict)]
+            if valid_streams:
+                valid_streams.sort(key=stream_sort_key, reverse=True)
+                for s in valid_streams:
+                    master_url = s.get("masterUrl")
+                    if master_url and master_url not in video_candidates:
+                        video_candidates.append(master_url)
+                    backup_urls = s.get("backupUrls", [])
+                    if isinstance(backup_urls, list):
+                        for bu in backup_urls:
+                            if bu and bu not in video_candidates:
+                                video_candidates.append(bu)
+                    url_field = s.get("url") or s.get("mainUrl")
+                    if url_field and url_field not in video_candidates:
+                        video_candidates.append(url_field)
+
+            origin_key = video_info.get("consumer", {}).get("originVideoKey")
+            if origin_key:
+                for host in ["sns-video-bd.xhscdn.com", "sns-video-al.xhscdn.com", "sns-video-hw.xhscdn.com", "sns-video-qc.xhscdn.com"]:
+                    u = f"https://{host}/{origin_key}"
+                    if u not in video_candidates:
+                        video_candidates.append(u)
+
+            for k in ["masterUrl", "url", "videoUrl", "mainUrl"]:
+                u = video_info.get(k) or media.get(k)
+                if u and u not in video_candidates:
+                    video_candidates.append(u)
+
+        if video_candidates:
+            video = video_candidates[0]
+            note_type = "视频"
                             
         cover = images[0] if images else ""
         if note_type == "视频":
@@ -533,27 +567,67 @@ class XhsClient:
             "images": images,
             "lives": lives,
             "video": video,
+            "video_candidates": video_candidates,
             "cover": cover
         }
 
     def _parse_note_item(self, it: dict) -> dict | None:
-        """把 user_posted API 的单条 note 解析成前端列表项；非 dict 返回 None。"""
+        """把 user_posted API 或 SSR / DOM 的单条 note 解析成前端列表项；非 dict 返回 None。"""
         if not isinstance(it, dict):
             return None
-        cover_obj = it.get("cover") or {}
-        cover = cover_obj.get("url_default") or cover_obj.get("url") or ""
-        if not cover:
-            info_list = cover_obj.get("info_list") or []
-            if info_list:
-                cover = (info_list[-1] or {}).get("url", "")
-        interact = it.get("interact_info") or {}
+
+        # 1. 提取 note_id 与 xsec_token
+        note_card = it.get("noteCard") or it.get("note_card") or {}
+        nid = it.get("note_id") or it.get("id") or note_card.get("noteId") or note_card.get("note_id") or ""
+        xsec_token = it.get("xsec_token") or it.get("xsecToken") or note_card.get("xsecToken") or note_card.get("xsec_token") or ""
+
+        # 2. 提取 title
+        title = (
+            it.get("display_title")
+            or it.get("title")
+            or it.get("displayTitle")
+            or note_card.get("displayTitle")
+            or note_card.get("display_title")
+            or ""
+        )
+
+        # 3. 提取 cover
+        cover_obj = it.get("cover") or note_card.get("cover") or {}
+        if isinstance(cover_obj, str):
+            cover = cover_obj
+        elif isinstance(cover_obj, dict):
+            cover = cover_obj.get("url_default") or cover_obj.get("urlDefault") or cover_obj.get("url") or ""
+            if not cover:
+                info_list = cover_obj.get("info_list") or cover_obj.get("infoList") or []
+                if info_list:
+                    cover = (info_list[-1] or {}).get("url", "")
+        else:
+            cover = ""
+
+        # 4. 提取 interact_info (liked)
+        interact = (
+            it.get("interact_info")
+            or it.get("interactInfo")
+            or note_card.get("interactInfo")
+            or note_card.get("interact_info")
+            or {}
+        )
+        if isinstance(interact, dict):
+            liked_raw = interact.get("liked_count") or interact.get("likedCount") or it.get("liked", "0")
+        else:
+            liked_raw = str(interact) if interact else "0"
+        liked = self.format_count(liked_raw)
+
+        # 5. 提取 type
+        note_type = "video" if (it.get("type") == "video" or note_card.get("type") == "video") else "normal"
+
         return {
-            "note_id": it.get("note_id", ""),
-            "xsec_token": it.get("xsec_token", ""),
-            "title": it.get("display_title", ""),
+            "note_id": nid,
+            "xsec_token": xsec_token,
+            "title": title,
             "cover": cover,
-            "type": "video" if it.get("type") == "video" else "normal",
-            "liked": self.format_count(interact.get("liked_count", "0")),
+            "type": note_type,
+            "liked": liked,
         }
 
     def get_user_posted(self, user_id: str, xsec_token: str = "", cursor: str = "", xsec_source: str = "pc_feed") -> tuple:
@@ -745,6 +819,14 @@ class XhsClient:
         try:
             tmp_path.parent.mkdir(parents=True, exist_ok=True)
             r = requests.get(url, headers=headers, proxies=proxies, stream=True, timeout=30)
+            if r.status_code != 200:
+                # 尝试不带 Referer/Cookie 的标准请求头重试（部分 CDN 域名对跨域 Referer 拦截）
+                clean_headers = {
+                    "User-Agent": self.USER_AGENT,
+                    "Accept": "*/*",
+                }
+                r = requests.get(url, headers=clean_headers, proxies=proxies, stream=True, timeout=30)
+
             if r.status_code == 200:
                 with open(tmp_path, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=1024 * 1024):
@@ -892,6 +974,114 @@ class _XhsBrowserSession:
                     page = context.new_page()
                     page.on("response", self._on_response)
                     page.goto(profile_url, wait_until="networkidle", timeout=30000)
+
+                    # 提取首屏（第 1 页）SSR 及 DOM 笔记
+                    try:
+                        initial_notes = page.evaluate("""() => {
+                            const list = [];
+                            const seen = new Set();
+
+                            const unwrap = (obj) => {
+                                if (!obj) return [];
+                                if (Array.isArray(obj)) return obj;
+                                if (obj._value && Array.isArray(obj._value)) return obj._value;
+                                if (obj._rawValue && Array.isArray(obj._rawValue)) return obj._rawValue;
+                                if (obj.value && Array.isArray(obj.value)) return obj.value;
+                                return [];
+                            };
+
+                            // 1. 从 __INITIAL_STATE__ / __INITIAL_DATA__ 中解析（包含 Vue3 ref 响应式对象解包）
+                            try {
+                                const state = window.__INITIAL_STATE__ || window.__INITIAL_DATA__;
+                                if (state && state.user) {
+                                    const rawNotes = unwrap(state.user.notes);
+                                    const flat = [];
+                                    for (const item of rawNotes) {
+                                        const unwrappedItem = unwrap(item);
+                                        if (unwrappedItem.length > 0) {
+                                            flat.push(...unwrappedItem);
+                                        } else if (item && typeof item === 'object') {
+                                            flat.push(item);
+                                        }
+                                    }
+                                    for (const item of flat) {
+                                        if (!item || typeof item !== 'object') continue;
+                                        const card = item.noteCard || item.note_card || {};
+                                        const coverObj = card.cover || item.cover || {};
+                                        const cover = (coverObj.urlDefault || coverObj.url_default || coverObj.url) || 
+                                                      ((coverObj.infoList && coverObj.infoList[0]) ? coverObj.infoList[0].url : '') || '';
+                                        const interact = card.interactInfo || card.interact_info || {};
+                                        const nid = item.id || item.noteId || item.note_id || card.noteId || card.note_id || '';
+                                        const title = card.displayTitle || card.display_title || '';
+                                        const token = item.xsecToken || item.xsec_token || card.xsecToken || card.xsec_token || '';
+                                        if (nid && !seen.has(nid)) {
+                                            list.push({
+                                                note_id: nid,
+                                                xsec_token: token,
+                                                display_title: title,
+                                                cover: cover,
+                                                type: (card.type === 'video' || item.type === 'video') ? 'video' : 'normal',
+                                                interact_info: {
+                                                    liked_count: String(interact.likedCount || interact.liked_count || '0')
+                                                }
+                                            });
+                                            seen.add(nid);
+                                        }
+                                    }
+                                }
+                            } catch(e) {
+                                console.error('SSR extract error:', e);
+                            }
+
+                            // 2. 检查 DOM 补充缺失的 note_id / xsec_token
+                            try {
+                                const items = document.querySelectorAll('section.note-item, .note-item, div[class*="note-item"]');
+                                items.forEach((el, idx) => {
+                                    const link = el.querySelector('a[href*="/explore/"]') || el.querySelector('a');
+                                    const href = link ? (link.getAttribute('href') || '') : '';
+                                    let nid = '';
+                                    let token = '';
+                                    const match = href.match(/\\/explore\\/([a-zA-Z0-9_-]+)/);
+                                    if (match) nid = match[1];
+                                    const tokenMatch = href.match(/xsec_token=([^&]+)/);
+                                    if (tokenMatch) token = decodeURIComponent(tokenMatch[1]);
+
+                                    if (idx < list.length && !list[idx].note_id && nid) {
+                                        list[idx].note_id = nid;
+                                        if (token && !list[idx].xsec_token) list[idx].xsec_token = token;
+                                        seen.add(nid);
+                                    } else if (nid && !seen.has(nid)) {
+                                        const img = el.querySelector('img');
+                                        const cover = img ? (img.src || img.getAttribute('data-src') || '') : '';
+                                        const titleEl = el.querySelector('.title, .footer .title, span.title, [class*="title"]');
+                                        const title = titleEl ? (titleEl.textContent || '').trim() : '';
+                                        const likeEl = el.querySelector('.like-wrapper, .count, [class*="like"], [class*="count"]');
+                                        const liked = likeEl ? (likeEl.textContent || '').trim() : '0';
+                                        const isVideo = !!el.querySelector('.play-icon, [class*="play"], svg[class*="play"]');
+                                        list.push({
+                                            note_id: nid,
+                                            xsec_token: token,
+                                            display_title: title,
+                                            cover: cover,
+                                            type: isVideo ? 'video' : 'normal',
+                                            interact_info: {
+                                                liked_count: liked
+                                            }
+                                        });
+                                        seen.add(nid);
+                                    }
+                                });
+                            } catch(e) {
+                                console.error('DOM extract error:', e);
+                            }
+
+                            return list;
+                        }""")
+                        if initial_notes:
+                            self._captured = initial_notes + self._captured
+                            self._pages_loaded += 1
+                    except Exception as e:
+                        print(f"提取首屏笔记异常: {e}")
 
                     if self._pages_loaded == 0:
                         page.wait_for_timeout(3000)
@@ -1102,17 +1292,26 @@ def _do_xhs_download_thread(task_id: str, urls: list, account_name: str):
             if img_ext == "jpeg":
                 img_ext = "jpg"
 
-            if detail["type"] == "视频":
-                video_url = detail["video"]
-                if video_url:
+            if detail["type"] == "视频" or detail.get("video") or detail.get("video_candidates"):
+                candidates = detail.get("video_candidates") or ([detail["video"]] if detail.get("video") else [])
+                if candidates:
                     save_file = note_dir / f"{clean_title}.mp4"
-                    try:
-                        size = client.download_file(video_url, save_file)
-                        total_size += size
-                        video_file_name = save_file.name
-                    except Exception as e:
+                    last_download_err = None
+                    video_ok = False
+                    for v_url in candidates:
+                        try:
+                            size = client.download_file(v_url, save_file)
+                            if size > 0:
+                                total_size += size
+                                video_file_name = save_file.name
+                                video_ok = True
+                                break
+                        except Exception as e:
+                            last_download_err = e
+                            continue
+                    if not video_ok:
                         success = False
-                        error_msg = f"视频下载失败: {str(e)}"
+                        error_msg = f"视频下载失败: {last_download_err or '所有备选视频源均无法下载'}"
                 else:
                     success = False
                     error_msg = "未找到可用无水印视频链接"

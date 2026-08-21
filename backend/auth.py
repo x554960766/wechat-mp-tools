@@ -107,17 +107,21 @@ def start_browser_login():
 
 
 def _safe_req_get(url: str, **kwargs):
-    """带 TLS CA 路径自动容错的 requests.get"""
+    """使用 curl_cffi 模拟 Chrome 指纹发送请求，彻底解决 TLS 握手/SSLEOFError 拦截"""
     try:
-        return req.get(url, **kwargs)
-    except OSError as e:
-        if "TLS CA certificate" in str(e) or "cacert.pem" in str(e):
-            import os
-            for env_var in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE"):
-                os.environ.pop(env_var, None)
-            kwargs["verify"] = False
+        from curl_cffi import requests as c_req
+        return c_req.get(url, impersonate="chrome", **kwargs)
+    except Exception:
+        try:
             return req.get(url, **kwargs)
-        raise
+        except OSError as e:
+            if "TLS CA certificate" in str(e) or "cacert.pem" in str(e):
+                import os
+                for env_var in ("REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSL_CERT_FILE"):
+                    os.environ.pop(env_var, None)
+                kwargs["verify"] = False
+                return req.get(url, **kwargs)
+            raise
 
 
 def _do_login():

@@ -206,14 +206,25 @@ class AccountPool:
         message = ""
 
         try:
-            import requests as req
-            resp = req.get(
-                f"{platform_url}/api/v2/platform/mps/MP_WXS_3528995129/articles",
-                params={"page": 1},
-                headers=headers,
-                proxies=proxies,
-                timeout=12,
-            )
+            try:
+                from curl_cffi import requests as c_req
+                resp = c_req.get(
+                    f"{platform_url}/api/v2/platform/mps/MP_WXS_3528995129/articles",
+                    params={"page": 1},
+                    headers=headers,
+                    proxies=proxies,
+                    timeout=15,
+                    impersonate="chrome",
+                )
+            except Exception:
+                import requests as req
+                resp = req.get(
+                    f"{platform_url}/api/v2/platform/mps/MP_WXS_3528995129/articles",
+                    params={"page": 1},
+                    headers=headers,
+                    proxies=proxies,
+                    timeout=15,
+                )
             if resp.status_code == 200:
                 valid = True
                 status = "active"

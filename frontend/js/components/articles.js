@@ -46,6 +46,7 @@ const ArticlesPage = {
                         </div>
                         <button class="btn btn-secondary btn-sm" onclick="ArticlesPage.searchArticles()">搜索</button>
                         <button class="btn btn-secondary btn-sm" onclick="ArticlesPage.clearSearch()">清除</button>
+                        <button class="btn btn-secondary btn-sm" onclick="ArticlesPage.loadArticles()" title="重新加载文章列表">🔄 刷新</button>
                         <div class="article-mode-switch">
                             <button class="btn btn-primary btn-sm" id="btn-mode-single" onclick="ArticlesPage.setSelectionMode('single')">单篇</button>
                             <button class="btn btn-secondary btn-sm" id="btn-mode-multi" onclick="ArticlesPage.setSelectionMode('multi')">多选</button>
@@ -196,7 +197,13 @@ const ArticlesPage = {
             this.renderArticles();
             this.updatePagination();
         } catch (err) {
-            container.innerHTML = `<div class="empty-state"><p class="empty-state-desc">加载失败: ${err.message}</p></div>`;
+            container.innerHTML = `
+                <div class="empty-state">
+                    <h3 class="empty-state-title" style="color: var(--error);">加载失败</h3>
+                    <p class="empty-state-desc">${err.message || '网络请求异常'}</p>
+                    <button class="btn btn-primary btn-sm" style="margin-top: 12px;" onclick="ArticlesPage.loadArticles()">🔄 重试</button>
+                </div>
+            `;
         }
     },
 
@@ -234,7 +241,8 @@ const ArticlesPage = {
             container.innerHTML = `
                 <div class="empty-state">
                     <h3 class="empty-state-title">没有找到文章</h3>
-                    <p class="empty-state-desc">${this.keyword ? '尝试其他搜索关键字' : '该公众号暂无文章'}</p>
+                    <p class="empty-state-desc">${this.keyword ? '尝试其他搜索关键字' : '该公众号暂无文章或中转服务未缓存'}</p>
+                    <button class="btn btn-primary btn-sm" style="margin-top: 12px;" onclick="ArticlesPage.loadArticles()">🔄 重新加载 / 重试</button>
                 </div>
             `;
             return;

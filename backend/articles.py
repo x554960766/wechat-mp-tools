@@ -75,6 +75,8 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "")
         headers = {
             "xid": str(account_id),
             "Authorization": f"Bearer {token}",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
         }
         proxies = get_proxies_dict()
         proxy_url = proxies.get("http") if proxies else None
@@ -167,25 +169,62 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "")
         if isinstance(raw_data, list):
             items_list = raw_data
         elif isinstance(raw_data, dict):
-            items_list = (
-                raw_data.get("articles") or
-                raw_data.get("items") or
-                raw_data.get("list") or
-                raw_data.get("data") or
-                raw_data.get("app_msg_list") or
-                []
-            )
+            data_field = raw_data.get("data")
+            if isinstance(data_field, list):
+                items_list = data_field
+            elif isinstance(data_field, dict):
+                items_list = data_field.get("articles") or data_field.get("items") or data_field.get("list") or []
+            else:
+                items_list = (
+                    raw_data.get("articles") or
+                    raw_data.get("items") or
+                    raw_data.get("list") or
+                    raw_data.get("app_msg_list") or
+                    []
+                )
             if not items_list and raw_data.get("id"):
                 items_list = [raw_data]
         else:
             items_list = []
 
+        if not items_list and page == 1:
+            # 微信读书中转平台若为初次拉取/缓存该公众号，可能异步初始化中，等待 1.5 秒重试一次
+            time.sleep(1.5)
+            try:
+                retry_resp = req.get(
+                    f"{platform_url}/api/v2/platform/mps/{fakeid}/articles",
+                    params={"page": page},
+                    headers=headers,
+                    proxies=proxies,
+                    timeout=20,
+                )
+                if retry_resp.status_code == 200:
+                    retry_data = retry_resp.json()
+                    if isinstance(retry_data, list) and retry_data:
+                        items_list = retry_data
+                    elif isinstance(retry_data, dict):
+                        d_field = retry_data.get("data")
+                        if isinstance(d_field, list) and d_field:
+                            items_list = d_field
+                        elif isinstance(retry_data.get("articles"), list) and retry_data["articles"]:
+                            items_list = retry_data["articles"]
+            except Exception:
+                pass
+
         articles = []
         for item in items_list:
+            if not isinstance(item, dict):
+                continue
             art_id = str(item.get("id", "") or item.get("aid", "") or item.get("docid", ""))
             title = item.get("title", "") or item.get("name", "")
             cover = item.get("picUrl", "") or item.get("cover", "") or item.get("pic_url", "")
             pub_time = item.get("publishTime") or item.get("update_time") or item.get("create_time") or item.get("updateTime") or 0
+            digest = item.get("digest", "") or title
+
+            if keyword:
+                kw = keyword.lower()
+                if kw not in title.lower() and kw not in digest.lower():
+                    continue
 
             link = item.get("link") or item.get("url") or ""
             if not link:
@@ -195,7 +234,7 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "")
                 "title": title,
                 "link": link,
                 "cover": cover,
-                "digest": item.get("digest", "") or title,
+                "digest": digest,
                 "author": item.get("author", "") or item.get("author_name", ""),
                 "update_time": pub_time,
                 "is_original": False,
