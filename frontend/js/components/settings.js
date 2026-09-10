@@ -45,7 +45,7 @@ const SettingsPage = {
                             <div class="form-hint">并发下载静态资源的线程数，建议设为 1-3，过高可能被微信限制</div>
                         </div>
 
-                        <div class="form-group" style="display: flex; gap: 24px; margin-top: var(--spacing-md);">
+                        <div class="form-group" style="display: flex; flex-wrap: wrap; gap: 20px; margin-top: var(--spacing-md);">
                             <label class="form-checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
                                 <input type="checkbox" id="setting-save-images" style="width: 18px; height: 18px; accent-color: var(--primary);" />
                                 <span>自动下载文章图片</span>
@@ -53,6 +53,14 @@ const SettingsPage = {
                             <label class="form-checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
                                 <input type="checkbox" id="setting-save-videos" style="width: 18px; height: 18px; accent-color: var(--primary);" />
                                 <span>自动下载文章视频</span>
+                            </label>
+                            <label class="form-checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
+                                <input type="checkbox" id="setting-save-markdown" style="width: 18px; height: 18px; accent-color: var(--primary);" />
+                                <span>自动导出 Markdown (.md)</span>
+                            </label>
+                            <label class="form-checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
+                                <input type="checkbox" id="setting-save-pdf" style="width: 18px; height: 18px; accent-color: var(--primary);" />
+                                <span>自动导出 PDF (.pdf)</span>
                             </label>
                         </div>
                     </div>
@@ -257,6 +265,8 @@ const SettingsPage = {
         const concurrentInput = document.getElementById('setting-concurrent');
         const saveImagesCheck = document.getElementById('setting-save-images');
         const saveVideosCheck = document.getElementById('setting-save-videos');
+        const saveMarkdownCheck = document.getElementById('setting-save-markdown');
+        const savePdfCheck = document.getElementById('setting-save-pdf');
         const delayRange = document.getElementById('setting-delay-range');
         const delayInput = document.getElementById('setting-delay');
         const pageSizeInput = document.getElementById('setting-page-size');
@@ -278,8 +288,10 @@ const SettingsPage = {
 
         if (dirInput) dirInput.value = data.download_dir || '';
         if (concurrentInput) concurrentInput.value = data.concurrent_downloads || 1;
-        if (saveImagesCheck) saveImagesCheck.checked = !!data.auto_save_images;
-        if (saveVideosCheck) saveVideosCheck.checked = !!data.auto_save_videos;
+        if (saveImagesCheck) saveImagesCheck.checked = data.auto_save_images !== undefined ? !!data.auto_save_images : true;
+        if (saveVideosCheck) saveVideosCheck.checked = data.auto_save_videos !== undefined ? !!data.auto_save_videos : true;
+        if (saveMarkdownCheck) saveMarkdownCheck.checked = data.save_markdown !== undefined ? !!data.save_markdown : true;
+        if (savePdfCheck) savePdfCheck.checked = data.save_pdf !== undefined ? !!data.save_pdf : true;
         if (delayInput) delayInput.value = data.request_delay || 0.8;
         if (delayRange) delayRange.value = data.request_delay || 0.8;
         if (pageSizeInput) pageSizeInput.value = data.page_size || 10;
@@ -331,11 +343,14 @@ const SettingsPage = {
         const concurrentInput = document.getElementById('setting-concurrent');
         const saveImagesCheck = document.getElementById('setting-save-images');
         const saveVideosCheck = document.getElementById('setting-save-videos');
+        const saveMarkdownCheck = document.getElementById('setting-save-markdown');
+        const savePdfCheck = document.getElementById('setting-save-pdf');
         const delayInput = document.getElementById('setting-delay');
         const pageSizeInput = document.getElementById('setting-page-size');
         const maxArticlesInput = document.getElementById('setting-max-articles');
         const maxRetriesInput = document.getElementById('setting-max-retries');
         const chWorkerInput = document.getElementById('setting-channels-worker');
+        const wereadUrlInput = document.getElementById('setting-weread-url');
         const deviceIdInput = document.getElementById('setting-device-id');
         const rssStartHour = document.getElementById('setting-rss-start-hour');
         const rssStartMinute = document.getElementById('setting-rss-start-minute');
@@ -360,6 +375,8 @@ const SettingsPage = {
             concurrent_downloads: parseInt(concurrentInput.value) || 1,
             auto_save_images: saveImagesCheck.checked,
             auto_save_videos: saveVideosCheck.checked,
+            save_markdown: saveMarkdownCheck ? saveMarkdownCheck.checked : true,
+            save_pdf: savePdfCheck ? savePdfCheck.checked : true,
             request_delay: request_delay,
             page_size: parseInt(pageSizeInput.value) || 10,
             max_articles: parseInt(maxArticlesInput.value) || 50,

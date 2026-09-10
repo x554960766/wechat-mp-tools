@@ -9,7 +9,8 @@ from flask import Blueprint, jsonify, request
 
 from backend.config import (
     ACCOUNTS_FILE, CONFIG_FILE, BASE_URL, DEFAULT_HEADERS,
-    load_json, save_json, get_proxies_dict, report_proxy_status
+    load_json, save_json, get_proxies_dict, report_proxy_status,
+    get_default_wechat_ua
 )
 from backend.account_pool import borrow_session, account_pool
 
@@ -23,13 +24,11 @@ def _get_session():
 
 
 def is_legacy_fakeid(fakeid: str) -> bool:
-    """判断是否为旧版微信创作者后台不兼容的 fakeid 标识"""
+    """判断是否为无效的 fakeid 标识"""
     if not fakeid:
         return True
     fid = str(fakeid).strip()
-    if fid.endswith("="):
-        return True
-    if not fid.startswith("MP_WXS_") and len(fid) >= 16 and not fid.isdigit():
+    if fid == "${window.biz}" or "${" in fid:
         return True
     return False
 
@@ -67,132 +66,119 @@ def search_accounts():
 
     if not (keyword.startswith("http://") or keyword.startswith("https://")):
         return jsonify({
-            "error": "微信读书模式下，请粘贴该公众号的任意文章链接（例如 https://mp.weixin.qq.com/s/...）以解析添加"
+            "error": "请粘贴该公众号的任意文章链接（例如 https://mp.weixin.qq.com/s/...）以解析添加"
         }), 400
 
+    import urllib.parse, re, html
     try:
-        acc_id, token, cookie_str = borrow_session()
-    except RuntimeError as e:
-        return jsonify({"error": str(e)}), 401
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-    proxy_url = None
-    try:
-        from backend.config import get_settings, WEREAD_PLATFORM_URL
-        platform_url = get_settings().get("weread_platform_url") or WEREAD_PLATFORM_URL
+        # 1. 尝试从输入 URL Query 中提取 __biz
+        parsed = urllib.parse.urlparse(keyword)
+        qs = urllib.parse.parse_qs(parsed.query)
+        fakeid = None
+        if qs.get("__biz") and qs.get("__biz")[0]:
+            b = qs.get("__biz")[0].strip()
+            if not b.startswith("${") and len(b) >= 8:
+                fakeid = b
+
+        # 2. 借用账号池 Session Cookie 请求文章页面，规避 verify 验证码重定向
+        cookie_str = ""
+        try:
+            _, _, cookie_str = borrow_session()
+        except Exception:
+            pass
+
         headers = {
-            "xid": str(acc_id),
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
+            "User-Agent": get_default_wechat_ua()
         }
-        proxies = get_proxies_dict()
-        if proxies:
-            proxy_url = proxies.get("http")
+        if cookie_str:
+            headers["Cookie"] = cookie_str
 
-        # 使用 curl_cffi 发送请求，解决 TLS 握手/SSLError 问题
         try:
             from curl_cffi import requests as c_req
-            resp = c_req.post(
-                f"{platform_url}/api/v2/platform/wxs2mp",
-                json={"url": keyword},
-                headers=headers,
-                proxies=proxies,
-                timeout=25,
-                impersonate="chrome",
-            )
+            resp = c_req.get(keyword, headers=headers, impersonate="chrome", allow_redirects=True, timeout=15, verify=False)
         except Exception:
-            resp = req.post(
-                f"{platform_url}/api/v2/platform/wxs2mp",
-                json={"url": keyword},
-                headers=headers,
-                proxies=proxies,
-                timeout=25,
-            )
+            resp = req.get(keyword, headers=headers, timeout=15, verify=False)
 
         if resp.status_code != 200:
-            err_text = resp.text
-            report_proxy_status(proxy_url, success=False)
-            account_pool.report(acc_id, http_ok=False, error=err_text)
-            if "No book found" in err_text:
-                return jsonify({"error": "解析失败：该文章链接未能匹配到对应的公众号，请确认链接是否有效"}), 400
-            return jsonify({"error": f"解析失败 (HTTP {resp.status_code}): {err_text}"}), 500
+            return jsonify({"error": f"请求文章页面失败 (HTTP {resp.status_code})"}), 400
 
-        report_proxy_status(proxy_url, success=True)
-        items = resp.json()
-        account_pool.report(acc_id, ret=0)
+        html_text = resp.text
 
-        results = []
-        if isinstance(items, list):
-            for item in items:
-                results.append({
-                    "fakeid": item.get("id", ""),
-                    "nickname": item.get("name", ""),
-                    "alias": item.get("id", ""),
-                    "round_head_img": item.get("cover", ""),
-                    "service_type": 1,
-                    "signature": item.get("intro", ""),
-                    "update_time": item.get("updateTime", 0),
-                })
-        elif isinstance(items, dict) and items.get("id"):
-            results.append({
-                "fakeid": items.get("id", ""),
-                "nickname": items.get("name", ""),
-                "alias": items.get("id", ""),
-                "round_head_img": items.get("cover", ""),
-                "service_type": 1,
-                "signature": items.get("intro", ""),
-                "update_time": items.get("updateTime", 0),
-            })
+        # 3. 若 URL 无 __biz，从重定向后的 URL 中提取
+        if not fakeid:
+            resp_qs = urllib.parse.parse_qs(urllib.parse.urlparse(resp.url).query)
+            if resp_qs.get("__biz") and resp_qs.get("__biz")[0]:
+                b = resp_qs.get("__biz")[0].strip()
+                if not b.startswith("${") and len(b) >= 8:
+                    fakeid = b
 
+        # 4. 从 HTML 源码中正则匹配干净的 base64 __biz
+        if not fakeid:
+            m = (re.search(r'__biz=([A-Za-z0-9+/=]{10,})', html_text) or
+                 re.search(r'var\s+biz\s*=\s*"([A-Za-z0-9+/=]{10,})"', html_text) or
+                 re.search(r'biz\s*:\s*"([A-Za-z0-9+/=]{10,})"', html_text))
+            if m:
+                fakeid = m.group(1)
+
+        # 5. 清理 fakeid 中可能的尾部转义符或多余参数
+        if fakeid:
+            fakeid = re.split(r'[\\&"\'#\s]', fakeid)[0].strip()
+
+        if not fakeid or is_legacy_fakeid(fakeid):
+            return jsonify({"error": "未能从文章页面解析出有效的公众号标识 (__biz)，请确认链接是否为真实的微信公众号文章！"}), 400
+
+        # 6. 解析公众号昵称
+        nickname = "公众号"
+        m_nick = (re.search(r'var\s+nickname\s*=\s*htmlDecode\("([^"]+)"\)', html_text) or
+                  re.search(r'var\s+nickname\s*=\s*"([^"]+)"', html_text) or
+                  re.search(r'nickname\s*:\s*\'([^\']+)\'', html_text) or
+                  re.search(r'class="profile_nickname">([^<]+)<', html_text) or
+                  re.search(r'id="js_name">\s*([^\s<]+)', html_text) or
+                  re.search(r'class="account_nickname_inner">([^<]+)<', html_text) or
+                  re.search(r'<meta\s+property="og:article:author"\s+content="([^"]+)"', html_text))
+        if m_nick and m_nick.group(1).strip():
+            nickname = html.unescape(m_nick.group(1).strip())
+
+        # 7. 解析头像
+        head_img = ""
+        m_img = (re.search(r'var\s+hd_head_img\s*=\s*"([^"]+)"', html_text) or
+                 re.search(r'var\s+msg_cdn_url\s*=\s*"([^"]+)"', html_text) or
+                 re.search(r'class="account_avatar">\s*<img\s+src="([^"]+)"', html_text) or
+                 re.search(r'<meta\s+property="og:image"\s+content="([^"]+)"', html_text))
+        if m_img and m_img.group(1).strip():
+            head_img = m_img.group(1).strip().replace("\\/", "/")
+
+        # 8. 解析签名
+        signature = ""
+        m_sig = re.search(r'var\s+profile_signature\s*=\s*"([^"]+)"', html_text)
+        if m_sig and m_sig.group(1).strip():
+            signature = html.unescape(m_sig.group(1).strip()).replace("\\x0a", " ")
+
+        results = [{
+            "fakeid": fakeid,
+            "nickname": nickname,
+            "alias": fakeid,
+            "round_head_img": head_img,
+            "service_type": 1,
+            "signature": signature,
+            "update_time": int(time.time()),
+        }]
         return jsonify({"results": results, "total": len(results)})
-
     except Exception as e:
-        report_proxy_status(proxy_url, success=False)
-        account_pool.report(acc_id, http_ok=False, error=str(e))
-        return jsonify({"error": f"网络请求失败: {str(e)}"}), 500
+        return jsonify({"error": f"解析文章链接发生异常: {str(e)}"}), 500
 
 
 @accounts_bp.route("/weread/login-url", methods=["POST"])
 def get_weread_login_url():
-    """获取微信读书扫码登录 URL 及 UUID"""
-    from backend.config import get_settings
-    platform_url = get_settings().get("weread_platform_url") or WEREAD_PLATFORM_URL
-    try:
-        resp = req.get(f"{platform_url}/api/v2/login/platform", timeout=15)
-        if resp.status_code == 200:
-            return jsonify(resp.json())
-        return jsonify({"error": f"获取登录二维码失败 (HTTP {resp.status_code})"}), 500
-    except Exception as e:
-        return jsonify({"error": f"请求中转服务异常: {str(e)}"}), 500
+    return jsonify({"error": "第三方 API 已弃用，请使用微信公众平台账号登录凭证"}), 400
 
 
 @accounts_bp.route("/weread/login-status/<uuid_str>", methods=["GET"])
 def check_weread_login_status(uuid_str):
-    """轮询微信读书扫码登录结果"""
-    from backend.config import get_settings
-    platform_url = get_settings().get("weread_platform_url") or WEREAD_PLATFORM_URL
-    try:
-        resp = req.get(f"{platform_url}/api/v2/login/platform/{uuid_str}", timeout=30)
-        data = resp.json()
-        vid = data.get("vid")
-        token = data.get("token")
-        if vid and token:
-            username = data.get("username") or f"WeRead_{vid}"
-            acc = account_pool.add_or_update({
-                "token": token,
-                "vid": str(vid),
-                "nickname": username,
-                "save_time": time.time(),
-            })
-            return jsonify({
-                "status": "success",
-                "message": "登录成功",
-                "account": acc,
-                "vid": vid,
-                "username": username,
-            })
-        return jsonify({"status": "waiting", "message": data.get("message", "等待扫码")})
-    except Exception as e:
-        return jsonify({"error": f"查询登录状态异常: {str(e)}"}), 500
+    return jsonify({"error": "第三方 API 已弃用，请使用微信公众平台账号登录凭证"}), 400
 
 
 @accounts_bp.route("", methods=["POST"])
@@ -372,3 +358,28 @@ def rss_force_upload(fakeid):
         rss_scheduler._save_subscriptions(subs)
 
     return jsonify(result)
+
+
+@accounts_bp.route("/sync-pc-wechat", methods=["POST"])
+def sync_pc_wechat():
+    """按需触发 PC 微信针对特定公众号的自动化同步（如搜索并点击该公众号文章）。"""
+    data = request.get_json(silent=True) or {}
+    keyword = (data.get("keyword") or "").strip() or "新京报"
+    try:
+        from scripts.auto_refresh_pc_wechat import trigger_pc_wechat_refresh
+        # force=True：用户手动点击是明确意图，绕过冷却/合并（仍受全局 UI 互斥保护）
+        success = trigger_pc_wechat_refresh(keyword=keyword, force=True)
+        return jsonify({"success": success, "keyword": keyword})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@accounts_bp.route("/sync-batch-pc-wechat", methods=["POST"])
+def sync_batch_pc_wechat():
+    """全自动触发 UI 自动化一键为全部公众号建立主页授权会话"""
+    try:
+        from scripts.auto_refresh_pc_wechat import run_batch_portal_flow_macos
+        success = run_batch_portal_flow_macos()
+        return jsonify({"success": success})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500

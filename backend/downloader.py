@@ -4,13 +4,18 @@
 从 wechat_mp_batch_downloader.py 重构而来
 """
 
+import sys
+import os
 import re
 import json
+import shutil
+import subprocess
 import requests
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs, quote, unquote
 from html import unescape
+from html.parser import HTMLParser
 
 from backend.config import (
     DEFAULT_HEADERS, get_proxies_dict, get_settings, report_proxy_status
@@ -23,6 +28,380 @@ MPVIDEO_RE = re.compile(r'(?:https?:)?//mpvideo\.qpic\.cn/[^"\'\s<>]+?\.mp4(?:\?
 def sanitize(name: str, mx: int = 60) -> str:
     """清理文件名"""
     return re.sub(r'[\\/*?:"<>|]', "_", name.strip())[:mx].rstrip("_") or "article"
+
+
+class HTMLToMarkdownParser(HTMLParser):
+    """将 HTML 解析转换为符合 GitHub Flavored Markdown 规范的文本"""
+    def __init__(self, media_map=None, title_to_skip=None):
+        super().__init__()
+        self.media_map = media_map or {}
+        self.title_to_skip = (title_to_skip or "").strip().lower()
+        self.pieces = []
+        self.list_stack = []
+        self.in_pre = False
+        self.in_code = False
+        self.in_blockquote = False
+        self.blockquote_depth = 0
+        self.in_table = False
+        self.table_data = []
+        self.current_row = []
+        self.current_cell = []
+        self.link_stack = []
+        self.bold_depth = 0
+        self.italic_depth = 0
+        self.strike_depth = 0
+        self.heading_level = 0
+        self.heading_text = []
+
+    def handle_starttag(self, tag, attrs):
+        attr_dict = dict(attrs)
+        tag = tag.lower()
+
+        if tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+            self.heading_level = int(tag[1])
+            self.heading_text = []
+        elif tag == 'p':
+            self._ensure_newline(2)
+        elif tag == 'br':
+            self.pieces.append('\n')
+        elif tag == 'hr':
+            self._ensure_newline(2)
+            self.pieces.append('---\n\n')
+        elif tag in ('strong', 'b'):
+            if self.bold_depth == 0:
+                self.pieces.append('**')
+            self.bold_depth += 1
+        elif tag in ('em', 'i'):
+            if self.italic_depth == 0:
+                self.pieces.append('*')
+            self.italic_depth += 1
+        elif tag in ('del', 's', 'strike'):
+            if self.strike_depth == 0:
+                self.pieces.append('~~')
+            self.strike_depth += 1
+        elif tag == 'code':
+            if not self.in_pre:
+                self.in_code = True
+                self.pieces.append('`')
+        elif tag == 'pre':
+            self._ensure_newline(2)
+            self.in_pre = True
+            lang = attr_dict.get('data-lang', '') or attr_dict.get('lang', '')
+            self.pieces.append(f'```{lang}\n')
+        elif tag == 'blockquote':
+            self._ensure_newline(2)
+            self.blockquote_depth += 1
+            self.in_blockquote = True
+            self.pieces.append('> ')
+        elif tag == 'ul':
+            self._ensure_newline(2 if not self.list_stack else 1)
+            self.list_stack.append(('ul', 0))
+        elif tag == 'ol':
+            self._ensure_newline(2 if not self.list_stack else 1)
+            self.list_stack.append(('ol', 0))
+        elif tag == 'li':
+            self._ensure_newline(1)
+            indent = '  ' * (len(self.list_stack) - 1) if self.list_stack else ''
+            if self.list_stack:
+                ltype, count = self.list_stack[-1]
+                if ltype == 'ol':
+                    count += 1
+                    self.list_stack[-1] = (ltype, count)
+                    prefix = f'{indent}{count}. '
+                else:
+                    prefix = f'{indent}- '
+            else:
+                prefix = '- '
+            self.pieces.append(prefix)
+        elif tag == 'a':
+            href = attr_dict.get('href', '').strip()
+            if href and not href.startswith('javascript:') and href != '#':
+                self.link_stack.append(href)
+                self.pieces.append('[')
+            else:
+                self.link_stack.append(None)
+        elif tag == 'img':
+            src = attr_dict.get('src') or attr_dict.get('data-src') or ''
+            if src:
+                src = src.strip()
+                local_src = self.media_map.get(src, src)
+                alt = attr_dict.get('alt', '').strip() or attr_dict.get('data-title', '').strip()
+                self._ensure_newline(2)
+                self.pieces.append(f'![{alt}]({local_src})\n\n')
+        elif tag == 'table':
+            self._ensure_newline(2)
+            self.in_table = True
+            self.table_data = []
+        elif tag == 'tr':
+            if self.in_table:
+                self.current_row = []
+        elif tag in ('th', 'td'):
+            if self.in_table:
+                self.current_cell = []
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        if tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+            level = self.heading_level or 1
+            text = ''.join(self.heading_text).strip()
+            if self.title_to_skip and text.lower() == self.title_to_skip and len(self.pieces) < 5:
+                pass
+            elif text:
+                self._ensure_newline(2)
+                self.pieces.append(f"{'#' * level} {text}\n\n")
+            self.heading_level = 0
+            self.heading_text = []
+        elif tag == 'p':
+            self._ensure_newline(2)
+        elif tag in ('strong', 'b'):
+            self.bold_depth = max(0, self.bold_depth - 1)
+            if self.bold_depth == 0:
+                self.pieces.append('**')
+        elif tag in ('em', 'i'):
+            self.italic_depth = max(0, self.italic_depth - 1)
+            if self.italic_depth == 0:
+                self.pieces.append('*')
+        elif tag in ('del', 's', 'strike'):
+            self.strike_depth = max(0, self.strike_depth - 1)
+            if self.strike_depth == 0:
+                self.pieces.append('~~')
+        elif tag == 'code':
+            if not self.in_pre:
+                self.pieces.append('`')
+                self.in_code = False
+        elif tag == 'pre':
+            self.pieces.append('\n```\n\n')
+            self.in_pre = False
+        elif tag == 'blockquote':
+            self.blockquote_depth = max(0, self.blockquote_depth - 1)
+            if self.blockquote_depth == 0:
+                self.in_blockquote = False
+            self._ensure_newline(2)
+        elif tag in ('ul', 'ol'):
+            if self.list_stack:
+                self.list_stack.pop()
+            self._ensure_newline(2)
+        elif tag == 'li':
+            self._ensure_newline(1)
+        elif tag == 'a':
+            if self.link_stack:
+                href = self.link_stack.pop()
+                if href:
+                    self.pieces.append(f']({href})')
+        elif tag == 'table':
+            if self.in_table:
+                self.in_table = False
+                self._render_table()
+                self._ensure_newline(2)
+        elif tag == 'tr':
+            if self.in_table and self.current_row is not None:
+                self.table_data.append(self.current_row)
+                self.current_row = []
+        elif tag in ('th', 'td'):
+            if self.in_table:
+                cell_text = ''.join(self.current_cell).strip().replace('|', '\\|').replace('\n', ' ')
+                self.current_row.append(cell_text)
+                self.current_cell = []
+
+    def handle_data(self, data):
+        if self.in_table and self.current_cell is not None:
+            self.current_cell.append(data)
+            return
+        if self.heading_level > 0:
+            self.heading_text.append(data)
+            return
+        if self.in_pre:
+            self.pieces.append(data)
+            return
+
+        clean_data = data
+        if not self.in_code:
+            clean_data = re.sub(r'[ \t]+', ' ', data)
+
+        if self.in_blockquote:
+            lines = clean_data.split('\n')
+            clean_data = '\n> '.join(lines)
+
+        self.pieces.append(clean_data)
+
+    def _ensure_newline(self, count=1):
+        trailing_newlines = 0
+        idx = len(self.pieces) - 1
+        while idx >= 0:
+            text = self.pieces[idx]
+            for ch in reversed(text):
+                if ch == '\n':
+                    trailing_newlines += 1
+                elif ch in (' ', '\t', '\r'):
+                    continue
+                else:
+                    idx = -1
+                    break
+            idx -= 1
+        needed = count - trailing_newlines
+        if needed > 0:
+            self.pieces.append('\n' * needed)
+
+    def _render_table(self):
+        if not self.table_data:
+            return
+        col_count = max(len(row) for row in self.table_data)
+        if col_count == 0:
+            return
+        for row in self.table_data:
+            while len(row) < col_count:
+                row.append('')
+
+        header = self.table_data[0]
+        rows = self.table_data[1:] if len(self.table_data) > 1 else []
+
+        lines = []
+        lines.append('| ' + ' | '.join(header) + ' |')
+        lines.append('| ' + ' | '.join(['---'] * col_count) + ' |')
+        for r in rows:
+            lines.append('| ' + ' | '.join(r) + ' |')
+        self.pieces.append('\n' + '\n'.join(lines) + '\n\n')
+
+    def get_markdown(self):
+        md = ''.join(self.pieces)
+        md = unescape(md)
+        raw_lines = md.split('\n')
+        clean_lines = []
+        in_code_block = False
+        for line in raw_lines:
+            if line.strip().startswith('```'):
+                in_code_block = not in_code_block
+                clean_lines.append(line.strip())
+                continue
+            if in_code_block:
+                clean_lines.append(line)
+            else:
+                stripped = line.strip()
+                if stripped:
+                    if stripped.startswith('>'):
+                        quote_content = stripped.lstrip('>').strip()
+                        if quote_content:
+                            clean_lines.append(f"> {quote_content}")
+                    else:
+                        leading_spaces = len(line) - len(line.lstrip(' '))
+                        indent = ' ' * (leading_spaces if leading_spaces > 1 and stripped.startswith(('-', '*', '1.', '2.', '3.', '4.', '5.', '6.', '7.', '8.', '9.')) else 0)
+                        clean_lines.append(indent + stripped)
+                elif not clean_lines or clean_lines[-1] != "":
+                    clean_lines.append("")
+        return '\n'.join(clean_lines).strip()
+
+
+def html_to_markdown(html_content: str, meta: dict = None, media_map: dict = None) -> str:
+    """参考 qiye45/wechatDownload 风格，将文章 HTML 转换为标准美化 Markdown"""
+    cleaned = re.sub(r'<script\b[^>]*>([\s\S]*?)</script>', '', html_content, flags=re.I)
+    cleaned = re.sub(r'<style\b[^>]*>([\s\S]*?)</style>', '', cleaned, flags=re.I)
+    cleaned = re.sub(r'<noscript\b[^>]*>([\s\S]*?)</noscript>', '', cleaned, flags=re.I)
+    cleaned = re.sub(r'<svg\b[^>]*>([\s\S]*?)</svg>', '', cleaned, flags=re.I)
+    cleaned = re.sub(r'<div\b[^>]*id="(?:js_pc_qr_code|js_profile_qrcode|js_tags_preview_toast)"[^>]*>[\s\S]*?</div>', '', cleaned, flags=re.I)
+
+    title = (meta.get('title') if meta else '') or ''
+    parser = HTMLToMarkdownParser(media_map=media_map, title_to_skip=title)
+    parser.feed(cleaned)
+    body_md = parser.get_markdown()
+
+    header_parts = []
+    if meta:
+        cover = meta.get('cover_url') or meta.get('cover')
+        if cover:
+            local_cover = (media_map or {}).get(cover, cover)
+            header_parts.append(f'![cover_image]({local_cover})\n\n')
+
+        if title:
+            header_parts.append(f'# {title}\n\n')
+
+        author_info = []
+        author = meta.get('author')
+        account = meta.get('source') or meta.get('account')
+        if author:
+            author_info.append(f'作者：{author}')
+        if account:
+            author_info.append(f'公众号：{account}')
+        if author_info:
+            header_parts.append('  '.join(author_info) + '\n\n')
+
+        date_info = []
+        publish_time = meta.get('publish_time')
+        if publish_time:
+            try:
+                if isinstance(publish_time, (int, float)):
+                    dt = datetime.fromtimestamp(publish_time)
+                    date_info.append(f"_{dt.strftime('%Y年%m月%d日 %H:%M')}_")
+                elif isinstance(publish_time, str):
+                    date_info.append(f"_{publish_time}_")
+            except Exception:
+                pass
+        if date_info:
+            header_parts.append(' '.join(date_info) + '\n\n')
+
+        if header_parts:
+            header_parts.append('---\n\n')
+
+    return ''.join(header_parts) + body_md
+
+
+def find_chromium_executable() -> str | None:
+    """查找系统中可用的 Chrome / Edge / Chromium 可执行文件路径"""
+    custom_path = os.environ.get("CHROME_PATH") or os.environ.get("CHROMIUM_PATH")
+    if custom_path and Path(custom_path).exists():
+        return custom_path
+
+    candidates = []
+    if sys.platform == "darwin":
+        candidates = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+            os.path.expanduser("~/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+        ]
+    elif sys.platform == "win32":
+        for base in [os.environ.get("PROGRAMFILES"), os.environ.get("PROGRAMFILES(X86)"), os.environ.get("LOCALAPPDATA")]:
+            if base:
+                candidates.append(str(Path(base) / "Google" / "Chrome" / "Application" / "chrome.exe"))
+                candidates.append(str(Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe"))
+    else:
+        for name in ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "edge"]:
+            found = shutil.which(name)
+            if found:
+                candidates.append(found)
+
+    for p in candidates:
+        if p and Path(p).exists() and (os.access(p, os.X_OK) if sys.platform != "win32" else True):
+            return p
+    return None
+
+
+def export_html_to_pdf(html_path: Path, pdf_path: Path, title: str = "") -> bool:
+    """使用 Headless Chrome 将 HTML 文件转换为 PDF"""
+    chrome_exe = find_chromium_executable()
+    if not chrome_exe:
+        return False
+
+    html_path = html_path.resolve()
+    pdf_path = pdf_path.resolve()
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+
+    cmd = [
+        chrome_exe,
+        "--headless",
+        "--disable-gpu",
+        "--no-pdf-header-footer",
+        "--run-all-compositor-stages-before-draw",
+        f"--print-to-pdf={str(pdf_path)}",
+        str(html_path)
+    ]
+
+    try:
+        res = subprocess.run(cmd, capture_output=True, timeout=60)
+        return pdf_path.exists() and pdf_path.stat().st_size > 0
+    except Exception:
+        return False
 
 
 def clean_html_to_text(html: str) -> str:
@@ -345,7 +724,7 @@ def replace_video_iframe(html: str, video: dict, local: str) -> str:
     return pattern.sub(local, html)
 
 
-def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> dict:
+def download_single_article(url: str, out_dir: Path, title_hint: str = "", _redirect_depth: int = 0) -> dict:
     """
     下载单篇文章
 
@@ -353,10 +732,12 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         url: 文章 URL
         out_dir: 输出目录
         title_hint: 标题提示（可选）
+        _redirect_depth: 内部参数，用于防止"阅读全文"跳转无限递归
 
     Returns:
         dict: {"success": bool, "title": str, "path": str, "error": str}
     """
+    MAX_REDIRECT_DEPTH = 3
     settings = get_settings()
     save_images = settings.get("auto_save_images", True)
     save_videos = settings.get("auto_save_videos", True)
@@ -390,6 +771,12 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
                 raw_html = resp.content.decode("gb18030", errors="replace")
             except Exception:
                 raw_html = resp.content.decode("utf-8", errors="replace")
+
+        # 检测 captcha 验证码页面（微信反爬限制，请求被 302 跳转到验证码页）
+        final_url = resp.url if hasattr(resp, 'url') else url
+        if 'wappoc_appmsgcaptcha' in final_url or 'wappoc_appmsgcaptcha' in raw_html:
+            report_proxy_status(proxy_url, success=False)
+            return {"success": False, "title": safe_title, "error": "微信验证码拦截，请稍后重试或更换 IP", "is_permanent": False}
 
         # 检测是否为微信屏蔽、删除或出错页面（贴图画廊类型可能不含 js_content/js_article，但含有 picture_page_info_list）
         has_js_content = 'id="js_content"' in raw_html or 'id="js_article"' in raw_html or 'picture_page_info_list' in raw_html
@@ -440,6 +827,29 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         if is_error:
             report_proxy_status(proxy_url, success=False)
             return {"success": False, "title": safe_title, "error": error_msg, "is_permanent": is_permanent}
+
+        # 检测"阅读全文"跳转类型文章（转载/分享文章，js_content 为空，原文 URL 在 js_share_source 的 data-url 中）
+        share_source_match = re.search(r'data-url="([^"]+)"[^>]*id="js_share_source"', raw_html)
+        if not share_source_match:
+            share_source_match = re.search(r'id="js_share_source"[^>]*data-url="([^"]+)"', raw_html)
+        if share_source_match:
+            # 检查 js_content 是否实际为空
+            content_check = re.search(r'id="js_content"[^>]*>([\s\S]*?)</div>', raw_html)
+            content_is_empty = not content_check or not content_check.group(1).strip()
+            if content_is_empty and _redirect_depth < MAX_REDIRECT_DEPTH:
+                original_url = unescape(share_source_match.group(1))
+                # 清理 URL: 去掉 scene=45 和 #wechat_redirect 以避免触发验证码
+                from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+                parsed = urlparse(original_url)
+                params = parse_qs(parsed.query)
+                params.pop('scene', None)
+                clean_query = urlencode(params, doseq=True)
+                original_url = urlunparse(('https', parsed.netloc, parsed.path, '', clean_query, ''))
+                # 清理临时目录
+                import shutil
+                if art_dir.exists():
+                    shutil.rmtree(art_dir, ignore_errors=True)
+                return download_single_article(original_url, out_dir, title_hint, _redirect_depth=_redirect_depth + 1)
 
     except Exception as e:
         report_proxy_status(proxy_url, success=False)
@@ -607,10 +1017,20 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         '  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
         f'  <title>{safe_title}</title>\n'
         '  <style>\n'
-        '    body{max-width:680px;margin:0 auto;padding:20px;\n'
-        "         font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;\n"
-        '         line-height:1.8;color:#333}\n'
-        '    img,video{max-width:100%;height:auto;display:block;margin:10px auto}\n'
+        '    @page { margin: 15mm 12mm; size: A4; }\n'
+        '    body { max-width: 720px; margin: 0 auto; padding: 20px;\n'
+        "           font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Hiragino Sans GB', 'Helvetica Neue', sans-serif;\n"
+        '           line-height: 1.8; color: #333; word-break: break-word; }\n'
+        '    img, video { max-width: 100%; height: auto; display: block; margin: 14px auto;\n'
+        '                 page-break-inside: avoid; break-inside: avoid; border-radius: 4px; }\n'
+        '    h1, h2, h3, h4, h5, h6 { page-break-after: avoid; break-after: avoid; color: #111; }\n'
+        '    h1 { font-size: 24px; margin-bottom: 16px; }\n'
+        '    blockquote { margin: 14px 0; padding: 10px 16px; background: #f8f9fa; border-left: 4px solid #07c160; color: #555; }\n'
+        '    table { width: 100%; border-collapse: collapse; margin: 15px 0; }\n'
+        '    th, td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; }\n'
+        '    th { background-color: #f2f2f2; font-weight: 600; }\n'
+        '    code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; background-color: #f6f8fa; border-radius: 4px; }\n'
+        '    pre { padding: 12px; overflow-x: auto; line-height: 1.5; }\n'
         '    #js_content, .rich_media_content { visibility: visible !important; }\n'
         '  </style>\n</head>\n<body>\n'
         f'<h1>{safe_title}</h1>\n'
@@ -630,10 +1050,20 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         '  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n'
         f'  <title>{safe_title}</title>\n'
         '  <style>\n'
-        '    body{max-width:680px;margin:0 auto;padding:20px;\n'
-        "         font-family:-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;\n"
-        '         line-height:1.8;color:#333}\n'
-        '    img,video{max-width:100%;height:auto;display:block;margin:10px auto}\n'
+        '    @page { margin: 15mm 12mm; size: A4; }\n'
+        '    body { max-width: 720px; margin: 0 auto; padding: 20px;\n'
+        "           font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', 'Hiragino Sans GB', 'Helvetica Neue', sans-serif;\n"
+        '           line-height: 1.8; color: #333; word-break: break-word; }\n'
+        '    img, video { max-width: 100%; height: auto; display: block; margin: 14px auto;\n'
+        '                 page-break-inside: avoid; break-inside: avoid; border-radius: 4px; }\n'
+        '    h1, h2, h3, h4, h5, h6 { page-break-after: avoid; break-after: avoid; color: #111; }\n'
+        '    h1 { font-size: 24px; margin-bottom: 16px; }\n'
+        '    blockquote { margin: 14px 0; padding: 10px 16px; background: #f8f9fa; border-left: 4px solid #07c160; color: #555; }\n'
+        '    table { width: 100%; border-collapse: collapse; margin: 15px 0; }\n'
+        '    th, td { border: 1px solid #ddd; padding: 8px 12px; text-align: left; }\n'
+        '    th { background-color: #f2f2f2; font-weight: 600; }\n'
+        '    code, pre { font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace; background-color: #f6f8fa; border-radius: 4px; }\n'
+        '    pre { padding: 12px; overflow-x: auto; line-height: 1.5; }\n'
         '    #js_content, .rich_media_content { visibility: visible !important; }\n'
         '  </style>\n</head>\n<body>\n'
         f'<h1>{safe_title}</h1>\n'
@@ -659,8 +1089,19 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
     if not source or out_dir.name != "url_download":
         source = out_dir.name
 
+    # 提取作者名字
+    author = ""
+    author_match = re.search(r'\bauthor\s*=\s*["\']([^"\']+)["\']', raw_html)
+    if author_match:
+        author = unescape(author_match.group(1)).strip()
+    if not author:
+        author_match = re.search(r'class="rich_media_meta rich_media_meta_text"[^>]*>([^<]+)<', raw_html)
+        if author_match:
+            author = unescape(author_match.group(1)).strip()
+
     new_json_data = {
         "source": source,
+        "author": author,
         "title": page_title or safe_title,
         "url": url,
         "cover_url": cover_url,
@@ -673,6 +1114,35 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
     clean_text = clean_html_to_text(content_html)
     (art_dir / "content.txt").write_text(clean_text, encoding="utf-8")
 
+    # 1. 保存 Markdown (.md) 文件
+    save_markdown = settings.get("save_markdown", True)
+    md_file_path = None
+    if save_markdown:
+        try:
+            md_meta = {
+                "title": page_title or safe_title,
+                "author": author,
+                "source": source,
+                "cover_url": cover_url,
+                "publish_time": publish_time,
+            }
+            md_text = html_to_markdown(content_html, meta=md_meta, media_map=url_map)
+            md_file_path = art_dir / f"{safe_title}.md"
+            md_file_path.write_text(md_text, encoding="utf-8")
+        except Exception:
+            pass
+
+    # 2. 导出 PDF (.pdf) 文件
+    save_pdf = settings.get("save_pdf", True)
+    pdf_file_path = None
+    if save_pdf:
+        try:
+            target_pdf = art_dir / f"{safe_title}.pdf"
+            if export_html_to_pdf(html_path, target_pdf, title=safe_title):
+                pdf_file_path = target_pdf
+        except Exception:
+            pass
+
     # 保存元数据
     meta = {
         "title": safe_title,
@@ -681,11 +1151,17 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         "publish_time": publish_time,
         "cover_url": cover_url,
         "digest": digest,
+        "source": source,
+        "author": author,
         "resources_count": len(url_map),
         "videos_count": len(video_iframes),
         "leftover_urls": len(find_mmbiz_urls(localized)),
         "has_clean_text": True,
         "clean_text_file": "content.txt",
+        "has_markdown": md_file_path is not None and md_file_path.exists(),
+        "markdown_file": f"{safe_title}.md" if (md_file_path and md_file_path.exists()) else "",
+        "has_pdf": pdf_file_path is not None and pdf_file_path.exists(),
+        "pdf_file": f"{safe_title}.pdf" if (pdf_file_path and pdf_file_path.exists()) else "",
     }
     (art_dir / "metadata.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2),
@@ -700,4 +1176,8 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "") -> di
         "cover_url": cover_url,
         "digest": digest,
         "publish_time": publish_time,
+        "has_markdown": meta["has_markdown"],
+        "markdown_path": str(md_file_path) if md_file_path and md_file_path.exists() else "",
+        "has_pdf": meta["has_pdf"],
+        "pdf_path": str(pdf_file_path) if pdf_file_path and pdf_file_path.exists() else "",
     }

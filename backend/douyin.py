@@ -38,9 +38,9 @@ HISTORY_FILE = DATA_DIR / "douyin_history.json"
 # ── 常量 ──────────────────────────────────────────────────
 
 USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/148.0.0.0 Safari/537.36"
+    "Chrome/133.0.0.0 Safari/537.36"
 )
 
 REFERER = "https://www.douyin.com/"
@@ -202,6 +202,33 @@ class DouyinClient:
         else:
             self.session.trust_env = False
 
+        if "ttwid=" not in self.session.headers.get("Cookie", "") and not self.session.cookies.get("ttwid"):
+            self.ensure_ttwid_cookie()
+
+    def ensure_ttwid_cookie(self, force_refresh: bool = False) -> bool:
+        """确保会话中含有有效的 ttwid 和 UIFID_TEMP，支持自动获取和受控自愈刷新"""
+        try:
+            if not force_refresh and ("ttwid=" in self.session.headers.get("Cookie", "") or self.session.cookies.get("ttwid")):
+                return True
+            resp = self.session.get("https://live.douyin.com/", timeout=8)
+            ttwid = self.session.cookies.get("ttwid") or resp.cookies.get("ttwid")
+            uifid = self.session.cookies.get("UIFID_TEMP") or resp.cookies.get("UIFID_TEMP")
+            appended = []
+            if ttwid and "ttwid=" not in self.session.headers.get("Cookie", ""):
+                appended.append(f"ttwid={ttwid}")
+            if uifid and "UIFID_TEMP=" not in self.session.headers.get("Cookie", ""):
+                appended.append(f"UIFID_TEMP={uifid}")
+            if appended:
+                current_ck = self.session.headers.get("Cookie", "").strip()
+                if current_ck:
+                    self.session.headers["Cookie"] = f"{current_ck}; " + "; ".join(appended)
+                else:
+                    self.session.headers["Cookie"] = "; ".join(appended)
+            return bool(ttwid)
+        except Exception as e:
+            _add_log(f"⚠️ 自动获取抖音匿名身份凭证失败: {e}")
+            return False
+
     def _get_common_headers(self) -> dict:
         """通用请求头"""
         return {
@@ -212,9 +239,9 @@ class DouyinClient:
             "sec-fetch-site": "same-origin",
             "sec-fetch-mode": "cors",
             "sec-fetch-dest": "empty",
-            "sec-ch-ua-platform": '"macOS"',
+            "sec-ch-ua-platform": '"Windows"',
             "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua": '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
+            "sec-ch-ua": '"Not(A:Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
             "priority": "u=1, i",
         }
 
@@ -224,29 +251,29 @@ class DouyinClient:
             "device_platform": "webapp",
             "aid": "6383",
             "channel": "channel_pc_web",
-            "update_version_code": "0",
+            "update_version_code": "170400",
             "pc_client_type": "1",
-            "version_code": "190600",
-            "version_name": "19.6.0",
+            "version_code": "190500",
+            "version_name": "29.3.0",
             "cookie_enabled": "true",
-            "screen_width": "1680",
-            "screen_height": "1050",
+            "screen_width": "1920",
+            "screen_height": "1080",
             "browser_language": "zh-CN",
-            "browser_platform": "MacIntel",
-            "browser_name": "Edge",
-            "browser_version": "145.0.0.0",
+            "browser_platform": "Win32",
+            "browser_name": "Chrome",
+            "browser_version": "133.0.0.0",
             "browser_online": "true",
             "engine_name": "Blink",
-            "engine_version": "145.0.0.0",
-            "os_name": "Mac OS",
-            "os_version": "10.15.7",
-            "cpu_core_num": "8",
+            "engine_version": "133.0.0.0",
+            "os_name": "Windows",
+            "os_version": "10",
+            "cpu_core_num": "16",
             "device_memory": "8",
             "platform": "PC",
             "downlink": "10",
             "effective_type": "4g",
             "round_trip_time": "50",
-            "pc_libra_divert": "Mac",
+            "pc_libra_divert": "Windows",
             "support_h265": "1",
             "support_dash": "1",
             "disable_rs": "0",
@@ -278,40 +305,70 @@ class DouyinClient:
         return all_params
 
     def api_get(self, url: str, params: dict, skip_sign: bool = False, timeout: int = 15) -> dict:
-        """发起签名后的 GET 请求，返回 JSON"""
-        all_params = self._enrich_and_sign(params, skip_sign)
-        try:
-            resp = self.session.get(url, params=all_params, timeout=timeout)
-            resp.raise_for_status()
-            
-            # 抖音在未登录或Cookie失效且无有效签名时，可能会直接返回 0 字节的响应
-            if len(resp.content) == 0:
-                raise ValueError("未获取到有效数据。请检查是否已在左侧菜单「扫码登录」并获取有效 Cookie。")
+        """发起签名后的 GET 请求，返回 JSON（带风控拦截自愈重试）"""
+        for attempt in range(2):
+            all_params = self._enrich_and_sign(params, skip_sign)
+            try:
+                resp = self.session.get(url, params=all_params, timeout=timeout)
+                if resp.status_code == 403 or "Argus" in resp.text or "Uifid" in resp.text:
+                    if attempt == 0:
+                        _add_log("⚠️ 抖音请求受 Argus/风控拦截，自动刷新匿名凭证重试...")
+                        self.ensure_ttwid_cookie(force_refresh=True)
+                        continue
+                resp.raise_for_status()
                 
-            return resp.json()
-        except ValueError as ve:
-            raise Exception(str(ve))
-        except Exception as e:
-            raise Exception(f"API 请求失败: {url} — {str(e)}")
+                # 抖音在未登录或Cookie失效且无有效签名时，可能会直接返回 0 字节的响应
+                if len(resp.content) == 0:
+                    if attempt == 0:
+                        _add_log("⚠️ 抖音响应为空，自动刷新匿名凭证重试...")
+                        self.ensure_ttwid_cookie(force_refresh=True)
+                        continue
+                    raise ValueError("未获取到有效数据。请检查是否已在左侧菜单「扫码登录」并获取有效 Cookie。")
+                    
+                return resp.json()
+            except ValueError as ve:
+                raise Exception(str(ve))
+            except Exception as e:
+                err_str = str(e)
+                if attempt == 0 and ("403" in err_str or "Argus" in err_str or "Forbidden" in err_str):
+                    _add_log("⚠️ 抖音请求异常，自动刷新匿名凭证重试...")
+                    self.ensure_ttwid_cookie(force_refresh=True)
+                    continue
+                raise Exception(f"API 请求失败: {url} — {str(e)}")
 
     def api_post(self, url: str, params: dict, data: dict = None, skip_sign: bool = False, timeout: int = 15) -> dict:
-        """发起签名后的 POST 请求，返回 JSON"""
-        all_params = self._enrich_and_sign(params, skip_sign)
-        try:
-            if data is not None:
-                resp = self.session.post(url, params=all_params, data=data, timeout=timeout)
-            else:
-                resp = self.session.post(url, data=all_params, timeout=timeout)
-            resp.raise_for_status()
-            
-            if len(resp.content) == 0:
-                raise ValueError("未获取到有效数据。请检查是否已在左侧菜单「扫码登录」并获取有效 Cookie。")
+        """发起签名后的 POST 请求，返回 JSON（带风控拦截自愈重试）"""
+        for attempt in range(2):
+            all_params = self._enrich_and_sign(params, skip_sign)
+            try:
+                if data is not None:
+                    resp = self.session.post(url, params=all_params, data=data, timeout=timeout)
+                else:
+                    resp = self.session.post(url, data=all_params, timeout=timeout)
+                if resp.status_code == 403 or "Argus" in resp.text or "Uifid" in resp.text:
+                    if attempt == 0:
+                        _add_log("⚠️ 抖音请求受 Argus/风控拦截，自动刷新匿名凭证重试...")
+                        self.ensure_ttwid_cookie(force_refresh=True)
+                        continue
+                resp.raise_for_status()
                 
-            return resp.json()
-        except ValueError as ve:
-            raise Exception(str(ve))
-        except Exception as e:
-            raise Exception(f"API 请求失败: {url} — {str(e)}")
+                if len(resp.content) == 0:
+                    if attempt == 0:
+                        _add_log("⚠️ 抖音响应为空，自动刷新匿名凭证重试...")
+                        self.ensure_ttwid_cookie(force_refresh=True)
+                        continue
+                    raise ValueError("未获取到有效数据。请检查是否已在左侧菜单「扫码登录」并获取有效 Cookie。")
+                    
+                return resp.json()
+            except ValueError as ve:
+                raise Exception(str(ve))
+            except Exception as e:
+                err_str = str(e)
+                if attempt == 0 and ("403" in err_str or "Argus" in err_str or "Forbidden" in err_str):
+                    _add_log("⚠️ 抖音请求异常，自动刷新匿名凭证重试...")
+                    self.ensure_ttwid_cookie(force_refresh=True)
+                    continue
+                raise Exception(f"API 请求失败: {url} — {str(e)}")
 
     # ── 数据查询接口 ──────────────────────────────────────────
 
@@ -693,15 +750,34 @@ class DouyinClient:
 
     def resolve_share_url(self, url: str) -> str:
         """解析抖音分享链接（短链重定向到最终 URL）"""
-        match = re.search(r"https?://[^\s<>\"']+", url.strip())
-        if not match:
-            return url
-        target = match.group(0).rstrip("，。！？；、,.!;")
+        url_clean = url.strip()
+        # 1. 优先精准匹配 v.douyin.com 短链 (避免后接的口令、标签、冒号等字符影响)
+        v_match = re.search(r"https?://v\.douyin\.com/[A-Za-z0-9_\-]+/?", url_clean)
+        if v_match:
+            target = v_match.group(0)
+        else:
+            match = re.search(r"https?://[a-zA-Z0-9.\-_]+(?::\d+)?(?:/[^\s<>'\"\u4e00-\u9fa5]*)?", url_clean)
+            if not match:
+                return url_clean
+            target = match.group(0).rstrip("，。！？；、,.!;:")
 
         try:
             resp = self.session.get(target, allow_redirects=True, timeout=10)
+            if "douyin.com" in resp.url:
+                return resp.url
+            for h in resp.history:
+                loc = h.headers.get("Location", "")
+                if "douyin.com" in loc:
+                    return loc
             return resp.url
         except Exception:
+            try:
+                resp = self.session.get(target, allow_redirects=False, timeout=8)
+                loc = resp.headers.get("Location", "")
+                if loc:
+                    return loc
+            except Exception:
+                pass
             return target
 
     @staticmethod
@@ -719,6 +795,9 @@ class DouyinClient:
             r"episode_id=(\d+)",
             r"video/(\d+)",
             r"note/(\d+)",
+            r"slides/(\d+)",
+            r"itemId=(\d+)",
+            r"item_id=(\d+)",
             r"aweme_id=(\d+)",
             r"modal_id=(\d+)",
             r"/(\d{18,21})",
@@ -750,29 +829,10 @@ class DouyinClient:
 
     def get_video_detail(self, aweme_id: str) -> dict:
         """获取单条作品详情，自动双接口兜底"""
-        # 1. 先用 detail 接口（skip_sign=True, 对应参考项目的 unsigned first）
+        # 1. detail 接口带 a_bogus 签名请求（最稳定，匿名 ttwid 即可返回）
         try:
             data = self.api_get(API_VIDEO_DETAIL, {
                 "aweme_id": aweme_id,
-                "aid": "6383",
-                "version_name": "23.5.0",
-                "device_platform": "webapp",
-                "os": "windows",
-            }, skip_sign=True)
-
-            if data.get("status_code") == 0 and data.get("aweme_detail"):
-                return data["aweme_detail"]
-        except Exception:
-            pass
-
-        # 2. detail 接口带签名重试
-        try:
-            data = self.api_get(API_VIDEO_DETAIL, {
-                "aweme_id": aweme_id,
-                "aid": "6383",
-                "version_name": "23.5.0",
-                "device_platform": "webapp",
-                "os": "windows",
             }, skip_sign=False)
 
             if data.get("status_code") == 0 and data.get("aweme_detail"):
@@ -780,7 +840,35 @@ class DouyinClient:
         except Exception:
             pass
 
-        # 3. multi detail 兜底
+        # 2. detail 接口不带签名尝试
+        try:
+            data = self.api_get(API_VIDEO_DETAIL, {
+                "aweme_id": aweme_id,
+            }, skip_sign=True)
+
+            if data.get("status_code") == 0 and data.get("aweme_detail"):
+                return data["aweme_detail"]
+        except Exception:
+            pass
+
+        # 3. multi detail 带签名兜底
+        try:
+            data = self.api_get(API_MULTI_DETAIL, {
+                "aweme_ids": f"[{aweme_id}]",
+                "request_source": "200",
+            }, skip_sign=False)
+
+            if data.get("status_code") == 0:
+                details = data.get("aweme_details", [])
+                if details:
+                    for d in details:
+                        if d.get("aweme_id") == aweme_id:
+                            return d
+                    return details[0]
+        except Exception:
+            pass
+
+        # 4. multi detail 不带签名兜底
         try:
             data = self.api_get(API_MULTI_DETAIL, {
                 "aweme_ids": f"[{aweme_id}]",
@@ -794,6 +882,19 @@ class DouyinClient:
                         if d.get("aweme_id") == aweme_id:
                             return d
                     return details[0]
+        except Exception:
+            pass
+
+        # 5. 终极兜底：无头浏览器上下文安全获取
+        try:
+            _add_log(f"⚠️ 详情接口受控，切换无头浏览器安全通道获取作品 {aweme_id} 详情...")
+            data = self._fetch_via_browser(
+                f"/aweme/v1/web/aweme/detail/?aweme_id={aweme_id}&aid=6383&device_platform=webapp",
+                method="GET",
+                referer=f"https://www.douyin.com/video/{aweme_id}"
+            )
+            if data.get("status_code") == 0 and data.get("aweme_detail"):
+                return data["aweme_detail"]
         except Exception:
             pass
 
@@ -1211,10 +1312,10 @@ class DouyinClient:
     def parse_media_info(detail: dict) -> dict:
         """
         从 aweme_detail 中提取下载所需的资源信息
-        返回: {type, title, urls, aweme_id, nickname}
+        返回: {type, title, urls, aweme_id, nickname, cover}
         """
         aweme_id = detail.get("aweme_id", "unknown")
-        desc = detail.get("desc", "")
+        desc = detail.get("desc") or detail.get("item_title") or detail.get("preview_title") or ""
         title = clean_filename(desc) if desc else f"抖音作品_{aweme_id}"
 
         author_nickname = ""
@@ -1232,6 +1333,28 @@ class DouyinClient:
                 images = image_post_info.get("images")
 
         is_replay = bool(detail.get("is_live_replay") or detail.get("aweme_type") == 101)
+
+        # 提取封面
+        cover = ""
+        video = detail.get("video", {})
+        if isinstance(video, dict):
+            for ck in ["origin_cover", "cover", "dynamic_cover"]:
+                c_dict = video.get(ck)
+                if isinstance(c_dict, dict):
+                    c_urls = c_dict.get("url_list") or []
+                    if c_urls:
+                        cover = c_urls[0]
+                        break
+        if not cover and images and isinstance(images, list) and len(images) > 0:
+            first_img = images[0]
+            if isinstance(first_img, dict):
+                c_urls = first_img.get("url_list") or []
+                if c_urls:
+                    cover = c_urls[0]
+        if not cover and "cover" in detail and isinstance(detail["cover"], dict):
+            c_urls = detail["cover"].get("url_list") or []
+            if c_urls:
+                cover = c_urls[0]
 
         if images and isinstance(images, list) and len(images) > 0:
             # 图文类型
@@ -1265,6 +1388,7 @@ class DouyinClient:
                 "type": "image",
                 "is_replay": False,
                 "title": title,
+                "cover": cover,
                 "urls": urls,
                 "aweme_id": aweme_id,
                 "nickname": nickname,
@@ -1272,7 +1396,6 @@ class DouyinClient:
             }
         else:
             # 视频类型 — 从多个地址源中选择最佳无水印版本
-            video = detail.get("video", {})
             url_candidates = []
 
             # 1. bit_rate 中的最佳质量
@@ -1335,6 +1458,7 @@ class DouyinClient:
                 "type": "video",
                 "is_replay": is_replay,
                 "title": title,
+                "cover": cover,
                 "urls": [chosen_url] if chosen_url else [],
                 "aweme_id": aweme_id,
                 "nickname": nickname,

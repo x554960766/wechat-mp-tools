@@ -1,24 +1,26 @@
-#!/usr/bin/env python3
-"""
-微信公众号文章批量获取工具（方式一：appmsgpublish 后台接口）
+import os
+import sys
 
-原理：
-  利用微信公众平台后台「写文章 → 搜索其他公众号文章」的官方功能 API，
-  无需 Playwright 打开浏览器，直接用 cookie + token 调 appmsgpublish 接口拉取。
+def ensure_virtualenv():
+    """检测当前是否运行在虚拟环境 venv312 中。
+    如果不是，并且检测到本地存在 venv312，则自动使用 venv312 的 python 解释器重载当前脚本！
+    """
+    if getattr(sys, 'frozen', False):
+        return
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    if sys.platform == 'win32':
+        venv_python = os.path.join(project_root, 'venv312', 'Scripts', 'python.exe')
+    else:
+        venv_python = os.path.join(project_root, 'venv312', 'bin', 'python')
+    if os.path.exists(venv_python):
+        current_exe = os.path.abspath(sys.executable)
+        target_exe = os.path.abspath(venv_python)
+        if current_exe != target_exe:
+            args = [venv_python] + sys.argv
+            os.execv(venv_python, args)
 
-  API：GET https://mp.weixin.qq.com/cgi-bin/appmsgpublish
-  这是微信官方后台搜索接口，token 由 wechat_mp_login.py 扫码登录后自动保存。
 
-使用方式：
-  1. 先运行 python3 wechat_mp_login.py 扫码登录（只需一次，cookie + token 长期有效）
-  2. 运行本脚本：python3 wechat_mp_article_fetcher.py
 
-对比旧版：
-  - 旧版需要 Playwright 打开浏览器 → 提取动态 key → 调 profile_ext?action=getmsg
-  - 新版直接用 requests 调 appmsgpublish，更简洁、更稳定、不需要浏览器
-
-所有数据文件保存在脚本所在目录的 data/wechat_articles/ 子目录下。
-"""
 
 import json
 import time
@@ -38,7 +40,7 @@ TARGET_ACCOUNTS = {
 }
 
 PAGE_SIZE    = 10    # 每次拉取篇数（官方限制最大20，建议10稳妥）
-MAX_ARTICLES = 10    # 最多抓取篇数（0=不限制）
+MAX_ARTICLES = 50    # 最多抓取篇数（0=不限制）
 
 # ── 路径（动态，基于脚本所在目录）─────────────────────────────
 SCRIPT_DIR  = Path(__file__).resolve().parent
@@ -49,23 +51,56 @@ CONFIG_FILE = DATA_DIR / "wechat_mp_config.json"
 
 
 def load_credentials():
-    """从配置文件读取 token + vid (微信读书凭据)"""
-    if not CONFIG_FILE.exists():
-        raise RuntimeError(
-            "\n❌ 未找到凭据！请先运行：\n"
-            "     python3 wechat_mp_login.py   （扫码登录，自动保存）\n"
-            f"  配置文件路径: {CONFIG_FILE}"
-        )
-    cfg = json.loads(CONFIG_FILE.read_text())
-    token = cfg.get("token", "")
-    vid = cfg.get("vid", "")
-    if not token:
-        raise RuntimeError(
-            "\n❌ 凭证不完整（token 为空）！\n"
-            "  请重新运行：python3 wechat_mp_login.py"
-        )
-    print(f"  📂 已从配置文件加载微信读书凭证（vid={vid}, token={token[:8]}...）")
-    return token, vid, cfg
+    """读取凭证：优先读取 account_pool.json 中最新捕获的有效凭证"""
+    from backend.cred_redact import mask_secret
+    pool_file = DATA_DIR / "account_pool.json"
+    if pool_file.exists():
+        try:
+            accounts = json.loads(pool_file.read_bytes().decode("utf-8-sig", errors="replace"))
+            active = [a for a in accounts if a.get("status") == "active" and (a.get("token") or a.get("cookie_str"))]
+            if active:
+                acc = active[0]
+                token = acc.get("token") or acc.get("appmsg_token", "")
+                cookie_str = acc.get("cookie_str", "")
+                print(f"  📂 已从账号池加载 PC 微信捕获凭证（token={mask_secret(token, 6)}）")
+                return token, cookie_str, acc
+        except Exception:
+            pass
+
+    if CONFIG_FILE.exists():
+        cfg = json.loads(CONFIG_FILE.read_bytes().decode("utf-8-sig", errors="replace"))
+        token = cfg.get("token", "")
+        cookie_str = cfg.get("cookie_str", "") or cfg.get("cookie", "")
+        if token:
+            print(f"  📂 已从配置文件加载凭证（token={mask_secret(token, 6)}）")
+            return token, cookie_str, cfg
+
+    print("\n⚠️ 账号池及配置文件中未找到有效凭证。")
+    print("💡 快捷配置：您可以直接输入 Token 与 Cookie，或在 PC 微信中打开中转页获取。")
+    print("=" * 60)
+    try:
+        token = input("1. 请输入 Token (或按 Enter 跳过): ").strip()
+        cookie_str = input("2. 请输入 Cookie 字符串 (或按 Enter 跳过): ").strip()
+        if token and cookie_str:
+            cfg = {"token": token, "cookie_str": cookie_str, "save_time": time.time()}
+            CONFIG_FILE.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+            from backend.account_pool import account_pool
+            acc = account_pool.add_or_update({
+                "token": token,
+                "cookie_str": cookie_str,
+                "nickname": "手动配置凭证",
+                "save_time": time.time(),
+            })
+            print("✅ 凭证已成功保存！继续执行数据拉取...\n")
+            return token, cookie_str, cfg
+    except Exception:
+        pass
+
+    print("\n❌ 提示：请通过以下 2 种方式之一提供凭证：")
+    print("   1. 运行配置工具：python3 wechat_mp_login.py")
+    print("   2. 在 PC 微信中打开中转页：http://127.0.0.1:5200/api/auth/mp-relay\n")
+    import sys
+    sys.exit(1)
 
 
 def fetch_page_via_appmsgpublish(
@@ -75,74 +110,138 @@ def fetch_page_via_appmsgpublish(
     begin: int,
     count: int,
     keyword: str = "",
+    acc: dict = None,
 ) -> dict:
     """
-    调用微信读书中转平台接口获取文章列表
-    API: GET https://weread.111965.xyz/api/v2/platform/mps/{fakeid}/articles?page={page}
+    调用微信客户端历史消息原生接口 (profile_ext?action=getmsg)
+    API: GET https://mp.weixin.qq.com/mp/profile_ext
     """
-    platform_url = "https://weread.111965.xyz"
-    page = (begin // max(1, count)) + 1
-    url = f"{platform_url}/api/v2/platform/mps/{fakeid}/articles"
+    import urllib.parse, re
+    from backend.config import get_default_wechat_ua
+    ua = get_default_wechat_ua()
+    url = "https://mp.weixin.qq.com/mp/profile_ext"
+    clean_cookie = cookie_str.replace(", ", "; ")
+    if "pass_ticket=" in clean_cookie:
+        clean_cookie = re.sub(r'pass_ticket=([^;,\s]+)', lambda m: 'pass_ticket=' + m.group(1).replace('+', '%2B'), clean_cookie)
+    raw_token = urllib.parse.unquote(token) if token else ""
+    acc = acc or {}
+    # 严格 biz 隔离：优先使用该公众号的专属会话凭证（key/pass_ticket 属于单号会话，跨号使用会被拒绝）
+    biz_entry = (acc.get("biz_tokens") or {}).get(fakeid)
+    poc_token = ""
+    poc_sid = ""
+    wxtoken = "777"
+    if isinstance(biz_entry, dict):
+        key = biz_entry.get("key") or ""
+        pass_ticket = urllib.parse.unquote(biz_entry["pass_ticket"]) if biz_entry.get("pass_ticket") else ""
+        poc_token = urllib.parse.unquote(biz_entry["poc_token"]) if biz_entry.get("poc_token") else ""
+        poc_sid = biz_entry.get("poc_sid") or ""
+        wxtoken = biz_entry.get("wxtoken") or "777"
+    else:
+        key = acc.get("key", "")
+        pass_ticket = urllib.parse.unquote(acc.get("pass_ticket", "")) if acc.get("pass_ticket") else ""
+        poc_token = urllib.parse.unquote(acc.get("poc_token", "")) if acc.get("poc_token") else ""
+        poc_sid = acc.get("poc_sid") or ""
+        wxtoken = acc.get("wxtoken") or "777"
+    uin = acc.get("uin", "")
+
+    if poc_sid and "poc_sid=" not in clean_cookie:
+        clean_cookie = f"{clean_cookie}; poc_sid={poc_sid}" if clean_cookie else f"poc_sid={poc_sid}"
+
+    import base64
+    uin_str = str(uin).strip() if uin else ""
+    if uin_str and uin_str.isdigit():
+        uin_encoded = base64.b64encode(uin_str.encode()).decode()
+    else:
+        uin_encoded = uin_str
 
     headers = {
-        "xid": str(cookie_str or "default"),
-        "Authorization": f"Bearer {token}",
+        "User-Agent": ua,
+        "Referer": "https://mp.weixin.qq.com/",
+        "Cookie": clean_cookie,
+    }
+    params = {
+        "action": "getmsg",
+        "__biz": fakeid,
+        "f": "json",
+        "offset": str(begin),
+        "count": str(count),
+        "is_ok": "1",
+        "scene": "124",
+        "uin": uin_encoded,
+        "key": str(key) if key else "",
+        "pass_ticket": str(pass_ticket) if pass_ticket else "",
+        "wxtoken": str(wxtoken) if wxtoken else "777",
+        "poc_token": str(poc_token) if poc_token else "",
+        "x5": "0",
     }
 
-    resp = requests.get(url, params={"page": page}, headers=headers, timeout=30)
-    if resp.status_code != 200:
-        raise RuntimeError(f"WeRead API 错误 (HTTP {resp.status_code}): {resp.text}")
+    try:
+        resp = requests.get(url, params=params, headers=headers, timeout=25, verify=False, proxies={"http": None, "https": None})
+    except Exception:
+        from curl_cffi import requests as c_req
+        resp = c_req.get(url, params=params, headers=headers, timeout=25, impersonate="chrome", verify=False, proxies={"http": None, "https": None})
 
-    items = resp.json()
+    if resp.status_code != 200:
+        raise RuntimeError(f"微信历史消息 API 错误 (HTTP {resp.status_code}): {resp.text[:200]}")
+
+    data = resp.json()
+    ret = data.get("ret", 0)
+
+    if ret in (-3, -4, -5, -6, 200003):
+        raise RuntimeError(f"❌ 微信客户端凭证（Cookie/appmsg_token）已过期 (ret={ret}, errmsg={data.get('errmsg')})，请在 PC 微信打开任意文章或历史消息刷新！")
+    elif ret == 200013:
+        raise RuntimeError("❌ 触发微信历史消息接口频次控制（200013），请稍后再试！")
+    elif ret != 0:
+        err_msg = data.get("errmsg", f"未知错误(ret={ret})")
+        raise RuntimeError(f"微信历史消息 API 错误: {err_msg}")
+
     articles = []
-    if isinstance(items, list):
-        for item in items:
-            art_id = item.get("id", "")
-            link = f"https://mp.weixin.qq.com/s/{art_id}" if art_id and not art_id.startswith("http") else art_id
-            articles.append({
-                "title": item.get("title", ""),
-                "link": link,
-                "cover": item.get("picUrl", "") or item.get("cover", ""),
-                "digest": item.get("title", ""),
-                "author": "",
-                "update_time": item.get("publishTime", 0),
-                "id": art_id,
-            })
+    msg_list_str = data.get("general_msg_list", "")
+    if msg_list_str:
+        try:
+            msg_data = json.loads(msg_list_str)
+            for msg in msg_data.get("list", []):
+                comm_info = msg.get("comm_msg_info", {})
+                pub_time = comm_info.get("datetime", 0)
+                app_msg = msg.get("app_msg_ext_info", {})
+                if app_msg and app_msg.get("title"):
+                    link = app_msg.get("content_url", "").replace("\\/", "/")
+                    if link.startswith("//"):
+                        link = "https:" + link
+                    articles.append({
+                        "title": app_msg.get("title", ""),
+                        "link": link,
+                        "cover": app_msg.get("cover", ""),
+                        "digest": app_msg.get("digest", ""),
+                        "update_time": pub_time,
+                    })
+                    for sub in app_msg.get("multi_app_msg_item_list", []):
+                        if sub.get("title"):
+                            sub_link = sub.get("content_url", "").replace("\\/", "/")
+                            if sub_link.startswith("//"):
+                                sub_link = "https:" + sub_link
+                            articles.append({
+                                "title": sub.get("title", ""),
+                                "link": sub_link,
+                                "cover": sub.get("cover", ""),
+                                "digest": sub.get("digest", ""),
+                                "update_time": pub_time,
+                            })
+        except Exception as e:
+            print(f"解析 general_msg_list 异常: {e}")
 
     return {
         "publish_page": json.dumps({
             "publish_list": [
                 {
                     "publish_info": json.dumps({
-                        "appmsgex": [
-                            {
-                                "title": a["title"],
-                                "link": a["link"],
-                                "cover": a["cover"],
-                                "digest": a["digest"],
-                                "update_time": a["update_time"],
-                            }
-                        ]
+                        "appmsgex": articles
                     })
-                } for a in articles
+                }
             ],
-            "total_count": begin + len(articles) + (10 if len(articles) >= count else 0)
+            "total_count": data.get("total_count", len(articles))
         })
     }
-
-    if resp.status_code != 200:
-        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:300]}")
-
-    data = resp.json()
-    base_resp = data.get("base_resp", {})
-
-    # 检查登录态
-    ret = base_resp.get("ret", 0)
-    if ret == 200003:
-        raise RuntimeError(
-            "\n❌ 登录已过期（session expired）！\n"
-            "  请重新运行：python3 wechat_mp_login.py"
-        )
     if ret != 0:
         err_msg = base_resp.get("err_msg", "未知错误")
         raise RuntimeError(f"微信API错误 (ret={ret}): {err_msg}")
@@ -202,6 +301,7 @@ def fetch_all_articles(
     cookie_str: str,
     fakeid: str,
     account_name: str,
+    acc: dict = None,
 ) -> list[dict]:
     """
     完整流程：分页调用 appmsgpublish，拉取全部文章
@@ -221,7 +321,7 @@ def fetch_all_articles(
             break
 
         data = fetch_page_via_appmsgpublish(
-            cookie_str, token, fakeid, begin, PAGE_SIZE
+            cookie_str, token, fakeid, begin, PAGE_SIZE, acc=acc
         )
 
         articles, total_count = parse_articles_from_response(data)
@@ -304,14 +404,14 @@ def main():
     print(f"   配置文件   : {CONFIG_FILE}")
     print()
 
-    token, cookie_str, _ = load_credentials()
+    token, cookie_str, acc_dict = load_credentials()
 
     for account_name, fakeid in TARGET_ACCOUNTS.items():
         print(f"🔍 处理: {account_name} (fakeid={fakeid[:20]}...)")
 
         try:
             articles = fetch_all_articles(
-                token, cookie_str, fakeid, account_name,
+                token, cookie_str, fakeid, account_name, acc=acc_dict
             )
         except RuntimeError as e:
             print(f"  ❌ 获取失败: {e}")
@@ -328,4 +428,6 @@ def main():
 
 
 if __name__ == "__main__":
+    ensure_virtualenv()
     main()
+

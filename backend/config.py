@@ -14,7 +14,7 @@ from pathlib import Path
 from backend.runtime import app_dir
 
 # ── 版本号 ────────────────────────────────────────────────
-APP_VERSION = "1.8.2"
+APP_VERSION = "2.0.0"
 
 # ── 路径配置 ──────────────────────────────────────────────
 if getattr(sys, 'frozen', False):
@@ -53,6 +53,8 @@ DEFAULT_SETTINGS = {
     "concurrent_downloads": 1,
     "auto_save_images": True,
     "auto_save_videos": True,
+    "save_markdown": True,
+    "save_pdf": True,
     "device_id": "公众号_caiji100",
     "rss_start_hour": 0,
     "rss_start_minute": 0,
@@ -71,12 +73,12 @@ def ensure_dirs():
 
 
 def load_json(filepath: Path, default=None):
-    """安全地加载 JSON 文件"""
+    """安全地加载 JSON 文件（兼容 Windows BOM 头部与非法字符）"""
     if default is None:
         default = {}
     try:
         if filepath.exists():
-            content = filepath.read_bytes().decode("utf-8", errors="replace")
+            content = filepath.read_bytes().decode("utf-8-sig", errors="replace")
             return json.loads(content)
     except Exception:
         pass
@@ -88,7 +90,8 @@ def save_json(filepath: Path, data):
     filepath.parent.mkdir(parents=True, exist_ok=True)
     filepath.write_text(
         json.dumps(data, ensure_ascii=False, indent=2),
-        encoding="utf-8"
+        encoding="utf-8",
+        errors="replace"
     )
 
 
@@ -307,3 +310,54 @@ def report_proxy_status(proxy_url: str, success: bool):
             state["failures"] += 1
             if state["failures"] >= 5:
                 state["cooldown_until"] = current_time + 600  # 连续失败 5 次，进入 10 分钟冷却期
+
+
+def normalize_wechat_url(url: str) -> str:
+    """归一化微信文章链接，消除 HTML 转义实体(&amp;)与动态追踪参数（如 chksm, scene, pass_ticket 等），提取规范 URL"""
+    if not url or not isinstance(url, str):
+        return ""
+
+    import html
+    from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+    url = html.unescape(url).strip()
+    if url.startswith("//"):
+        url = "https:" + url
+    elif not url.startswith("http://") and not url.startswith("https://"):
+        url = "https://" + url
+
+    try:
+        parsed = urlparse(url)
+        if "mp.weixin.qq.com" in parsed.netloc:
+            query = parse_qs(parsed.query)
+            biz = query.get("__biz", [""])[0]
+            mid = query.get("mid", [""])[0]
+            idx = query.get("idx", [""])[0]
+            sn = query.get("sn", [""])[0]
+
+            if biz and mid and idx and sn:
+                return f"https://mp.weixin.qq.com/s?__biz={biz}&mid={mid}&idx={idx}&sn={sn}"
+            elif biz and mid and idx:
+                return f"https://mp.weixin.qq.com/s?__biz={biz}&mid={mid}&idx={idx}"
+            elif sn:
+                return f"https://mp.weixin.qq.com/s?sn={sn}"
+
+            ignore_keys = {
+                "chksm", "scene", "subscene", "sessionid", "key", "pass_ticket",
+                "uin", "devicetype", "version", "x5", "src", "asc", "clicktime",
+                "enterid", "rd2exitd", "sharer_sharetime", "sharer_shareid", "item_show_type"
+            }
+            clean_query = {k: v for k, v in query.items() if k not in ignore_keys}
+            new_qs = urlencode(clean_query, doseq=True)
+            return urlunparse((parsed.scheme or "https", parsed.netloc, parsed.path, "", new_qs, ""))
+    except Exception:
+        pass
+    return url
+
+
+def get_default_wechat_ua() -> str:
+    """根据操作系统自动匹配对应平台的 微信客户端 User-Agent (避免 Windows 用 Mac UA 导致微信判定登录失效)"""
+    if sys.platform == "win32":
+        return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.5304.110 Safari/537.36 NetType/WIFI MicroMessenger/7.0.20.1781(0x6700143B) WindowsWechat ClientCanvas/1.0.0"
+    return "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/107.0.5304.110 Safari/537.36 NetType/WIFI MicroMessenger/6.8.0(0x16080000) MacWechat/store ClientCanvas/1.0.0"
+

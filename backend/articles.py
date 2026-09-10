@@ -15,7 +15,8 @@ from pathlib import Path
 from backend.config import (
     CONFIG_FILE, BASE_URL, DEFAULT_HEADERS, OUTPUT_DIR,
     DOWNLOAD_HISTORY_FILE,
-    load_json, save_json, get_settings, get_proxies_dict, report_proxy_status
+    load_json, save_json, get_settings, get_proxies_dict, report_proxy_status,
+    normalize_wechat_url, get_default_wechat_ua
 )
 from backend.account_pool import borrow_session, account_pool
 
@@ -56,195 +57,315 @@ def fetch_article_detail_content(url: str) -> str:
     return str(content_node)
 
 
-def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "") -> tuple:
-    """使用微信读书接口拉取指定公众号的文章列表 (page, total)
-    遇到失效 (WeReadError401) 或频繁 (WeReadError429) 时自动向账号池上报并无缝切换账号重试"""
-    max_switch = 3
-    last_exc = None
-    page = (begin // max(1, count)) + 1
+def _fetch_articles_via_appmsg_fallback(fakeid: str, begin: int, count: int, keyword: str, token: str, cookie_str: str):
+    """当拥有可用 Web 管理端 Token 时，尝试通过 /cgi-bin/appmsg 备用通道获取文章列表"""
+    if not token or not str(token).isdigit():
+        return None
+    import html
+    headers = {**DEFAULT_HEADERS, "Cookie": cookie_str}
+    try:
+        s = req.Session()
+        s.trust_env = False
+        resp = s.get(
+            f"{BASE_URL}/cgi-bin/appmsg",
+            params={
+                "action": "list_ex",
+                "token": token,
+                "lang": "zh_CN",
+                "f": "json",
+                "ajax": "1",
+                "type": "9",
+                "query": keyword,
+                "fakeid": fakeid,
+                "begin": str(begin),
+                "count": str(count),
+            },
+            headers=headers,
+            timeout=3,
+            verify=False,
+        )
+        if resp.status_code == 200:
+            try:
+                resp_text = resp.content.decode("utf-8", errors="replace") if hasattr(resp, "content") and resp.content else (resp.text or "")
+                data = json.loads(resp_text)
+            except Exception:
+                data = {}
+            if data.get("base_resp", {}).get("ret") == 0:
+                articles = []
+                for item in data.get("app_msg_list", []):
+                    link = html.unescape(item.get("link", "")).strip()
+                    articles.append({
+                        "title": item.get("title", ""),
+                        "link": link,
+                        "cover": item.get("cover", ""),
+                        "digest": item.get("digest", ""),
+                        "author": item.get("author_name", ""),
+                        "update_time": item.get("update_time", item.get("create_time", 0)),
+                        "is_original": False,
+                        "item_show_type": item.get("item_show_type", 0),
+                        "id": str(item.get("aid", "")),
+                    })
+                total_cnt = data.get("app_msg_cnt", len(articles))
+                can_continue = 1 if (begin + len(articles)) < total_cnt else 0
+                return articles, total_cnt, can_continue
+    except Exception as e:
+        print(f"appmsg fallback 尝试跳过: {e}", flush=True)
+    return None
 
-    from backend.config import get_settings, WEREAD_PLATFORM_URL
-    platform_url = get_settings().get("weread_platform_url") or WEREAD_PLATFORM_URL
+
+def _enqueue_biz_refresh(fakeid: str, name: str, reason: str) -> None:
+    """把凭证过期的公众号加入刷新队列（自动跳过 + 及时补凭证，下轮采集补齐数据）。"""
+    try:
+        from backend.refresh_queue import refresh_queue
+        refresh_queue.enqueue(biz=fakeid, name=name, reason=reason)
+    except Exception as e:
+        print(f"[_fetch_articles_page] 刷新队列入队失败: {e}", flush=True)
+
+
+def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "", account_name: str = "") -> tuple:
+    """使用微信客户端历史消息原生接口 (profile_ext?action=getmsg) 获取文章列表 (articles, total_count, can_continue)
+    支持从账号池提取 appmsg_token, key, pass_ticket, uin 与 Cookie 进行翻页抓取
+    凭证过期时自动跳过并把该公众号加入刷新队列（及时补凭证，下轮采集补齐数据）"""
+    max_switch = 2
+    last_exc = None
 
     for _ in range(max_switch):
-        try:
-            account_id, token, cookie_str = borrow_session()
-        except RuntimeError as e:
-            raise RuntimeError(str(e))
+        # biz 感知选号：优先持有该公众号专属凭证的账号，避免多账号池下选错账号导致 ret=-3
+        account_data = account_pool.acquire_for_biz(fakeid) or account_pool.acquire()
+        if not account_data:
+            if last_exc is not None:
+                break
+            raise RuntimeError("账号池中无可用账号，请先在『账号池』页面添加/登录账号")
 
+        account_id = account_data["id"]
+        from backend.account_pool import AccountPool
+        biz_cred = AccountPool.get_biz_credential(account_data, fakeid)
+
+        token = biz_cred.get("token", "")
+        appmsg_token = biz_cred.get("appmsg_token", token)
+        cookie_str = biz_cred.get("cookie_str") or account_data.get("cookie_str", "")
+        uin = biz_cred.get("uin") or account_data.get("uin", "")
+        # 严格 biz 隔离：key / pass_ticket 只用该公众号自己的会话凭证，
+        # 不回退账号级字段（账号级 key 属于最近打开的其他公众号，跨号使用必被拒绝）
+        key = biz_cred.get("key", "")
+        pass_ticket = biz_cred.get("pass_ticket", "")
+        poc_token = biz_cred.get("poc_token", "")
+        poc_sid = biz_cred.get("poc_sid", "")
+        wxtoken = biz_cred.get("wxtoken", "777")
+
+        if not token and not key:
+            # 该公众号尚未建立独立阅读会话：不发起注定失败的请求。
+            # 优先全池查找公众平台 Web Token（纯数字）——客户端通道被封锁时这是唯一 API 恢复路径
+            web_token, web_cookie, _web_id = account_pool.get_web_token_session()
+            if web_token:
+                try:
+                    fallback_res = _fetch_articles_via_appmsg_fallback(fakeid, begin, count, keyword, web_token, web_cookie)
+                    if fallback_res is not None:
+                        articles, total_cnt, can_continue = fallback_res
+                        account_pool.report(account_id, ret=0)
+                        return articles, total_cnt, can_continue
+                except Exception as fb_err:
+                    print(f"Appmsg 备用通道尝试失败: {fb_err}", flush=True)
+            account_pool.report(account_id, ret=-3, error="该公众号尚未建立独立阅读会话（无专属凭证），已加入刷新队列")
+            _enqueue_biz_refresh(fakeid, account_name or keyword, "无会话凭证")
+            last_exc = PermissionError(f"当前公众号【{account_name or fakeid}】尚未建立独立主页会话：已加入自动刷新队列，请在电脑微信中打开该公众号主页建立会话！")
+            continue
+
+        import urllib.parse, re
+        if appmsg_token:
+            appmsg_token = urllib.parse.unquote(str(appmsg_token))
+        if pass_ticket:
+            pass_ticket = urllib.parse.unquote(str(pass_ticket))
+        if key:
+            key = urllib.parse.unquote(str(key))
+        if poc_token:
+            poc_token = urllib.parse.unquote(str(poc_token))
+
+        # 规范化 Cookie 分隔符，并保证 pass_ticket 中的 + 编码为 %2B 防止被微信服务端解析为空格
+        clean_cookie = cookie_str.replace(", ", "; ")
+        if "pass_ticket=" in clean_cookie:
+            clean_cookie = re.sub(r'pass_ticket=([^;,\s]+)', lambda m: 'pass_ticket=' + m.group(1).replace('+', '%2B'), clean_cookie)
+        if poc_sid and "poc_sid=" not in clean_cookie:
+            clean_cookie = f"{clean_cookie}; poc_sid={poc_sid}" if clean_cookie else f"poc_sid={poc_sid}"
+
+        ua = biz_cred.get("user_agent") or account_data.get("user_agent") or get_default_wechat_ua()
         headers = {
-            "xid": str(account_id),
-            "Authorization": f"Bearer {token}",
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "User-Agent": ua,
+            "Cookie": clean_cookie,
             "Accept": "application/json, text/plain, */*",
         }
         proxies = get_proxies_dict()
         proxy_url = proxies.get("http") if proxies else None
 
-        try:
-            from curl_cffi import requests as c_req
-            resp = c_req.get(
-                f"{platform_url}/api/v2/platform/mps/{fakeid}/articles",
-                params={"page": page},
-                headers=headers,
-                proxies=proxies,
-                timeout=30,
-                impersonate="chrome",
-            )
-        except Exception as e:
-            try:
-                resp = req.get(
-                    f"{platform_url}/api/v2/platform/mps/{fakeid}/articles",
-                    params={"page": page},
-                    headers=headers,
-                    proxies=proxies,
-                    timeout=30,
-                )
-            except Exception as exc:
-                report_proxy_status(proxy_url, success=False)
-                account_pool.report(account_id, http_ok=False, error=str(exc))
-                last_exc = exc
-                continue
+        import base64
+        uin_str = str(uin).strip() if uin else ""
+        if uin_str and uin_str.isdigit():
+            uin_encoded = base64.b64encode(uin_str.encode()).decode()
+        else:
+            uin_encoded = uin_str
 
-        # 安全提取响应正文，防止代理返回 gzip 或非 UTF-8 字节触发 UnicodeDecodeError
+        params = {
+            "action": "getmsg",
+            "__biz": fakeid,
+            "f": "json",
+            "offset": str(begin),
+            "count": str(count),
+            "is_ok": "1",
+            "scene": "124",
+            "uin": uin_encoded,
+            "key": str(key) if key else "",
+            "pass_ticket": str(pass_ticket) if pass_ticket else "",
+            "wxtoken": str(wxtoken) if wxtoken else "777",
+            "poc_token": str(poc_token) if poc_token else "",
+            "x5": "0",
+        }
+
+        from backend.cred_redact import mask_secret
+        print(f"[_fetch_articles_page] Sending HTTP GET to profile_ext for fakeid={fakeid} (uin={mask_secret(uin, 4)} key={'yes' if key else 'no'})...", flush=True)
         try:
-            if hasattr(resp, "text") and resp.text:
-                err_body = resp.text
-            else:
-                err_body = resp.content.decode("utf-8", errors="replace")
-        except Exception:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            s = req.Session()
+            s.trust_env = False
             try:
-                import gzip
-                err_body = gzip.decompress(resp.content).decode("utf-8", errors="replace")
-            except Exception:
-                err_body = resp.content.decode("utf-8", errors="replace")
+                resp = s.get(
+                    f"{BASE_URL}/mp/profile_ext",
+                    params=params,
+                    headers=headers,
+                    timeout=8,
+                    verify=False,
+                )
+                print(f"[_fetch_articles_page] profile_ext responded with HTTP {resp.status_code}", flush=True)
+            except Exception as s_err:
+                print(f"[_fetch_articles_page] s.get failed: {s_err}, trying curl_cffi...", flush=True)
+                from curl_cffi import requests as c_req
+                resp = c_req.get(
+                    f"{BASE_URL}/mp/profile_ext",
+                    params=params,
+                    headers=headers,
+                    timeout=8,
+                    impersonate="chrome",
+                    verify=False,
+                )
+                print(f"[_fetch_articles_page] c_req.get responded with HTTP {resp.status_code}", flush=True)
+        except Exception as exc:
+            print(f"[_fetch_articles_page] Both requests engines failed: {exc}", flush=True)
+            report_proxy_status(proxy_url, success=False)
+            account_pool.report(account_id, http_ok=False, error=str(exc))
+            last_exc = exc
+            continue
 
         if resp.status_code != 200:
             report_proxy_status(proxy_url, success=False)
-            account_pool.report(account_id, http_ok=False, error=f"WeReadError: HTTP {resp.status_code} {err_body}")
-
-            if "WeReadError401" in err_body or resp.status_code == 401:
-                last_exc = PermissionError("微信读书账号登录失效，正在切换账号重试...")
-                continue
-            elif "WeReadError429" in err_body or resp.status_code == 429:
-                last_exc = RuntimeError("触发微信读书频率控制(429)，正在切换账号重试...")
-                continue
-            elif resp.status_code == 500 or "unknown error" in err_body:
-                raise RuntimeError("该公众号为旧版标识，微信读书接口无法识别。请重新粘贴该公众号的任意一篇文章链接解析添加，以升级订阅。")
-            else:
-                last_exc = RuntimeError(f"HTTP {resp.status_code}: {err_body}")
-                continue
+            account_pool.report(account_id, http_ok=False, error=f"HTTP {resp.status_code}")
+            last_exc = RuntimeError(f"HTTP {resp.status_code}")
+            continue
 
         report_proxy_status(proxy_url, success=True)
+        resp_text = ""
         try:
-            raw_data = resp.json()
+            resp_text = resp.content.decode("utf-8", errors="replace") if hasattr(resp, "content") and resp.content else (resp.text or "")
+            data = json.loads(resp_text)
         except Exception:
-            try:
-                import gzip
-                decompressed = gzip.decompress(resp.content)
-                raw_data = json.loads(decompressed.decode("utf-8", errors="replace"))
-            except Exception:
-                raw_data = json.loads(resp.content.decode("utf-8", errors="replace"))
-
-        # 校验响应数据中的业务错误码（防止中转服务返回 HTTP 200 但包含业务层错误）
-        if isinstance(raw_data, dict):
-            b_code = raw_data.get("errCode") or raw_data.get("errcode") or raw_data.get("code")
-            if b_code and b_code not in (0, 200, "0"):
-                b_msg = raw_data.get("errMsg") or raw_data.get("errmsg") or raw_data.get("msg") or raw_data.get("message") or f"错误码 {b_code}"
-                if b_code in (-2012, 401, -2002) or "401" in str(b_msg) or "登录" in str(b_msg) or "token" in str(b_msg).lower():
-                    account_pool.report(account_id, ret=200003, error=f"业务登录失效: {b_msg}")
-                    last_exc = PermissionError(f"微信读书账号登录失效 ({b_msg})，正在切换账号重试...")
-                    continue
-                elif b_code in (429, -2041) or "429" in str(b_msg) or "频繁" in str(b_msg):
-                    account_pool.report(account_id, ret=200013, error=f"业务频控: {b_msg}")
-                    last_exc = RuntimeError(f"触发微信读书频率控制 ({b_msg})，正在切换账号重试...")
-                    continue
-                else:
-                    account_pool.report(account_id, ret=int(b_code) if isinstance(b_code, int) else 1, error=str(b_msg))
-                    last_exc = RuntimeError(f"微信读书接口错误 ({b_msg})")
-                    continue
-
-        account_pool.report(account_id, ret=0)
-
-        if isinstance(raw_data, list):
-            items_list = raw_data
-        elif isinstance(raw_data, dict):
-            data_field = raw_data.get("data")
-            if isinstance(data_field, list):
-                items_list = data_field
-            elif isinstance(data_field, dict):
-                items_list = data_field.get("articles") or data_field.get("items") or data_field.get("list") or []
+            # 响应护栏：微信在凭证被拒绝时会以 HTTP 200 返回 HTML 验证页/环境异常页，而非接口 JSON。
+            sniff = resp_text[:3000] if resp_text else ""
+            if any(kw in sniff for kw in ("环境异常", "去验证", "操作验证", "weui-msg", "wx_alert", "当前环境异常")):
+                print(f"[_fetch_articles_page] 命中验证页护栏: 返回 HTML 验证页而非 JSON，凭证被服务端拒绝", flush=True)
+                account_pool.report(account_id, ret=200003, error="返回验证页(环境异常)，客户端凭证已被微信拒绝")
+                _enqueue_biz_refresh(fakeid, account_name or keyword, "验证页")
+                last_exc = PermissionError("微信返回验证页（环境异常），当前凭证已被拒绝，已加入刷新队列，将在下轮采集自动重试！")
             else:
-                items_list = (
-                    raw_data.get("articles") or
-                    raw_data.get("items") or
-                    raw_data.get("list") or
-                    raw_data.get("app_msg_list") or
-                    []
-                )
-            if not items_list and raw_data.get("id"):
-                items_list = [raw_data]
-        else:
-            items_list = []
+                account_pool.report(account_id, http_ok=True, error="返回数据非 JSON 格式")
+                last_exc = RuntimeError("返回数据非 JSON 格式（可能需要重新在微信电脑版打开历史消息更新 key/token）")
+            continue
 
-        if not items_list and page == 1:
-            # 微信读书中转平台若为初次拉取/缓存该公众号，可能异步初始化中，等待 1.5 秒重试一次
-            time.sleep(1.5)
-            try:
-                retry_resp = req.get(
-                    f"{platform_url}/api/v2/platform/mps/{fakeid}/articles",
-                    params={"page": page},
-                    headers=headers,
-                    proxies=proxies,
-                    timeout=20,
-                )
-                if retry_resp.status_code == 200:
-                    retry_data = retry_resp.json()
-                    if isinstance(retry_data, list) and retry_data:
-                        items_list = retry_data
-                    elif isinstance(retry_data, dict):
-                        d_field = retry_data.get("data")
-                        if isinstance(d_field, list) and d_field:
-                            items_list = d_field
-                        elif isinstance(retry_data.get("articles"), list) and retry_data["articles"]:
-                            items_list = retry_data["articles"]
-            except Exception:
-                pass
+        ret = data.get("ret", 0)
+
+        if ret == 0:
+            account_pool.report(account_id, ret=0)
+        else:
+            errmsg = data.get("errmsg", f"ret={ret}")
+
+            # 客户端接口失败：优先全池查找公众平台 Web Token（纯数字）走 /cgi-bin/appmsg 备用通道
+            web_token, web_cookie, _web_id = account_pool.get_web_token_session()
+            if not web_token and str(appmsg_token or token).isdigit():
+                web_token, web_cookie = (appmsg_token or token), cookie_str
+            if web_token:
+                try:
+                    fallback_res = _fetch_articles_via_appmsg_fallback(fakeid, begin, count, keyword, web_token, web_cookie)
+                    if fallback_res is not None:
+                        articles, total_cnt, can_continue = fallback_res
+                        account_pool.report(account_id, ret=0)
+                        return articles, total_cnt, can_continue
+                except Exception as fb_err:
+                    print(f"Appmsg 备用通道尝试失败: {fb_err}")
+
+            account_pool.report(account_id, ret=ret)
+
+            if ret in (-3, -4, -5, -6, 200003):
+                _enqueue_biz_refresh(fakeid, account_name or keyword, f"ret={ret}")
+                hint = ""
+                if not biz_cred.get("getmsg_ready"):
+                    hint = "（当前捕获的是文章页凭证，不支持拉取列表；需打开该公众号『主页』以建立列表会话）"
+                last_exc = PermissionError(f"当前公众号【{account_name or fakeid}】凭证未就绪或已过期 (ret={ret}, {errmsg}){hint}，已加入刷新队列，下轮采集自动重试！")
+            elif ret == 200013 or "操作频繁" in str(errmsg):
+                last_exc = RuntimeError("触发微信频次控制(200013: 操作频繁)，账号已自动进入冷却避让状态，请稍后再试！")
+            else:
+                last_exc = RuntimeError(f"微信历史消息接口错误: {errmsg}")
+            break
 
         articles = []
-        for item in items_list:
-            if not isinstance(item, dict):
-                continue
-            art_id = str(item.get("id", "") or item.get("aid", "") or item.get("docid", ""))
-            title = item.get("title", "") or item.get("name", "")
-            cover = item.get("picUrl", "") or item.get("cover", "") or item.get("pic_url", "")
-            pub_time = item.get("publishTime") or item.get("update_time") or item.get("create_time") or item.get("updateTime") or 0
-            digest = item.get("digest", "") or title
+        msg_list_str = data.get("general_msg_list", "")
+        if msg_list_str:
+            try:
+                import html
+                msg_data = json.loads(msg_list_str)
+                for msg in msg_data.get("list", []):
+                    comm_info = msg.get("comm_msg_info", {})
+                    pub_time = comm_info.get("datetime", 0)
+                    msg_id = str(comm_info.get("id", ""))
 
-            if keyword:
-                kw = keyword.lower()
-                if kw not in title.lower() and kw not in digest.lower():
-                    continue
+                    app_msg = msg.get("app_msg_ext_info", {})
+                    if app_msg and app_msg.get("title"):
+                        link = html.unescape(app_msg.get("content_url", "")).replace("\\/", "/").strip()
+                        if link.startswith("//"):
+                            link = "https:" + link
 
-            link = item.get("link") or item.get("url") or ""
-            if not link:
-                link = f"https://mp.weixin.qq.com/s/{art_id}" if art_id and not art_id.startswith("http") else art_id
+                        articles.append({
+                            "title": app_msg.get("title", ""),
+                            "link": link,
+                            "cover": app_msg.get("cover", ""),
+                            "digest": app_msg.get("digest", ""),
+                            "author": app_msg.get("author", ""),
+                            "update_time": pub_time,
+                            "is_original": False,
+                            "item_show_type": 0,
+                            "id": msg_id,
+                        })
 
-            articles.append({
-                "title": title,
-                "link": link,
-                "cover": cover,
-                "digest": digest,
-                "author": item.get("author", "") or item.get("author_name", ""),
-                "update_time": pub_time,
-                "is_original": False,
-                "item_show_type": 0,
-                "id": art_id,
-            })
+                        # 多图文处理
+                        for sub in app_msg.get("multi_app_msg_item_list", []):
+                            if sub.get("title"):
+                                sub_link = html.unescape(sub.get("content_url", "")).replace("\\/", "/").strip()
+                                if sub_link.startswith("//"):
+                                    sub_link = "https:" + sub_link
+                                articles.append({
+                                    "title": sub.get("title", ""),
+                                    "link": sub_link,
+                                    "cover": sub.get("cover", ""),
+                                    "digest": sub.get("digest", ""),
+                                    "author": sub.get("author", ""),
+                                    "update_time": pub_time,
+                                    "is_original": False,
+                                    "item_show_type": 0,
+                                    "id": msg_id,
+                                })
+            except Exception as parse_err:
+                print(f"解析 general_msg_list 异常: {parse_err}")
 
-        # 计算估算 total 数量
-        total_estimate = begin + len(articles) + (10 if len(articles) >= count else 0)
-        return articles, total_estimate
+        total_cnt = data.get("total_count", len(articles))
+        can_continue = data.get("can_msg_continue", 1) if isinstance(data, dict) else (1 if len(articles) > 0 else 0)
+        return articles, total_cnt, can_continue
 
     if isinstance(last_exc, PermissionError):
         raise last_exc
@@ -258,19 +379,26 @@ def get_articles(fakeid):
     count = request.args.get("count", 10, type=int)
     keyword = request.args.get("keyword", "").strip()
 
+    t_start = time.time()
+    print(f"[Articles API] Start fetching articles for fakeid={fakeid} begin={begin} count={count}", flush=True)
+
     try:
-        articles, total_count = _fetch_articles_page(fakeid, begin, count, keyword)
+        articles, total_count, can_continue = _fetch_articles_page(fakeid, begin, count, keyword, account_name=keyword)
+        print(f"[Articles API] Fetch finished in {time.time() - t_start:.2f}s, got {len(articles)} articles", flush=True)
 
         return jsonify({
             "articles": articles,
             "total": total_count,
+            "can_msg_continue": can_continue,
             "begin": begin,
             "count": len(articles),
         })
 
     except PermissionError as e:
+        print(f"[Articles API] PermissionError in {time.time() - t_start:.2f}s: {e}", flush=True)
         return jsonify({"error": str(e)}), 401
     except (RuntimeError, req.RequestException) as e:
+        print(f"[Articles API] Error in {time.time() - t_start:.2f}s: {e}", flush=True)
         return jsonify({"error": f"网络请求失败: {str(e)}"}), 500
 
 
@@ -594,6 +722,8 @@ def _sync_history_from_disk(history: list) -> bool:
                         except Exception:
                             pass
 
+                    has_md = meta.get("has_markdown") if "has_markdown" in meta else (any(art_dir.glob("*.md")))
+                    has_pdf = meta.get("has_pdf") if "has_pdf" in meta else (any(art_dir.glob("*.pdf")))
                     new_item = {
                         "title": meta.get("title") or art_dir.name,
                         "link": link,
@@ -605,6 +735,8 @@ def _sync_history_from_disk(history: list) -> bool:
                         "cover_url": meta.get("cover_url", ""),
                         "digest": meta.get("digest", ""),
                         "publish_time": meta.get("publish_time") or int(time_val),
+                        "has_markdown": has_md,
+                        "has_pdf": has_pdf,
                     }
                     history.append(new_item)
                     existing_paths.add(art_path_str)
@@ -812,6 +944,8 @@ def _do_batch_download(task_id: str, articles: list, account_name: str):
                 "cover_url": result.get("cover_url", ""),
                 "digest": result.get("digest", ""),
                 "publish_time": result.get("publish_time", int(time.time())),
+                "has_markdown": result.get("has_markdown", False),
+                "has_pdf": result.get("has_pdf", False),
             })
 
             if i < len(articles) - 1:
@@ -829,14 +963,8 @@ def _do_batch_download(task_id: str, articles: list, account_name: str):
                 task["status"] = "completed"
             task["current"] = ""
             task["end_time"] = time.time()
-    finally:
-        try:
-            if settings.get("rss_upload_enabled", False):
-                from backend.rss_scheduler import rss_scheduler
-                rss_scheduler.force_upload_all(account_name)
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).error("下载完成后自动上传失败 [%s]: %s", account_name, e)
+    except Exception as e:
+        print(f"[_do_batch_download] 异常: {e}", flush=True)
 
 
 def _download_article_into_task(task_id: str, article: dict, account_name: str, history: list, index: int = 0):
@@ -903,6 +1031,8 @@ def _download_article_into_task(task_id: str, article: dict, account_name: str, 
         "cover_url": result.get("cover_url", ""),
         "digest": result.get("digest", ""),
         "publish_time": result.get("publish_time", int(time.time())),
+        "has_markdown": result.get("has_markdown", False),
+        "has_pdf": result.get("has_pdf", False),
     })
 
 
@@ -924,8 +1054,40 @@ def _do_range_download(
     stop = False
 
     try:
-        try:
-            while not stop:
+        while not stop:
+            with _download_lock:
+                task = _download_tasks.get(task_id, {})
+                if task.get("cancel_requested") or task.get("status") == "cancelling":
+                    task["status"] = "cancelled"
+                    task["current"] = ""
+                    task["end_time"] = time.time()
+                    task["stop_reason"] = task.get("stop_reason") or "用户请求停止"
+                    save_json(DOWNLOAD_HISTORY_FILE, history)
+                    return
+                task["current"] = f"正在获取第 {begin // page_size + 1} 页"
+
+            res = _fetch_articles_page(fakeid, begin, page_size, keyword, account_name=account_name)
+            articles, total_count = res[0], res[1]
+            if not articles:
+                stop = True
+                with _download_lock:
+                    _download_tasks[task_id]["stop_reason"] = "没有更多文章"
+                break
+
+            with _download_lock:
+                _download_tasks[task_id]["scanned"] += len(articles)
+
+            out_of_range_count = 0
+            for article in articles:
+                article_time = article.get("update_time") or 0
+                # update_time 为 0 表示时间未知，不做时间过滤（宁多勿漏）
+                if article_time > 0:
+                    if article_time > end_time:
+                        continue
+                    if article_time < start_time:
+                        out_of_range_count += 1
+                        continue
+
                 with _download_lock:
                     task = _download_tasks.get(task_id, {})
                     if task.get("cancel_requested") or task.get("status") == "cancelling":
@@ -935,91 +1097,51 @@ def _do_range_download(
                         task["stop_reason"] = task.get("stop_reason") or "用户请求停止"
                         save_json(DOWNLOAD_HISTORY_FILE, history)
                         return
-                    task["current"] = f"正在获取第 {begin // page_size + 1} 页"
+                    task["total"] += 1
 
-                articles, total_count = _fetch_articles_page(fakeid, begin, page_size, keyword)
-                if not articles:
-                    stop = True
-                    with _download_lock:
-                        _download_tasks[task_id]["stop_reason"] = "没有更多文章"
-                    break
+                _download_article_into_task(task_id, article, account_name, history, downloaded_index)
+                downloaded_index += 1
+                # 增加防风控随机抖动延迟 (1.2s - 2.5s) 模拟人类请求
+                import random
+                sleep_time = max(1.0, delay) + random.uniform(0.3, 1.2)
+                time.sleep(sleep_time)
 
+            # 当前页所有文章都早于 start_time，说明后续页也不会有范围内的文章了
+            if out_of_range_count > 0 and out_of_range_count >= len(articles):
+                stop = True
                 with _download_lock:
-                    _download_tasks[task_id]["scanned"] += len(articles)
+                    _download_tasks[task_id]["stop_reason"] = "已到达所选时间范围之前的文章"
 
-                out_of_range_count = 0
-                for article in articles:
-                    article_time = article.get("update_time") or 0
-                    # update_time 为 0 表示时间未知，不做时间过滤（宁多勿漏）
-                    if article_time > 0:
-                        if article_time > end_time:
-                            continue
-                        if article_time < start_time:
-                            out_of_range_count += 1
-                            continue
+            begin += page_size
+            if total_count and begin >= total_count:
+                with _download_lock:
+                    _download_tasks[task_id]["stop_reason"] = "已扫描全部文章"
+                break
 
-                    with _download_lock:
-                        task = _download_tasks.get(task_id, {})
-                        if task.get("cancel_requested") or task.get("status") == "cancelling":
-                            task["status"] = "cancelled"
-                            task["current"] = ""
-                            task["end_time"] = time.time()
-                            task["stop_reason"] = task.get("stop_reason") or "用户请求停止"
-                            save_json(DOWNLOAD_HISTORY_FILE, history)
-                            return
-                        task["total"] += 1
+        save_json(DOWNLOAD_HISTORY_FILE, history)
+        with _download_lock:
+            task = _download_tasks[task_id]
+            if task["status"] not in ("cancelled",):
+                task["status"] = "completed"
+            task["current"] = ""
+            task["end_time"] = time.time()
 
-                    _download_article_into_task(task_id, article, account_name, history, downloaded_index)
-                    downloaded_index += 1
-                    # 增加防风控随机抖动延迟 (1.2s - 2.5s) 模拟人类请求
-                    import random
-                    sleep_time = max(1.0, delay) + random.uniform(0.3, 1.2)
-                    time.sleep(sleep_time)
-
-                # 当前页所有文章都早于 start_time，说明后续页也不会有范围内的文章了
-                if out_of_range_count > 0 and out_of_range_count >= len(articles):
-                    stop = True
-                    with _download_lock:
-                        _download_tasks[task_id]["stop_reason"] = "已到达所选时间范围之前的文章"
-
-                begin += page_size
-                if total_count and begin >= total_count:
-                    with _download_lock:
-                        _download_tasks[task_id]["stop_reason"] = "已扫描全部文章"
-                    break
-
-            save_json(DOWNLOAD_HISTORY_FILE, history)
-            with _download_lock:
-                task = _download_tasks[task_id]
-                if task["status"] not in ("cancelled",):
-                    task["status"] = "completed"
-                task["current"] = ""
-                task["end_time"] = time.time()
-
-        except PermissionError as e:
-            save_json(DOWNLOAD_HISTORY_FILE, history)
-            with _download_lock:
-                task = _download_tasks[task_id]
-                task["status"] = "failed"
-                task["current"] = ""
-                task["stop_reason"] = str(e)
-                task["end_time"] = time.time()
-        except Exception as e:
-            save_json(DOWNLOAD_HISTORY_FILE, history)
-            with _download_lock:
-                task = _download_tasks[task_id]
-                task["status"] = "failed"
-                task["current"] = ""
-                task["stop_reason"] = str(e)
-                task["end_time"] = time.time()
-    finally:
-        try:
-            if settings.get("rss_upload_enabled", False):
-                from backend.rss_scheduler import rss_scheduler
-                rss_scheduler.force_upload_all(account_name)
-        except Exception as e:
-            import logging
-            logging.getLogger(__name__).error("下载完成后自动上传失败 [%s]: %s", account_name, e)
+    except PermissionError as e:
+        save_json(DOWNLOAD_HISTORY_FILE, history)
+        with _download_lock:
+            task = _download_tasks[task_id]
+            task["status"] = "failed"
+            task["current"] = ""
+            task["stop_reason"] = str(e)
+            task["end_time"] = time.time()
+    except Exception as e:
+        save_json(DOWNLOAD_HISTORY_FILE, history)
+        with _download_lock:
+            task = _download_tasks[task_id]
+            task["status"] = "failed"
+            task["current"] = ""
+            task["stop_reason"] = str(e)
+            task["end_time"] = time.time()
 
 
 @articles_bp.route("/open-folder", methods=["POST"])
@@ -1054,12 +1176,13 @@ def open_folder():
 
 @articles_bp.route("/open-file", methods=["POST"])
 def open_file():
-    """在系统默认程序中打开特定的文件或文件夹"""
+    """在系统默认程序中打开特定的文件或文件夹，支持按类型定位 pdf/md"""
     import subprocess
     import sys
 
     data = request.get_json() or {}
     path_str = data.get("path", "")
+    target_type = (data.get("type", "") or "").lower().strip()
     if not path_str:
         return jsonify({"error": "路径不能为空"}), 400
 
@@ -1068,7 +1191,22 @@ def open_file():
         if not path.exists():
             return jsonify({"error": "文件或文件夹不存在"}), 404
 
-        resolved_path = str(path.resolve())
+        resolved_target = path
+        if path.is_dir() and target_type:
+            if target_type == "pdf":
+                pdfs = list(path.glob("*.pdf"))
+                if pdfs:
+                    resolved_target = pdfs[0]
+                else:
+                    return jsonify({"error": "未找到 PDF 文件"}), 404
+            elif target_type in ("md", "markdown"):
+                mds = list(path.glob("*.md"))
+                if mds:
+                    resolved_target = mds[0]
+                else:
+                    return jsonify({"error": "未找到 Markdown 文件"}), 404
+
+        resolved_path = str(resolved_target.resolve())
         if sys.platform == "darwin":
             subprocess.run(["open", resolved_path])
         elif sys.platform == "win32":

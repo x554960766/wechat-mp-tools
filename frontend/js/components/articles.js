@@ -6,9 +6,11 @@ const ArticlesPage = {
     currentName: '',
     articles: [],
     selectedArticles: new Set(),
+    pageCache: {},
+    loadedArticlesMap: new Map(),
     selectionMode: 'single',
     currentPage: 0,
-    pageSize: 10,
+    pageSize: 20,
     total: 0,
     keyword: '',
     downloadTaskId: null,
@@ -46,7 +48,6 @@ const ArticlesPage = {
                         </div>
                         <button class="btn btn-secondary btn-sm" onclick="ArticlesPage.searchArticles()">搜索</button>
                         <button class="btn btn-secondary btn-sm" onclick="ArticlesPage.clearSearch()">清除</button>
-                        <button class="btn btn-secondary btn-sm" onclick="ArticlesPage.loadArticles()" title="重新加载文章列表">🔄 刷新</button>
                         <div class="article-mode-switch">
                             <button class="btn btn-primary btn-sm" id="btn-mode-single" onclick="ArticlesPage.setSelectionMode('single')">单篇</button>
                             <button class="btn btn-secondary btn-sm" id="btn-mode-multi" onclick="ArticlesPage.setSelectionMode('multi')">多选</button>
@@ -59,9 +60,19 @@ const ArticlesPage = {
                         <input type="date" class="form-input" id="article-end-date">
                         <button class="btn btn-primary btn-sm" onclick="ArticlesPage.downloadDateRange()">按时间下载</button>
                         <button class="btn btn-secondary btn-sm" onclick="ArticlesPage.clearDateFilter()">重置</button>
-                        <button class="btn btn-primary btn-sm" id="btn-download-selected" onclick="ArticlesPage.downloadSelected()" style="display: none;" disabled>
-                            下载选中 (<span id="selected-count">0</span>)
-                        </button>
+                        
+                        <!-- 多选操作控制按钮组 -->
+                        <div id="multi-select-actions" style="display: none; align-items: center; gap: 8px; margin-left: auto;">
+                            <button class="btn btn-secondary btn-sm" onclick="ArticlesPage.selectAllLoaded()" title="全选所有已翻页加载的文章">
+                                ☑️ 全选已加载 (<span id="loaded-total-count">0</span>)
+                            </button>
+                            <button class="btn btn-secondary btn-sm" onclick="ArticlesPage.clearSelection()">
+                                ❌ 取消全选
+                            </button>
+                            <button class="btn btn-primary btn-sm" id="btn-download-selected" onclick="ArticlesPage.downloadSelected()" disabled>
+                                📥 下载选中 (<span id="selected-count">0</span>)
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -160,6 +171,8 @@ const ArticlesPage = {
         this.currentName = name;
         this.currentPage = 0;
         this.selectedArticles.clear();
+        this.pageCache = {};
+        this.loadedArticlesMap.clear();
         this.selectionMode = 'single';
         this.keyword = '';
 
@@ -185,6 +198,19 @@ const ArticlesPage = {
 
     async loadArticles() {
         const container = document.getElementById('articles-list');
+
+        // ⚡ 1. 内存缓存检查：已加载过的数据直接调取，无需重复请求接口
+        if (this.pageCache[this.currentPage]) {
+            const cached = this.pageCache[this.currentPage];
+            this.articles = cached.articles;
+            this.total = cached.total;
+            this.canMsgContinue = cached.canMsgContinue;
+            this.renderArticles();
+            this.updatePagination();
+            this.updateSelectedCount();
+            return;
+        }
+
         container.innerHTML = '<div class="loading-screen" style="min-height: 200px;"><div class="spinner"></div><p>加载文章列表...</p></div>';
 
         try {
@@ -193,17 +219,61 @@ const ArticlesPage = {
 
             this.articles = data.articles || [];
             this.total = data.total || 0;
+            this.canMsgContinue = data.can_msg_continue !== undefined ? data.can_msg_continue : (this.articles.length > 0 ? 1 : 0);
+
+            // 写入页码缓存
+            this.pageCache[this.currentPage] = {
+                articles: this.articles,
+                total: this.total,
+                canMsgContinue: this.canMsgContinue
+            };
+
+            // 索引到已加载列表映射，供跨页多选与全选使用
+            this.articles.forEach((article, idx) => {
+                const globalIdx = this.currentPage * this.pageSize + idx;
+                this.loadedArticlesMap.set(globalIdx, article);
+            });
 
             this.renderArticles();
             this.updatePagination();
+            this.updateSelectedCount();
         } catch (err) {
+            const isAuthError = err.message && (err.message.includes('失效') || err.message.includes('未找到有效凭证') || err.message.includes('ret=-3') || err.message.includes('401') || err.message.includes('过期') || err.message.includes('会话'));
+            const accountName = this.currentAccount ? (this.currentAccount.nickname || '') : '';
             container.innerHTML = `
-                <div class="empty-state">
-                    <h3 class="empty-state-title" style="color: var(--error);">加载失败</h3>
-                    <p class="empty-state-desc">${err.message || '网络请求异常'}</p>
-                    <button class="btn btn-primary btn-sm" style="margin-top: 12px;" onclick="ArticlesPage.loadArticles()">🔄 重试</button>
+                <div class="empty-state" style="padding: 40px 20px;">
+                    <div style="font-size: 2.5rem; margin-bottom: 12px;">${isAuthError ? '🔐' : '⚠️'}</div>
+                    <h3 class="empty-state-title" style="margin-bottom: 8px;">${isAuthError ? (accountName ? `【${accountName}】尚未建立阅读会话` : '微信采集凭证已过期') : '加载文章列表失败'}</h3>
+                    <p class="empty-state-desc" style="max-width: 540px; margin: 0 auto 20px; line-height: 1.6; color: var(--text-secondary, #666);">
+                        ${isAuthError ? `微信 PC 客户端要求每个公众号首次抓取前建立独立阅读 Session（需打开公众号『主页』，仅点开文章不够）。<br>👉 <strong>方法 1</strong>：点击下方按钮，由系统自动在电脑微信中打开该号主页；<br>👉 <strong>方法 2</strong>：在电脑微信中进入该公众号任一文章 → 点击文章顶部的<strong>公众号名称/头像</strong>进入主页（出现历史文章列表即成功）。` : (err.message || '网络连接超时')}
+                    </p>
+                    <div style="display: flex; justify-content: center; gap: 10px; flex-wrap: wrap;">
+                        ${accountName ? `<button class="btn btn-primary" onclick="ArticlesPage.syncTargetAccount('${accountName}')">🤖 自动为【${accountName}】同步凭证</button>` : ''}
+                        <button class="btn btn-secondary" onclick="ArticlesPage.loadArticles()">🔄 重新检测并加载</button>
+                    </div>
                 </div>
             `;
+        }
+    },
+
+    async syncTargetAccount(accountName) {
+        if (!accountName) return;
+        Toast.info(`正在尝试为【${accountName}】自动在微信中打开文章，请稍候...`);
+        try {
+            const resp = await fetch('/api/accounts/sync-pc-wechat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ keyword: accountName })
+            });
+            const data = await resp.json();
+            if (data.success) {
+                Toast.success(`【${accountName}】文章已定位，正在重新拉取列表...`);
+                setTimeout(() => this.loadArticles(), 2500);
+            } else {
+                Toast.warning(`自动化指令已发送，若未成功请手动在微信点开一篇文章后点击重试。`);
+            }
+        } catch (e) {
+            Toast.error(`触发自动同步失败: ${e.message}`);
         }
     },
 
@@ -220,7 +290,7 @@ const ArticlesPage = {
     updateModeUI() {
         const singleBtn = document.getElementById('btn-mode-single');
         const multiBtn = document.getElementById('btn-mode-multi');
-        const downloadSelectedBtn = document.getElementById('btn-download-selected');
+        const multiActions = document.getElementById('multi-select-actions');
         if (singleBtn) {
             singleBtn.classList.toggle('btn-primary', this.selectionMode === 'single');
             singleBtn.classList.toggle('btn-secondary', this.selectionMode !== 'single');
@@ -229,8 +299,8 @@ const ArticlesPage = {
             multiBtn.classList.toggle('btn-primary', this.selectionMode === 'multi');
             multiBtn.classList.toggle('btn-secondary', this.selectionMode !== 'multi');
         }
-        if (downloadSelectedBtn) {
-            downloadSelectedBtn.style.display = this.selectionMode === 'multi' ? 'inline-flex' : 'none';
+        if (multiActions) {
+            multiActions.style.display = this.selectionMode === 'multi' ? 'flex' : 'none';
         }
     },
 
@@ -241,8 +311,7 @@ const ArticlesPage = {
             container.innerHTML = `
                 <div class="empty-state">
                     <h3 class="empty-state-title">没有找到文章</h3>
-                    <p class="empty-state-desc">${this.keyword ? '尝试其他搜索关键字' : '该公众号暂无文章或中转服务未缓存'}</p>
-                    <button class="btn btn-primary btn-sm" style="margin-top: 12px;" onclick="ArticlesPage.loadArticles()">🔄 重新加载 / 重试</button>
+                    <p class="empty-state-desc">${this.keyword ? '尝试其他搜索关键字' : '该公众号暂无文章'}</p>
                 </div>
             `;
             return;
@@ -268,7 +337,15 @@ const ArticlesPage = {
                         : ''
                     }
                     <div class="article-info">
-                        <div class="article-title">${article.title || '无标题'}</div>
+                        <div class="article-title">
+                            <a href="${article.link || '#'}" target="_blank" rel="noopener noreferrer"
+                               style="color: var(--text-primary); text-decoration: none; font-weight: 600; transition: color 0.2s;"
+                               onmouseenter="this.style.color='var(--primary)';this.style.textDecoration='underline'"
+                               onmouseleave="this.style.color='var(--text-primary)';this.style.textDecoration='none'"
+                               onclick="event.stopPropagation()">
+                                ${article.title || '无标题'} ↗
+                            </a>
+                        </div>
                         ${article.digest ? `<div class="article-digest">${article.digest}</div>` : ''}
                         <div class="article-meta">
                             ${time ? `<span>📅 ${time}</span>` : ''}
@@ -276,7 +353,12 @@ const ArticlesPage = {
                             ${article.is_original ? '<span class="badge badge-info" style="font-size: 0.7rem;">原创</span>' : ''}
                         </div>
                     </div>
-                    <div class="article-actions">
+                    <div class="article-actions" style="display: flex; gap: 8px; align-items: center;">
+                        ${article.link ? `
+                            <a class="btn btn-secondary btn-sm" href="${article.link}" target="_blank" rel="noopener noreferrer" onclick="event.stopPropagation()" style="font-size: 0.8rem; padding: 4px 10px; display: inline-flex; align-items: center; gap: 4px;">
+                                🌐 打开原文
+                            </a>
+                        ` : ''}
                         <button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); ArticlesPage.downloadSingle(${idx})">下载</button>
                     </div>
                 </div>
@@ -327,15 +409,40 @@ const ArticlesPage = {
 
     updateSelectedCount() {
         const countEl = document.getElementById('selected-count');
+        const loadedTotalEl = document.getElementById('loaded-total-count');
         const btn = document.getElementById('btn-download-selected');
         if (countEl) countEl.textContent = this.selectedArticles.size;
+        if (loadedTotalEl) loadedTotalEl.textContent = this.loadedArticlesMap.size;
         if (btn) btn.disabled = this.selectedArticles.size === 0;
+    },
+
+    selectAllLoaded() {
+        if (this.loadedArticlesMap.size === 0) {
+            Toast.warning('当前暂无已加载的文章');
+            return;
+        }
+        this.loadedArticlesMap.forEach((article, globalIdx) => {
+            this.selectedArticles.add(globalIdx);
+        });
+        this.renderArticles();
+        this.updateSelectedCount();
+        Toast.success(`已选中所有已加载的 ${this.selectedArticles.size} 篇文章`);
+    },
+
+    clearSelection() {
+        this.selectedArticles.clear();
+        this.renderArticles();
+        this.updateSelectedCount();
+        Toast.info('已取消选择');
     },
 
     searchArticles() {
         const input = document.getElementById('search-article-input');
         this.keyword = input?.value.trim() || '';
         this.currentPage = 0;
+        this.selectedArticles.clear();
+        this.pageCache = {};
+        this.loadedArticlesMap.clear();
         this.loadArticles();
     },
 
@@ -347,6 +454,9 @@ const ArticlesPage = {
         if (startDateEl) startDateEl.value = '';
         if (endDateEl) endDateEl.value = '';
         this.currentPage = 0;
+        this.selectedArticles.clear();
+        this.pageCache = {};
+        this.loadedArticlesMap.clear();
         this.loadArticles();
     },
 
@@ -377,20 +487,13 @@ const ArticlesPage = {
         const prevBtn = document.getElementById('btn-prev-page');
         const nextBtn = document.getElementById('btn-next-page');
 
-        const totalPages = Math.ceil(this.total / this.pageSize) || 1;
         const currentPageNum = this.currentPage + 1;
+        const hasNext = (this.canMsgContinue === 1 || this.canMsgContinue === undefined) && this.articles.length > 0;
 
-        if (this.total > this.pageSize) {
-            paginationEl.style.display = 'flex';
-            infoEl.textContent = `第 ${currentPageNum} / ${totalPages} 页 · 共 ${this.total} 篇`;
-            prevBtn.disabled = this.currentPage <= 0;
-            nextBtn.disabled = currentPageNum >= totalPages;
-        } else {
-            paginationEl.style.display = this.total > 0 ? 'flex' : 'none';
-            infoEl.textContent = `共 ${this.total} 篇`;
-            prevBtn.disabled = true;
-            nextBtn.disabled = true;
-        }
+        paginationEl.style.display = (this.articles.length > 0 || this.currentPage > 0) ? 'flex' : 'none';
+        infoEl.textContent = `第 ${currentPageNum} 页 · 本页 ${this.articles.length} 篇`;
+        prevBtn.disabled = this.currentPage <= 0;
+        nextBtn.disabled = !hasNext;
     },
 
     prevPage() {
@@ -401,8 +504,7 @@ const ArticlesPage = {
     },
 
     nextPage() {
-        const totalPages = Math.ceil(this.total / this.pageSize);
-        if (this.currentPage + 1 < totalPages) {
+        if (this.articles.length > 0) {
             this.currentPage++;
             this.loadArticles();
         }
@@ -432,9 +534,9 @@ const ArticlesPage = {
 
     async downloadSelected() {
         const selectedList = [];
-        this.articles.forEach((article, localIdx) => {
-            const globalIdx = this.currentPage * this.pageSize + localIdx;
-            if (this.selectedArticles.has(globalIdx)) {
+        this.selectedArticles.forEach(globalIdx => {
+            const article = this.loadedArticlesMap.get(globalIdx);
+            if (article && article.link) {
                 selectedList.push({ title: article.title, link: article.link });
             }
         });

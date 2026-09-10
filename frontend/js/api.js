@@ -71,15 +71,13 @@ const API = {
 
     // ── Account Pool API ─────────────────────────────
     accountPool: {
-        list()         { return API.get('/api/account-pool'); },
-        summary()      { return API.get('/api/account-pool/summary', { showError: false }); },
-        remove(id)     { return API.delete(`/api/account-pool/${id}`); },
-        update(id, data) { return API.put(`/api/account-pool/${id}`, data); },
-        verify(id)     { return API.post(`/api/account-pool/${id}/verify`); },
-        browserRefresh(id) { return API.post(`/api/account-pool/${id}/browser-refresh`); },
-        verifyAll()    { return API.post('/api/account-pool/verify-all'); },
-        revive(id)     { return API.post(`/api/account-pool/${id}/revive`); },
-        events()       { return API.get('/api/account-pool/events', { showError: false }); },
+        list()                     { return API.get('/api/account-pool'); },
+        summary()                  { return API.get('/api/account-pool/summary', { showError: false }); },
+        remove(id)                 { return API.delete(`/api/account-pool/${id}`); },
+        events()                   { return API.get('/api/account-pool/events', { showError: false }); },
+        getAutoRefreshConfig()     { return API.get('/api/account-pool/auto-refresh-config', { showError: false }); },
+        toggleAutoRefresh(enabled) { return API.post('/api/account-pool/auto-refresh-toggle', { enabled }); },
+        syncManual()               { return API.post('/api/account-pool/sync-manual'); },
     },
 
     // ── Accounts API ─────────────────────────────────
@@ -135,7 +133,7 @@ const API = {
             return API.delete(`/api/articles/history/${index}`);
         },
         openFolder(account = '') { return API.post('/api/articles/open-folder', { account }); },
-        openFile(path) { return API.post('/api/articles/open-file', { path }); },
+        openFile(path, type = null) { return API.post('/api/articles/open-file', { path, type }); },
         openParent(path) { return API.post('/api/articles/open-parent', { path }); },
     },
 

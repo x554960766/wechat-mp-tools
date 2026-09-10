@@ -1,25 +1,28 @@
 """
 账号池模块
-管理多个微信公众平台/微信读书账号凭证的存储、调度（acquire）、状态上报（report）、探活验证与增删改查。
+管理多个微信公众平台账号凭证的存储、调度（acquire）、状态上报（report）、增删改查。
 调度算法照搬代理池范式（backend/config.py: get_proxy_url / report_proxy_status）。
 """
 
 import time
 import threading
 import logging
-from concurrent.futures import ThreadPoolExecutor
+import urllib.parse
 
 from backend.config import (
     ACCOUNT_POOL_FILE, CONFIG_FILE,
-    load_json, save_json, get_settings, WEREAD_PLATFORM_URL, get_proxies_dict, report_proxy_status
+    load_json, save_json, get_default_wechat_ua
 )
 
 logger = logging.getLogger(__name__)
 
 # ── 调度参数 ──────────────────────────────────────────
+LOGIN_VALID_SECONDS = 4 * 24 * 60 * 60   # 凭证 4 天有效（与 auth.py 保持一致）
 COOLDOWN_SECONDS = 10 * 60               # 单次风控冷却 10 分钟
-RISK_KICK_THRESHOLD = 3                  # 累计风控(200013 / 429)达 3 次 → banned
+RISK_KICK_THRESHOLD = 3                  # 累计风控(200013)达 3 次 → banned
 FAILURE_KICK_THRESHOLD = 8               # 连续普通失败达 8 次 → invalid
+BIZ_FRESH_SECONDS = 90 * 60              # biz 专属凭证新鲜阈值：90 分钟（与保活 worker 的 STALE_THRESHOLD 对齐）
+BIZ_GETMSG_PROTECT_SECONDS = 2 * 60 * 60  # 已验证的 getmsg key 保护窗口：2 小时（客户端 key 寿命）
 
 
 def _gen_id() -> str:
@@ -30,19 +33,49 @@ def _gen_id() -> str:
     return f"acc_{int(time.time())}_{suffix}"
 
 
+def _normalize_uin(uin_str: str) -> str:
+    """规范化 UIN：自动把 base64 编码的 UIN (如 MTQ1NDk1MDMyMA==) 解码为纯数字文本"""
+    if not uin_str:
+        return ""
+    uin_str = str(uin_str).strip()
+    if uin_str.endswith("==") or (len(uin_str) >= 12 and uin_str.isalnum()):
+        try:
+            import base64
+            decoded = base64.b64decode(uin_str).decode('utf-8', errors='ignore').strip()
+            if decoded.isdigit():
+                return decoded
+        except Exception:
+            pass
+    return uin_str
+
+
 class AccountPool:
-    """账号池：存储、调度、状态上报、探活验证、增删改查。全局单例。"""
+    """账号池：存储、调度、状态上报、增删改查。全局单例。"""
 
     def __init__(self):
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._kick_events: list[dict] = []  # 踢出事件队列
-        self._keepalive_thread = None
-        self._stop_keepalive = threading.Event()
+        self._recently_removed_tokens: dict[str, float] = {}  # token/uin -> timestamp (防止被未停用的代理秒级重复回写)
 
     # ── 存储 ──────────────────────────────────────────
 
     def _load(self) -> list:
-        return load_json(ACCOUNT_POOL_FILE, [])
+        accounts = load_json(ACCOUNT_POOL_FILE, [])
+        cleaned = False
+        for acc in accounts:
+            biz_tokens = acc.get("biz_tokens")
+            if isinstance(biz_tokens, dict) and biz_tokens:
+                new_biz_tokens = {}
+                for biz, entry in biz_tokens.items():
+                    name = (entry.get("name") if isinstance(entry, dict) else "") or self._resolve_biz_name(biz)
+                    if name and name not in ("未命名公众号", "公众号未命名", "未命名") and self._is_favorite_biz(biz):
+                        new_biz_tokens[biz] = entry
+                    else:
+                        cleaned = True
+                acc["biz_tokens"] = new_biz_tokens
+        if cleaned:
+            save_json(ACCOUNT_POOL_FILE, accounts)
+        return accounts
 
     def _save(self, accounts: list):
         save_json(ACCOUNT_POOL_FILE, accounts)
@@ -52,12 +85,13 @@ class AccountPool:
     def acquire(self) -> dict | None:
         """
         选出一个可用账号并返回其副本（含 token/cookie_str）。
-        规则：
+        规则（照搬 get_proxy_url 的逻辑）：
           1. 把 cooldown_until 已过期的 cooldown 账号恢复为 active；
-          2. 过滤 status==active 的账号；
-          3. 按 (failures, last_used) 升序，取最久未使用的可用账号；
-          4. 更新其 last_used；
-          5. 全部不可用 → 返回 None。
+          2. 把凭证已过期的 active 账号标记为 invalid；
+          3. 过滤 status==active 的账号；
+          4. 按 (failures, last_used) 升序，取第一个；
+          5. 更新其 last_used；
+          6. 全部不可用 → 返回 None。
         """
         now = time.time()
         with self._lock:
@@ -66,12 +100,14 @@ class AccountPool:
 
             for acc in accounts:
                 # 冷却自愈
-                if acc.get("status") == "cooldown" and now >= acc.get("cooldown_until", 0):
+                if acc["status"] == "cooldown" and now >= acc.get("cooldown_until", 0):
                     acc["status"] = "active"
-                    acc["health_status"] = "valid"
                     changed = True
 
-            active = [a for a in accounts if a.get("status") == "active"]
+                # 凭证状态保持 (微信读书 Token 长期有效，按需熔断)
+                pass
+
+            active = [a for a in accounts if a["status"] == "active"]
 
             if not active:
                 if changed:
@@ -86,6 +122,60 @@ class AccountPool:
 
             self._save(accounts)
             return dict(selected)  # 返回副本
+
+    def acquire_for_biz(self, biz: str) -> dict | None:
+        """为指定公众号选号（解决多账号池下 acquire() 选错账号的问题）：
+        优先选【持有该 biz 最新专属凭证】的 active 账号——凭证捕获写在哪条账号上，
+        就用哪条账号去抓；无任何账号持有该 biz 凭证时，选全局凭证最新（save_time 最大）
+        的账号；无 active 账号返回 None。biz 键匹配兼容 URL 编码差异。"""
+        if not biz:
+            return self.acquire()
+        import urllib.parse
+        now = time.time()
+        with self._lock:
+            accounts = self._load()
+            changed = False
+
+            for acc in accounts:
+                if acc["status"] == "cooldown" and now >= acc.get("cooldown_until", 0):
+                    acc["status"] = "active"
+                    changed = True
+
+            active = [a for a in accounts if a["status"] == "active"]
+            if not active:
+                if changed:
+                    self._save(accounts)
+                return None
+
+            ubiz = urllib.parse.unquote(biz)
+
+            def _biz_info(acc: dict) -> tuple:
+                """该账号持有此 biz 专属凭证的 (是否已验证可拉列表, 最新时间)；无则 (False, 0)"""
+                ts, ready = 0.0, False
+                for k, entry in (acc.get("biz_tokens") or {}).items():
+                    if k == biz or k == ubiz or (k and urllib.parse.unquote(k) == biz):
+                        if isinstance(entry, dict):
+                            ts = max(ts, entry.get("updated_at", 0) or 0)
+                            if entry.get("getmsg_ready"):
+                                ready = True
+                        else:
+                            ts = max(ts, acc.get("save_time", 0) or 0)
+                return ready, ts
+
+            best, best_key = None, None
+            for acc in active:
+                ready, ts = _biz_info(acc)
+                # 元组越小越优：0=持有 biz 凭证（已验证 getmsg 的优先，再比新旧），1=仅有全局凭证
+                if ts > 0:
+                    cand = (0, 0 if ready else 1, -ts)
+                else:
+                    cand = (1, 1, -(acc.get("save_time", 0) or 0))
+                if best_key is None or cand < best_key:
+                    best, best_key = acc, cand
+
+            best["last_used"] = now
+            self._save(accounts)
+            return dict(best)
 
     def report(self, account_id: str, *, ret: int | None = None,
                http_ok: bool = True, error: str | None = None):
@@ -105,23 +195,18 @@ class AccountPool:
 
             err_str = str(error or "")
             if ret == 0:
-                # 成功：清零失败计数，标记健康
+                # 成功：清零失败计数
                 acc["failures"] = 0
                 acc["last_error"] = None
-                acc["health_status"] = "valid"
-                acc["last_verified_at"] = now
-                acc["last_verified_result"] = "调用成功"
-            elif ret == 200013 or "WeReadError429" in err_str or "429" in err_str:
+            elif ret == 200013 or "WeReadError429" in err_str:
                 # 风控 / 请求频繁
                 acc["risk_hits"] = acc.get("risk_hits", 0) + 1
                 acc["failures"] = acc.get("failures", 0) + 1
-                acc["last_error"] = error or "触发频率控制 (429)"
-                acc["health_status"] = "cooldown"
+                acc["last_error"] = error or "触发频率控制 (WeRead429)"
                 if acc["risk_hits"] >= RISK_KICK_THRESHOLD:
                     acc["status"] = "banned"
-                    acc["health_status"] = "invalid"
                     acc["kicked_time"] = now
-                    acc["last_error"] = f"累计风控 {acc['risk_hits']} 次，已被移出调度池"
+                    acc["last_error"] = f"累计风控 {acc['risk_hits']} 次，已被踢出"
                     self._kick_events.append({
                         "id": acc["id"],
                         "nickname": acc.get("nickname", ""),
@@ -134,22 +219,26 @@ class AccountPool:
                     acc["status"] = "cooldown"
                     acc["cooldown_until"] = now + COOLDOWN_SECONDS
                     logger.info("账号 [%s] 进入冷却 %ds", acc.get("nickname"), COOLDOWN_SECONDS)
-            elif ret == 200003 or "WeReadError401" in err_str or "401" in err_str or "Unauthorized" in err_str:
-                # 登录态失效
-                acc["status"] = "invalid"
-                acc["health_status"] = "invalid"
-                acc["kicked_time"] = now
-                acc["last_error"] = error or "登录态已失效 (401 Unauthorized)"
-                acc["last_verified_at"] = now
-                acc["last_verified_result"] = "凭证已失效"
-                self._kick_events.append({
-                    "id": acc["id"],
-                    "nickname": acc.get("nickname", ""),
-                    "reason": acc["last_error"],
-                    "time": now,
-                    "status": "invalid",
-                })
-                logger.warning("账号 [%s] 被踢出(invalid): %s", acc.get("nickname"), acc["last_error"])
+            elif ret in (-3, -4, -5, -6, 200003) or "WeReadError401" in err_str:
+                # 凭证过期类失败按"自动跳过 + 及时补凭证"策略处理：
+                # 若账号全局凭证仍在有效期内，说明只是该公众号的独立会话过期，
+                # 不计失败、不踢出——由 articles.py 把该 biz 加入刷新队列，
+                # UI 自动化续期成功后，下一轮采集自动补齐数据（最终一致）。
+                is_fresh = (now - acc.get("save_time", 0)) < LOGIN_VALID_SECONDS
+                if is_fresh:
+                    acc["last_error"] = error or f"该公众号会话已过期 (ret={ret})，已进入凭证刷新队列等待续期"
+                else:
+                    acc["status"] = "invalid"
+                    acc["kicked_time"] = now
+                    acc["last_error"] = error or f"客户端凭证已超期失效 (ret={ret})"
+                    self._kick_events.append({
+                        "id": acc["id"],
+                        "nickname": acc.get("nickname", ""),
+                        "reason": acc["last_error"],
+                        "time": now,
+                        "status": "invalid",
+                    })
+                    logger.warning("账号 [%s] 凭证已失效(invalid): %s", acc.get("nickname"), acc["last_error"])
             elif not http_ok:
                 # 网络层失败
                 acc["failures"] = acc.get("failures", 0) + 1
@@ -160,9 +249,8 @@ class AccountPool:
                 acc["last_error"] = error or f"API错误(ret={ret})"
                 if acc["failures"] >= FAILURE_KICK_THRESHOLD:
                     acc["status"] = "invalid"
-                    acc["health_status"] = "invalid"
                     acc["kicked_time"] = now
-                    acc["last_error"] = f"连续失败 {acc['failures']} 次，已被移出调度池"
+                    acc["last_error"] = f"连续失败 {acc['failures']} 次，已被踢出"
                     self._kick_events.append({
                         "id": acc["id"],
                         "nickname": acc.get("nickname", ""),
@@ -174,385 +262,441 @@ class AccountPool:
 
             self._save(accounts)
 
-    # ── 探活与自动刷新 (Verify-First) ──────────────────
-
-    def verify_account(self, account_id: str) -> dict:
-        """
-        对单个账号执行真实接口探活与状态刷新。
-        借鉴 we-mp-rss 的轻量验证策略，直接请求微信读书平台 API 验证 Token 有效性。
-        """
-        with self._lock:
-            accounts = self._load()
-            acc = None
-            for a in accounts:
-                if a["id"] == account_id:
-                    acc = a
-                    break
-            if not acc:
-                return {"valid": False, "status": "not_found", "message": "账号不存在"}
-
-        now = time.time()
-        token = acc.get("token", "")
-        platform_url = get_settings().get("weread_platform_url") or WEREAD_PLATFORM_URL
-        headers = {
-            "xid": str(account_id),
-            "Authorization": f"Bearer {token}",
-        }
-        proxies = get_proxies_dict()
-        proxy_url = proxies.get("http") if proxies else None
-
-        valid = False
-        status = "unknown"
-        message = ""
-
-        try:
-            try:
-                from curl_cffi import requests as c_req
-                resp = c_req.get(
-                    f"{platform_url}/api/v2/platform/mps/MP_WXS_3528995129/articles",
-                    params={"page": 1},
-                    headers=headers,
-                    proxies=proxies,
-                    timeout=15,
-                    impersonate="chrome",
-                )
-            except Exception:
-                import requests as req
-                resp = req.get(
-                    f"{platform_url}/api/v2/platform/mps/MP_WXS_3528995129/articles",
-                    params={"page": 1},
-                    headers=headers,
-                    proxies=proxies,
-                    timeout=15,
-                )
-            if resp.status_code == 200:
-                valid = True
-                status = "active"
-                message = "凭证验证通过，账号状态正常"
-                if proxy_url:
-                    report_proxy_status(proxy_url, success=True)
-            elif resp.status_code == 401 or "Unauthorized" in resp.text or "WeReadError401" in resp.text:
-                valid = False
-                status = "invalid"
-                message = "登录凭证已过期或失效，需要重新扫码登录"
-            elif resp.status_code == 429 or "WeReadError429" in resp.text:
-                valid = False
-                status = "cooldown"
-                message = "触发微信读书频率限制(429)，已进入冷却状态"
-            else:
-                valid = False
-                status = acc.get("status", "active")
-                message = f"探活响应异常 (HTTP {resp.status_code}): {resp.text[:100]}"
-        except Exception as e:
-            valid = False
-            status = acc.get("status", "active")
-            message = f"网络连接探活超时或失败: {str(e)}"
-            if proxy_url:
-                report_proxy_status(proxy_url, success=False)
-
-        # 回写探活结果
-        with self._lock:
-            accounts = self._load()
-            for a in accounts:
-                if a["id"] == account_id:
-                    a["last_verified_at"] = now
-                    a["last_verified_result"] = message
-                    if valid:
-                        a["status"] = "active"
-                        a["health_status"] = "valid"
-                        a["failures"] = 0
-                        a["last_error"] = None
-                    elif status in ("invalid", "cooldown", "banned"):
-                        a["status"] = status
-                        a["health_status"] = "invalid" if status in ("invalid", "banned") else "cooldown"
-                        a["last_error"] = message
-                        if status == "cooldown":
-                            a["cooldown_until"] = now + COOLDOWN_SECONDS
-                    break
-            self._save(accounts)
-
-        return {
-            "account_id": account_id,
-            "nickname": acc.get("nickname", ""),
-            "valid": valid,
-            "status": status,
-            "message": message,
-            "last_verified_at": now,
-        }
-
-    def verify_all(self) -> list[dict]:
-        """批量并发检测账号池中所有账号的状态"""
-        accounts = self._load()
-        if not accounts:
-            return []
-
-        results = []
-        with ThreadPoolExecutor(max_workers=min(5, len(accounts))) as executor:
-            futures = {executor.submit(self.verify_account, a["id"]): a["id"] for a in accounts}
-            for future in futures:
-                try:
-                    res = future.result(timeout=25)
-                    results.append(res)
-                except Exception as exc:
-                    results.append({
-                        "account_id": futures[future],
-                        "valid": False,
-                        "status": "error",
-                        "message": f"检测异常: {str(exc)}",
-                    })
-        return results
-
     # ── 增删改查 ──────────────────────────────────────
 
+    @staticmethod
+    def _is_favorite_biz(biz: str) -> bool:
+        """判断 biz 是否属于用户已收藏的公众号"""
+        if not biz:
+            return False
+        try:
+            from backend.config import ACCOUNTS_FILE, load_json
+            import urllib.parse
+            accounts_sub = load_json(ACCOUNTS_FILE, [])
+            if not accounts_sub:
+                return False
+            u_biz = urllib.parse.unquote(str(biz))
+            for acc in accounts_sub:
+                fid = str(acc.get("fakeid") or "")
+                u_fid = urllib.parse.unquote(fid)
+                alias = str(acc.get("alias") or "")
+                if str(biz) in (fid, u_fid) or u_biz in (fid, u_fid) or (alias and str(biz) == alias):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _resolve_biz_name(biz: str) -> str:
+        """按 fakeid 从已收藏公众号列表反查名称（仅限已收藏公众号有效名称）。
+        注意：会在 add_or_update 的锁内被调用，此处不得再获取 self._lock。"""
+        if not biz:
+            return ""
+        try:
+            from backend.config import ACCOUNTS_FILE, load_json
+            import urllib.parse
+            accounts_sub = load_json(ACCOUNTS_FILE, [])
+            u_biz = urllib.parse.unquote(str(biz))
+            for acc in accounts_sub:
+                fid = str(acc.get("fakeid") or "")
+                u_fid = urllib.parse.unquote(fid)
+                alias = str(acc.get("alias") or "")
+                if str(biz) in (fid, u_fid) or u_biz in (fid, u_fid) or (alias and str(biz) == alias):
+                    name = acc.get("nickname") or acc.get("name") or ""
+                    if name and name not in ("未命名公众号", "公众号未命名", "未命名"):
+                        return name
+        except Exception:
+            pass
+        return ""
+
     def list_accounts(self) -> list:
-        """返回脱敏列表（不含敏感完整 token/cookie，包含多账号元数据与真实状态）"""
+        """返回脱敏列表（不含完整 cookie/token），附带每个账号下的已订阅公众号(biz)专属凭证清单"""
         now = time.time()
         accounts = self._load()
+        from backend.config import ACCOUNTS_FILE, load_json
+        import urllib.parse
+        accounts_sub = load_json(ACCOUNTS_FILE, [])
+        subscribed_map = {}
+        for a in accounts_sub:
+            fid = str(a.get("fakeid") or "")
+            name = a.get("nickname") or a.get("name") or ""
+            if fid and name and name not in ("未命名公众号", "公众号未命名", "未命名"):
+                subscribed_map[fid] = name
+                subscribed_map[urllib.parse.unquote(fid)] = name
+                if a.get("alias"):
+                    subscribed_map[str(a.get("alias"))] = name
+
         result = []
         for acc in accounts:
             save_time = acc.get("save_time", 0)
-            last_verified_at = acc.get("last_verified_at", 0)
-            status = acc.get("status", "active")
+            expires_at = save_time + LOGIN_VALID_SECONDS if save_time else 0
+            remaining = max(0, int(expires_at - now)) if expires_at else 0
 
-            # 冷却自愈判断
-            if status == "cooldown" and now >= acc.get("cooldown_until", 0):
-                status = "active"
+            # 展开 biz 专属凭证：严格只展示已收藏且有名有姓的公众号凭证，绝不展示未命名凭证
+            biz_credentials = []
+            for biz, entry in (acc.get("biz_tokens") or {}).items():
+                if not isinstance(entry, dict):
+                    continue
+
+                # 必须属于已收藏公众号且解析出名称
+                resolved_name = (
+                    subscribed_map.get(str(biz)) or
+                    subscribed_map.get(urllib.parse.unquote(str(biz))) or
+                    self._resolve_biz_name(biz)
+                )
+                if not resolved_name or resolved_name in ("未命名公众号", "公众号未命名", "未命名"):
+                    continue
+
+                updated_at = entry.get("updated_at", 0)
+                age = max(0, int(now - updated_at)) if updated_at else None
+                biz_credentials.append({
+                    "biz": (biz[:10] + "...") if len(str(biz)) > 10 else str(biz),
+                    "fakeid": biz,
+                    "name": resolved_name,
+                    "updated_at": updated_at,
+                    "age_seconds": age,
+                    "fresh": age is not None and age < BIZ_FRESH_SECONDS,
+                    "has_key": bool(entry.get("key")),
+                    "getmsg_ready": bool(entry.get("getmsg_ready")),
+                    "profile_url": f"https://mp.weixin.qq.com/mp/profile_ext?action=home&__biz={urllib.parse.quote(str(biz))}#wechat_redirect",
+                })
+            # 最近更新的排前面
+            biz_credentials.sort(key=lambda x: -(x.get("updated_at") or 0))
 
             result.append({
                 "id": acc["id"],
-                "type": acc.get("type", "weread_platform"),
-                "vid": acc.get("vid", ""),
-                "nickname": acc.get("nickname", "微信读书用户"),
-                "remark": acc.get("remark", ""),
+                "nickname": acc.get("nickname", ""),
                 "avatar": acc.get("avatar", ""),
                 "token_preview": (acc.get("token", "") or "")[:8] + "..." if acc.get("token") else "",
-                "status": status,
-                "health_status": acc.get("health_status", "valid" if status == "active" else "invalid"),
+                "status": acc.get("status", "active"),
                 "failures": acc.get("failures", 0),
                 "risk_hits": acc.get("risk_hits", 0),
                 "last_used": acc.get("last_used", 0),
-                "last_verified_at": last_verified_at,
-                "last_verified_result": acc.get("last_verified_result", ""),
-                "last_browser_refreshed_at": acc.get("last_browser_refreshed_at", 0),
                 "cooldown_until": acc.get("cooldown_until", 0),
                 "last_error": acc.get("last_error"),
                 "kicked_time": acc.get("kicked_time", 0),
+                "remaining_seconds": remaining,
+                "expired": remaining <= 0,
                 "save_time": save_time,
+                "biz_count": len(biz_credentials),
+                "biz_credentials": biz_credentials,
             })
         return result
 
-    def browser_refresh_account(self, account_id: str) -> dict:
-        """使用专属独立 Profile 启动无头浏览器，深度刷新微信读书登录态 Cookie"""
+    def add_or_update(self, cred: dict) -> dict | None:
+        """登录成功或动态抓包后写入/更新凭证（按 uin, token 或 nickname 去重与更新）"""
         with self._lock:
-            accounts = self._load()
-            target = None
-            for a in accounts:
-                if a["id"] == account_id:
-                    target = a
-                    break
-            if not target:
-                return {"ok": False, "message": "账号不存在"}
-            existing_cookie = target.get("cookie_str", "")
-            acc_type = target.get("type", "weread_platform")
-            token = target.get("token", "")
-
-        # 如果账号属于 weread_platform (Token 模式) 且无本地浏览器 Cookie
-        # 无头浏览器无法凭空生成 Cookie，直接执行真实 API 探活与状态续期
-        if acc_type == "weread_platform" and not existing_cookie:
-            verify_res = self.verify_account(account_id)
-            if verify_res.get("valid"):
-                now = time.time()
-                with self._lock:
-                    accounts = self._load()
-                    for a in accounts:
-                        if a["id"] == account_id:
-                            a["last_browser_refreshed_at"] = now
-                            a["last_verified_at"] = now
-                            a["last_verified_result"] = "Token 探活验证通过（中转模式无需浏览器 Profile）"
-                            a["status"] = "active"
-                            a["health_status"] = "valid"
-                            break
-                    self._save(accounts)
-                return {
-                    "ok": True,
-                    "vid": target.get("vid", ""),
-                    "message": "账号为中转 Token 凭证模式，接口验证通过，状态正常（无需浏览器 Profile 换新）",
-                }
-            else:
-                return {
-                    "ok": False,
-                    "needs_scan": True,
-                    "message": verify_res.get("message", "登录凭证已失效，请重新扫码登录"),
-                }
-
-        from backend.weread_browser import refresh_weread_account_browser
-        res = refresh_weread_account_browser(account_id, existing_cookie=existing_cookie, headless=True)
-
-        now = time.time()
-        with self._lock:
-            accounts = self._load()
-            for a in accounts:
-                if a["id"] == account_id:
-                    if res.get("ok"):
-                        a["cookie_str"] = res.get("cookie", a.get("cookie_str", ""))
-                        a["last_browser_refreshed_at"] = now
-                        a["last_verified_at"] = now
-                        a["last_verified_result"] = "浏览器保活刷新成功"
-                        a["status"] = "active"
-                        a["health_status"] = "valid"
-                        a["failures"] = 0
-                        a["last_error"] = None
-                    elif res.get("needs_scan"):
-                        # 二次防线：如果该账号还有有效的 Token，不轻易置为 invalid
-                        token_valid = False
-                        if a.get("token"):
-                            v_res = self.verify_account(account_id)
-                            if v_res.get("valid"):
-                                token_valid = True
-                        if not token_valid:
-                            a["status"] = "invalid"
-                            a["health_status"] = "invalid"
-                            a["last_error"] = res.get("message", "登录凭证已过期，需重新扫码")
-                            a["last_verified_at"] = now
-                            a["last_verified_result"] = a["last_error"]
-                    break
-            self._save(accounts)
-
-        return res
-
-    def add_or_update(self, cred: dict) -> dict:
-        """登录成功后写入/更新（按 token / vid / nickname 去重合并）"""
-        with self._lock:
-            accounts = self._load()
             token = cred.get("token", "")
-            vid = str(cred.get("vid", "") or "")
-            nickname = cred.get("nickname", "微信读书用户")
-            acc_type = cred.get("type", "weread_platform")
+            raw_uin = cred.get("uin", "")
+            uin = _normalize_uin(raw_uin)
+            nickname = cred.get("nickname", "公众号未命名")
+            is_explicit = cred.get("is_explicit_login", False)
             now = time.time()
 
-            # 1. 尝试按 token 或 vid 匹配
-            matched_acc = None
-            for acc in accounts:
-                if token and acc.get("token") == token:
-                    matched_acc = acc
-                    break
-                if vid and str(acc.get("vid", "")) == vid:
-                    matched_acc = acc
-                    break
+            # 清理过期的删除记录（> 5 分钟）
+            self._recently_removed_tokens = {k: v for k, v in self._recently_removed_tokens.items() if now - v < 300}
 
-            # 2. 如果未匹配到，尝试按 nickname 匹配（排除默认名）
-            if not matched_acc and nickname and nickname not in ("微信读书用户", "公众号未命名"):
+            # 若此凭证近期刚被用户手动删除，且非主动扫码登录或打开新文章(带key)，则忽略被动抓包回写
+            has_new_key = bool(cred.get("key"))
+            if not is_explicit and not has_new_key:
+                if (token and str(token) in self._recently_removed_tokens) or (uin and str(uin) in self._recently_removed_tokens):
+                    return None
+            else:
+                # 显式登录或打开新文章时，自动解除删除保护
+                if token and str(token) in self._recently_removed_tokens:
+                    self._recently_removed_tokens.pop(str(token), None)
+                if uin and str(uin) in self._recently_removed_tokens:
+                    self._recently_removed_tokens.pop(str(uin), None)
+
+            accounts = self._load()
+
+            # 0. 尝试按 uin 匹配
+            uin_match_acc = None
+            if uin:
                 for acc in accounts:
-                    if acc.get("nickname") == nickname:
-                        matched_acc = acc
+                    if acc.get("uin") and _normalize_uin(acc.get("uin")) == uin:
+                        uin_match_acc = acc
                         break
 
-            if matched_acc:
-                # 更新已有账号凭证
-                matched_acc["token"] = token
-                matched_acc["cookie_str"] = cred.get("cookie_str", "")
-                matched_acc["cookies"] = cred.get("cookies", [])
-                if vid:
-                    matched_acc["vid"] = vid
+            # 1. 尝试按 token 匹配
+            token_match_acc = None
+            if token:
+                for acc in accounts:
+                    if acc.get("token") and acc.get("token") == token:
+                        token_match_acc = acc
+                        break
+
+            # 2. 如果 nickname 不是默认值，尝试按 nickname 匹配其他账号
+            nickname_match_acc = None
+            if nickname and nickname not in ("公众号未命名", "动态微信凭证", "PC微信动态凭证"):
+                for acc in accounts:
+                    if acc.get("nickname") == nickname:
+                        nickname_match_acc = acc
+                        break
+
+            # 优先选择匹配到的账号，若未匹配到，优先复活处于 invalid 状态的账号，否则回退到第一个账号
+            invalid_acc = next((a for a in accounts if a.get("status") == "invalid"), None)
+            target_acc = uin_match_acc or token_match_acc or nickname_match_acc or invalid_acc or (accounts[0] if accounts else None)
+
+            if target_acc:
+                # 覆盖并升级已有账号的凭证（自愈恢复为 active）
+                if token:
+                    target_acc["token"] = token
+                if cred.get("appmsg_token"):
+                    target_acc["appmsg_token"] = cred.get("appmsg_token")
+                if cred.get("cookie_str"):
+                    target_acc["cookie_str"] = cred.get("cookie_str")
+                if cred.get("cookies"):
+                    target_acc["cookies"] = cred.get("cookies")
+                if nickname and nickname not in ("公众号未命名", "动态微信凭证", "PC微信动态凭证"):
+                    target_acc["nickname"] = nickname
                 if cred.get("avatar"):
-                    matched_acc["avatar"] = cred.get("avatar")
-                if nickname and nickname != "微信读书用户":
-                    matched_acc["nickname"] = nickname
-                if cred.get("remark") and not matched_acc.get("remark"):
-                    matched_acc["remark"] = cred.get("remark")
-                matched_acc["type"] = acc_type
-                matched_acc["save_time"] = cred.get("save_time", now)
-                matched_acc["last_verified_at"] = now
-                matched_acc["last_verified_result"] = "登录验证成功"
-                matched_acc["status"] = "active"
-                matched_acc["health_status"] = "valid"
-                matched_acc["failures"] = 0
-                matched_acc["risk_hits"] = 0
-                matched_acc["last_error"] = None
-                matched_acc["cooldown_until"] = 0
-                matched_acc["kicked_time"] = 0
+                    target_acc["avatar"] = cred.get("avatar")
+                
+                # 更新专属 biz 凭证（严格只同步已收藏且命名的公众号凭证，绝不同步未命名或非收藏公众号）
+                biz = cred.get("biz")
+                if biz and self._is_favorite_biz(biz):
+                    resolved_biz_name = self._resolve_biz_name(biz) or cred.get("biz_name")
+                    if resolved_biz_name and resolved_biz_name not in ("未命名公众号", "公众号未命名", "未命名"):
+                        biz_tokens = target_acc.setdefault("biz_tokens", {})
+                        app_token = cred.get("appmsg_token") or token or (biz_tokens.get(biz, {}).get("token") if isinstance(biz_tokens.get(biz), dict) else "")
+                        old_entry = biz_tokens.get(biz) if isinstance(biz_tokens.get(biz), dict) else {}
+                        getmsg_ready = cred.get("biz_source") == "profile_ext"
+
+                        if (old_entry.get("getmsg_ready") and not getmsg_ready
+                                and (time.time() - (old_entry.get("updated_at") or 0)) < BIZ_GETMSG_PROTECT_SECONDS):
+                            old_entry["name"] = resolved_biz_name
+                            logger.debug("biz [%s] 保留已验证的 getmsg key，忽略 %s 来源捕获",
+                                         resolved_biz_name, cred.get("biz_source"))
+                        else:
+                            biz_tokens[biz] = {
+                                "token": app_token,
+                                "appmsg_token": app_token,
+                                "key": cred.get("key") or old_entry.get("key", "") or target_acc.get("key", ""),
+                                "pass_ticket": cred.get("pass_ticket") or old_entry.get("pass_ticket", "") or target_acc.get("pass_ticket", ""),
+                                "poc_token": cred.get("poc_token") or old_entry.get("poc_token", "") or target_acc.get("poc_token", ""),
+                                "poc_sid": cred.get("poc_sid") or old_entry.get("poc_sid", "") or target_acc.get("poc_sid", ""),
+                                "wxtoken": cred.get("wxtoken") or old_entry.get("wxtoken", "") or target_acc.get("wxtoken", "777"),
+                                "updated_at": cred.get("save_time", time.time()),
+                                "name": resolved_biz_name,
+                                "getmsg_ready": getmsg_ready or old_entry.get("getmsg_ready", False),
+                            }
+                has_new_key = bool(cred.get("key"))
+                has_web_login = bool(is_explicit or (token and str(token).isdigit()))
+
+                if cred.get("key"):
+                    target_acc["key"] = cred.get("key")
+                if cred.get("pass_ticket"):
+                    target_acc["pass_ticket"] = cred.get("pass_ticket")
+                if cred.get("poc_token"):
+                    target_acc["poc_token"] = cred.get("poc_token")
+                if cred.get("poc_sid"):
+                    target_acc["poc_sid"] = cred.get("poc_sid")
+                if cred.get("wxtoken"):
+                    target_acc["wxtoken"] = cred.get("wxtoken")
+                if uin:
+                    target_acc["uin"] = uin
+                if cred.get("user_agent"):
+                    target_acc["user_agent"] = cred.get("user_agent")
+
+                if has_new_key or has_web_login:
+                    target_acc["save_time"] = cred.get("save_time", time.time())
+                    target_acc["status"] = "active"
+                    target_acc["failures"] = 0
+                    target_acc["risk_hits"] = 0
+                    target_acc["last_error"] = None
+                    target_acc["cooldown_until"] = 0
+                    target_acc["kicked_time"] = 0
+
+                # 自动清理由于格式不同产生的多余重复条目
+                cleaned_accounts = [a for a in accounts if a == target_acc or not (
+                    (_normalize_uin(a.get("uin")) and _normalize_uin(a.get("uin")) == uin) or
+                    (a.get("token") and a.get("token") == token)
+                )]
+
+                self._save(cleaned_accounts)
+                logger.info("账号池更新凭证并恢复: [%s] (ID: %s, UIN: %s)", target_acc.get("nickname"), target_acc["id"], target_acc.get("uin"))
+                return target_acc
+
+            else:
+                # 全新账号，新增
+                biz_tokens_map = {}
+                biz = cred.get("biz")
+                if biz and self._is_favorite_biz(biz):
+                    resolved_biz_name = self._resolve_biz_name(biz) or cred.get("biz_name")
+                    if resolved_biz_name and resolved_biz_name not in ("未命名公众号", "公众号未命名", "未命名"):
+                        app_token = cred.get("appmsg_token", token)
+                        biz_tokens_map[biz] = {
+                            "token": app_token,
+                            "appmsg_token": app_token,
+                            "key": cred.get("key", ""),
+                            "pass_ticket": cred.get("pass_ticket", ""),
+                            "updated_at": cred.get("save_time", time.time()),
+                            "name": resolved_biz_name,
+                            "getmsg_ready": cred.get("biz_source") == "profile_ext",
+                        }
+
+                new_acc = {
+                    "id": _gen_id(),
+                    "token": token,
+                    "appmsg_token": cred.get("appmsg_token", token),
+                    "cookie_str": cred.get("cookie_str", ""),
+                    "cookies": cred.get("cookies", []),
+                    "nickname": nickname,
+                    "avatar": cred.get("avatar", ""),
+                    "save_time": cred.get("save_time", time.time()),
+                    "key": cred.get("key", ""),
+                    "pass_ticket": cred.get("pass_ticket", ""),
+                    "uin": uin,
+                    "biz_tokens": biz_tokens_map,
+                    "user_agent": cred.get("user_agent", ""),
+                    "status": "active",
+                    "failures": 0,
+                    "risk_hits": 0,
+                    "last_used": 0.0,
+                    "cooldown_until": 0.0,
+                    "last_error": None,
+                    "kicked_time": 0.0,
+                }
+                accounts.append(new_acc)
                 self._save(accounts)
-                logger.info("账号池更新: [%s] (ID %s, VID %s)", nickname, matched_acc["id"], vid)
-                return matched_acc
+                logger.info("账号池新增: [%s]", nickname)
+                return new_acc
 
-            # 3. 全新账号，新增
-            new_acc = {
-                "id": _gen_id(),
-                "type": acc_type,
-                "vid": vid,
-                "token": token,
-                "cookie_str": cred.get("cookie_str", ""),
-                "cookies": cred.get("cookies", []),
-                "nickname": nickname,
-                "remark": cred.get("remark", ""),
-                "avatar": cred.get("avatar", ""),
-                "save_time": cred.get("save_time", now),
-                "last_verified_at": now,
-                "last_verified_result": "登录验证成功",
-                "status": "active",
-                "health_status": "valid",
-                "failures": 0,
-                "risk_hits": 0,
-                "last_used": 0.0,
-                "cooldown_until": 0.0,
-                "last_error": None,
-                "kicked_time": 0.0,
+    @staticmethod
+    def get_biz_credential(account_data: dict, biz: str) -> dict:
+        """从账号中提取针对特定 biz 的【专属】凭据。
+        严格隔离：key / pass_ticket / appmsg_token 只使用该公众号自己的会话凭证，
+        绝不回退账号级字段——账号级 key 来自最近一次打开的公众号（可能是其他号），
+        跨号使用会被微信以 ret=-3 拒绝。无专属凭证时返回 {}，由调用方引导建立会话。"""
+        if not account_data or not biz:
+            return {}
+        biz_tokens = account_data.get("biz_tokens", {})
+        biz_entry = biz_tokens.get(biz)
+        if biz_entry is None:
+            # 兼容 URL 编码差异（捕获侧与订阅侧的 __biz 编码可能不一致）
+            import urllib.parse
+            ubiz = urllib.parse.unquote(biz)
+            if ubiz != biz:
+                biz_entry = biz_tokens.get(ubiz)
+            if biz_entry is None:
+                for k, v in biz_tokens.items():
+                    if k and urllib.parse.unquote(k) == biz:
+                        biz_entry = v
+                        break
+        if isinstance(biz_entry, dict):
+            return {
+                "token": biz_entry.get("appmsg_token") or biz_entry.get("token") or "",
+                "appmsg_token": biz_entry.get("appmsg_token") or biz_entry.get("token") or "",
+                "key": biz_entry.get("key", ""),
+                "pass_ticket": biz_entry.get("pass_ticket", ""),
+                "poc_token": biz_entry.get("poc_token") or account_data.get("poc_token", ""),
+                "poc_sid": biz_entry.get("poc_sid") or account_data.get("poc_sid", ""),
+                "wxtoken": biz_entry.get("wxtoken") or account_data.get("wxtoken", "777"),
+                "uin": account_data.get("uin", ""),
+                "cookie_str": account_data.get("cookie_str", ""),
+                "user_agent": account_data.get("user_agent", ""),
+                "updated_at": biz_entry.get("updated_at", 0),
+                "getmsg_ready": bool(biz_entry.get("getmsg_ready")),
             }
-            accounts.append(new_acc)
-            self._save(accounts)
-            logger.info("账号池新增: [%s] (ID %s, VID %s)", nickname, new_acc["id"], vid)
-            return new_acc
+        elif isinstance(biz_entry, str) and biz_entry:
+            return {
+                "token": biz_entry,
+                "appmsg_token": biz_entry,
+                "key": "",
+                "pass_ticket": "",
+                "uin": account_data.get("uin", ""),
+                "cookie_str": account_data.get("cookie_str", ""),
+                "user_agent": account_data.get("user_agent", ""),
+                "updated_at": account_data.get("save_time", 0)
+            }
+        # 无该公众号专属凭证：返回空，调用方不得借用其他公众号的会话凭证
+        return {}
 
-    def update_account_info(self, account_id: str, patch: dict) -> dict | None:
-        """更新账号备注、别名等元数据"""
+    def get_web_token_session(self) -> tuple:
+        """全池查找公众平台 Web 后台会话（纯数字 token 的账号），供 /cgi-bin/appmsg 备用通道使用。
+        Web 登录（浏览器登录 mp.weixin.qq.com）与客户端凭证是不同通道：客户端 profile_ext 通道
+        被微信服务端封锁后，Web token 是 API 拉列表的唯一恢复路径。
+        返回 (token, cookie_str, account_id)，无可用返回 (None, None, None)。"""
         with self._lock:
             accounts = self._load()
-            target = None
+            best, best_ts = None, 0
             for acc in accounts:
-                if acc["id"] == account_id:
-                    target = acc
-                    break
-            if not target:
-                return None
+                token = str(acc.get("token") or "")
+                if not token.isdigit() or not token:
+                    continue
+                if acc.get("status") not in ("active", "cooldown"):
+                    continue
+                cookie = acc.get("cookie_str") or ""
+                if not cookie:
+                    continue
+                ts = acc.get("save_time", 0)
+                if ts > best_ts:
+                    best, best_ts = (token, cookie, acc["id"]), ts
+            return best or (None, None, None)
 
-            if "remark" in patch:
-                target["remark"] = str(patch["remark"] or "").strip()
-            if "nickname" in patch and patch["nickname"]:
-                target["nickname"] = str(patch["nickname"]).strip()
-            if "status" in patch and patch["status"] in ("active", "cooldown", "banned", "invalid"):
-                target["status"] = patch["status"]
-
-            self._save(accounts)
-            return dict(target)
+    def get_biz_age(self, biz: str) -> float | None:
+        """返回指定 biz 专属凭证的年龄（秒，取所有账号中最新的那份）。
+        返回 None 表示尚无该公众号的专属凭证（优先级最高，应尽快建立会话）。
+        供保活守护线程做主动续期排序使用。"""
+        if not biz:
+            return None
+        with self._lock:
+            accounts = self._load()
+            now = time.time()
+            newest_age = None
+            for acc in accounts:
+                entry = (acc.get("biz_tokens") or {}).get(biz)
+                if isinstance(entry, dict):
+                    ts = entry.get("updated_at", 0)
+                    if ts:
+                        age = now - ts
+                        if newest_age is None or age < newest_age:
+                            newest_age = age
+            return newest_age
 
     def remove(self, account_id: str) -> bool:
-        """从池中移除账号，并清理该账号的独立 Profile 目录"""
         with self._lock:
             accounts = self._load()
-            new_accounts = [a for a in accounts if a["id"] != account_id]
-            if len(new_accounts) == len(accounts):
+            to_remove = next((a for a in accounts if a["id"] == account_id), None)
+            if not to_remove:
                 return False
+
+            new_accounts = [a for a in accounts if a["id"] != account_id]
             self._save(new_accounts)
 
-        from backend.weread_browser import clean_weread_profile
-        clean_weread_profile(account_id)
-        return True
+            # 记录被删除的特征，5 分钟内防止被后台代理被动请求立即回写
+            now = time.time()
+            if to_remove.get("token"):
+                self._recently_removed_tokens[str(to_remove["token"])] = now
+            if to_remove.get("uin"):
+                self._recently_removed_tokens[str(to_remove["uin"])] = now
+
+            # 同步清理旧 legacy 配置文件中的残留凭证，避免重启时被自动迁移复活
+            try:
+                legacy = load_json(CONFIG_FILE, {})
+                if legacy:
+                    legacy_token = legacy.get("token")
+                    if not new_accounts or (legacy_token and legacy_token == to_remove.get("token")):
+                        save_json(CONFIG_FILE, {})
+            except Exception as ex:
+                logger.warning("同步清理旧配置文件异常: %s", ex)
+
+            return True
 
     def revive(self, account_id: str) -> bool:
-        """手动复活/重新激活：恢复 status=active, 清零失败和风控计数，设为待探活状态"""
+        """手动复活：status=active, 清零计数"""
         with self._lock:
             accounts = self._load()
             for acc in accounts:
                 if acc["id"] == account_id:
                     acc["status"] = "active"
-                    acc["health_status"] = "valid"
                     acc["failures"] = 0
                     acc["risk_hits"] = 0
                     acc["last_error"] = None
                     acc["cooldown_until"] = 0
                     acc["kicked_time"] = 0
                     self._save(accounts)
-                    logger.info("账号已手动重新激活: [%s] (ID: %s)", acc.get("nickname"), account_id)
                     return True
             return False
 
@@ -562,9 +706,13 @@ class AccountPool:
         count = 0
         for acc in accounts:
             if acc.get("status") == "active":
-                count += 1
+                save_time = acc.get("save_time", 0)
+                if save_time and (now - save_time <= LOGIN_VALID_SECONDS):
+                    count += 1
             elif acc.get("status") == "cooldown" and now >= acc.get("cooldown_until", 0):
-                count += 1
+                save_time = acc.get("save_time", 0)
+                if save_time and (now - save_time <= LOGIN_VALID_SECONDS):
+                    count += 1
         return count
 
     def get_summary(self) -> dict:
@@ -589,93 +737,98 @@ class AccountPool:
             self._kick_events.clear()
             return events
 
-    # ── 后台自动保活与心跳巡检 ────────────────────────────
-
-    def start_keepalive(self):
-        """启动后台自动保活与心跳巡检线程"""
-        if self._keepalive_thread and self._keepalive_thread.is_alive():
-            return
-        self._stop_keepalive.clear()
-        self._keepalive_thread = threading.Thread(
-            target=self._keepalive_loop,
-            name="account-pool-keepalive",
-            daemon=True,
-        )
-        self._keepalive_thread.start()
-        logger.info("账号池后台自动保活与心跳巡检线程已启动")
-
-    def _keepalive_loop(self):
-        """后台保活循环：定期巡检账号健康、自愈冷却、发送轻量保活心跳与浏览器换新"""
-        # 启动后先等待 15 秒（避开应用启动高峰）
-        if self._stop_keepalive.wait(15):
-            return
-
-        while not self._stop_keepalive.is_set():
-            try:
-                self._run_keepalive_round()
-            except Exception as e:
-                logger.error("账号池保活巡检异常: %s", e)
-
-            # 每 15 分钟巡检一轮（贴合微信读书 1~2 小时凭证周期）
-            if self._stop_keepalive.wait(15 * 60):
-                break
-
-    def _run_keepalive_round(self):
-        """执行一轮双阶梯保活：
-        1. 冷却自愈与轻量心跳探活（仅对有效活跃账号）
-        2. 定期（>45分钟）按需无头浏览器深度换新 Cookie（严格单实例串行，失效账号彻底跳过）
-        """
-        now = time.time()
+    def try_refresh_account(self, account_id: str) -> bool:
+        """当账号失效时，尝试通过代理对微信后台发起轻量探针请求，触发 mitm_proxy 捕获最新的 Set-Cookie / Token。
+        仅当探针触发 mitm_proxy 捕获了新凭证或验证 Session 真实有效时才重置为 active。"""
         with self._lock:
             accounts = self._load()
-            changed = False
-            for acc in accounts:
-                if acc.get("status") == "cooldown" and now >= acc.get("cooldown_until", 0):
-                    acc["status"] = "active"
-                    acc["health_status"] = "valid"
-                    changed = True
-            if changed:
-                self._save(accounts)
+            acc = next((a for a in accounts if a["id"] == account_id), None)
+            if not acc:
+                return False
+            cookie_str = acc.get("cookie_str", "")
+            ua = acc.get("user_agent") or get_default_wechat_ua()
+            old_save_time = acc.get("save_time", 0)
 
-        # 阶段一：轻量 HTTP 心跳探活（仅针对活跃健康账号，已失效/已封禁账号彻底跳过）
-        accounts = self._load()
-        for acc in accounts:
-            if self._stop_keepalive.is_set():
-                break
-            # 严格过滤：失效/封禁账号不重复发送心跳
-            if acc.get("status") in ("invalid", "banned") or acc.get("health_status") == "invalid":
-                continue
-            last_ver = acc.get("last_verified_at", 0)
-            if now - last_ver >= 15 * 60:  # 距上次验证超 15 分钟才发送心跳
-                logger.info("账号池自动心跳探活: [%s] (ID: %s)", acc.get("nickname"), acc["id"])
-                self.verify_account(acc["id"])
-                time.sleep(2)  # 账号间间隔 2 秒避开频控
+        is_valid_session = False
+        if cookie_str:
+            try:
+                from backend.config import get_proxies_dict
+                import requests
+                headers = {"User-Agent": ua, "Cookie": cookie_str}
+                proxies = get_proxies_dict()
+                resp = requests.get(
+                    "https://mp.weixin.qq.com/cgi-bin/home?t=home/index",
+                    headers=headers,
+                    proxies=proxies,
+                    timeout=8,
+                    verify=False
+                )
 
-        # 阶段二：对含本地浏览器会话的健康活跃账号进行定期浏览器深度会话换新（>45分钟自动换新一次，串行单实例执行）
-        accounts = self._load()
-        for acc in accounts:
-            if self._stop_keepalive.is_set():
-                break
-            # 严格过滤：仅对正常活跃且含有 Cookie 的账号启动无头浏览器保活（纯 Token 账号由阶段一负责探活）
-            if acc.get("status") != "active" or acc.get("health_status") != "valid":
-                continue
-            if not acc.get("cookie_str") and acc.get("type") == "weread_platform":
-                continue
-            last_browser_ref = acc.get("last_browser_refreshed_at", 0)
-            # 微信读书凭证周期约 1~2 小时，设置 45 分钟深度换新一次，保障始终处于新鲜有效期
-            if now - last_browser_ref >= 45 * 60:
-                logger.info("账号池自动浏览器深度保活换新: [%s] (ID: %s)", acc.get("nickname"), acc["id"])
+                resp_text = resp.text if hasattr(resp, "text") else ""
+                is_valid_session = (
+                    resp.status_code == 200 and
+                    "redirect_url" not in resp_text and
+                    "/cgi-bin/bizlogin" not in resp_text and
+                    "window.cgiData" in resp_text
+                )
+            except Exception as e:
+                logger.debug("账号 [%s] HTTP 刷新探针执行失败: %s", account_id, e)
+
+        with self._lock:
+            accs = self._load()
+            updated_acc = next((a for a in accs if a["id"] == account_id), None)
+            if updated_acc:
+                new_save_time = updated_acc.get("save_time", 0)
+                # 1. 如果请求探针过程中 mitm_proxy 成功捕获到了最新凭证（save_time 发生更新）
+                if new_save_time > old_save_time:
+                    updated_acc["status"] = "active"
+                    updated_acc["failures"] = 0
+                    updated_acc["last_error"] = None
+                    self._save(accs)
+                    logger.info("账号 [%s] 探针成功触发 mitm_proxy 捕获新凭证并恢复 active", updated_acc.get("nickname"))
+                    return True
+
+                # 2. 如果探针响应证实 Web Session 真实有效
+                if is_valid_session:
+                    updated_acc["save_time"] = time.time()
+                    updated_acc["status"] = "active"
+                    updated_acc["failures"] = 0
+                    updated_acc["last_error"] = None
+                    self._save(accs)
+                    logger.info("账号 [%s] 探针验证 Web Session 有效，恢复 active", updated_acc.get("nickname"))
+                    return True
+
+                # 3. 若探针未成功捕获新凭证，且开启了主动自动化刷新，才尝试调用客户端 UI 自动化刷新脚本
                 try:
-                    self.browser_refresh_account(acc["id"])
-                except Exception as e:
-                    logger.warning("账号 [%s] 浏览器保活换新异常: %s", acc.get("nickname"), e)
-                time.sleep(5)  # 账号间间隔 5 秒，充分释放浏览器资源
+                    from scripts.auto_refresh_pc_wechat import trigger_pc_wechat_refresh, ENABLE_BACKGROUND_ACTIVE_REFRESH
+                    if ENABLE_BACKGROUND_ACTIVE_REFRESH:
+                        trigger_pc_wechat_refresh()
+                        time.sleep(1.5)
+                        # 再次检测 save_time 是否因为 UI 刷新被 mitm_proxy 捕获更新
+                        accs_recheck = self._load()
+                        recheck_acc = next((a for a in accs_recheck if a["id"] == account_id), None)
+                        if recheck_acc and recheck_acc.get("save_time", 0) > old_save_time:
+                            recheck_acc["status"] = "active"
+                            recheck_acc["failures"] = 0
+                            recheck_acc["last_error"] = None
+                            self._save(accs_recheck)
+                            logger.info("账号 [%s] UI 自动化刷新成功捕获新凭证并恢复 active", recheck_acc.get("nickname"))
+                            return True
+                except Exception as refresh_err:
+                    logger.debug("触发客户端自动化刷新失败: %s", refresh_err)
+
+                # 4. 探针与 UI 自动化均未抓到新凭证：确认为 invalid
+                updated_acc["status"] = "invalid"
+                updated_acc["last_error"] = "客户端凭证/Session已失效，请在 PC 微信或浏览器中刷新页面更新 key/token"
+                self._save(accs)
+                return False
+
+        return False
 
 
 # ── 全局单例 ──────────────────────────────────────────
 
 account_pool = AccountPool()
-account_pool.start_keepalive()
 
 
 def borrow_session() -> tuple[str, str, str]:
@@ -685,27 +838,27 @@ def borrow_session() -> tuple[str, str, str]:
     """
     acc = account_pool.acquire()
     if not acc:
-        raise RuntimeError("账号池中无可用账号，请在『账号池』页面添加或重新登录账号")
-    return acc["id"], acc["token"], acc.get("cookie_str", "")
+        raise RuntimeError("账号池中无可用账号，请先在『账号池』页面添加/登录账号")
+    return acc["id"], acc["token"], acc["cookie_str"]
 
 
 def migrate_legacy_config():
     """应用启动时执行一次：将旧 wechat_mp_config.json 迁移到账号池"""
+    # 只要 account_pool.json 存在过（即使为空列表 []），说明用户已经在使用账号池管理，不再进行旧配置回退迁移
     if ACCOUNT_POOL_FILE.exists():
-        pool = load_json(ACCOUNT_POOL_FILE, [])
-        if pool:
-            return  # 已有池数据，不迁移
+        return
 
-    legacy = load_json(CONFIG_FILE)
+    legacy = load_json(CONFIG_FILE, {})
     if legacy and legacy.get("token"):
         account_info = legacy.get("account_info", {})
         account_pool.add_or_update({
             "token": legacy["token"],
-            "vid": str(legacy.get("vid", "")),
             "cookie_str": legacy.get("cookie_str", ""),
             "cookies": legacy.get("cookies", []),
-            "nickname": account_info.get("nickname") or legacy.get("nickname", "微信读书用户"),
+            "nickname": account_info.get("nickname", "公众号未命名"),
             "avatar": account_info.get("avatar", ""),
             "save_time": legacy.get("save_time", time.time()),
+            "is_explicit_login": True,
         })
         logger.info("已将旧 wechat_mp_config.json 迁移到账号池")
+

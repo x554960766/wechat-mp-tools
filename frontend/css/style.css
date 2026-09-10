@@ -1234,58 +1234,81 @@ body {
 /* ── Toast 通知 ────────────────────────────────────────── */
 .toast-container {
     position: fixed;
-    top: var(--spacing-lg);
-    right: var(--spacing-lg);
-    z-index: 9999;
+    top: 24px;
+    right: 24px;
+    z-index: 99999;
     display: flex;
     flex-direction: column;
-    gap: var(--spacing-sm);
+    gap: 12px;
+    pointer-events: none;
 }
 
 .toast {
+    pointer-events: auto;
     display: flex;
-    align-items: center;
-    gap: var(--spacing-md);
-    padding: 12px var(--spacing-lg);
+    align-items: flex-start;
+    gap: 12px;
+    padding: 14px 16px;
     background: var(--bg-card);
     border: 1px solid var(--border-color);
-    border-radius: var(--radius-md);
-    backdrop-filter: blur(20px);
-    -webkit-backdrop-filter: blur(20px);
-    box-shadow: var(--shadow-lg);
-    animation: slideInRight 0.3s ease;
-    min-width: 300px;
-    max-width: 420px;
+    border-radius: 12px;
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.12), 0 2px 6px rgba(0, 0, 0, 0.04);
+    animation: toastSlideIn 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+    min-width: 320px;
+    max-width: 460px;
+    position: relative;
+    overflow: hidden;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.toast:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 16px 36px rgba(0, 0, 0, 0.16), 0 4px 12px rgba(0, 0, 0, 0.06);
 }
 
 .toast.toast-exit {
-    animation: slideOutRight 0.3s ease forwards;
+    animation: toastSlideOut 0.25s cubic-bezier(0.4, 0, 1, 1) forwards;
 }
 
-.toast-success { border-left: 3px solid var(--success); }
-.toast-error { border-left: 3px solid var(--error); }
-.toast-warning { border-left: 3px solid var(--warning); }
-.toast-info { border-left: 3px solid var(--info); }
+.toast-success { border-left: 4px solid #07c160; }
+.toast-error   { border-left: 4px solid #ff4d4f; }
+.toast-warning { border-left: 4px solid #faad14; }
+.toast-info    { border-left: 4px solid #1890ff; }
 
 .toast-icon {
-    font-size: 1.2rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     flex-shrink: 0;
+    margin-top: 1px;
+}
+
+.toast-icon svg {
+    width: 20px;
+    height: 20px;
+    display: block;
 }
 
 .toast-content {
     flex: 1;
+    min-width: 0;
 }
 
 .toast-title {
-    font-size: 0.85rem;
+    font-size: 0.92rem;
     font-weight: 600;
     color: var(--text-primary);
+    line-height: 1.35;
+    margin-bottom: 4px;
 }
 
 .toast-message {
-    font-size: 0.8rem;
+    font-size: 0.84rem;
     color: var(--text-secondary);
-    margin-top: 2px;
+    line-height: 1.55;
+    word-break: break-word;
 }
 
 .toast-close {
@@ -1293,25 +1316,65 @@ body {
     border: none;
     color: var(--text-muted);
     cursor: pointer;
-    padding: 4px;
-    font-size: 1.1rem;
+    padding: 0 4px;
+    font-size: 1.25rem;
     line-height: 1;
-    opacity: 0.7;
-    transition: opacity var(--transition-fast);
+    border-radius: 6px;
+    opacity: 0.6;
+    transition: opacity 0.2s, background-color 0.2s;
+    margin-top: -2px;
+    margin-right: -4px;
 }
 
 .toast-close:hover {
     opacity: 1;
+    background: rgba(0, 0, 0, 0.05);
 }
 
-@keyframes slideInRight {
-    from { transform: translateX(100%); opacity: 0; }
-    to { transform: translateX(0); opacity: 1; }
+.toast-progress {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    height: 3px;
+    width: 100%;
+    transform-origin: left;
+    animation: toastProgressBar linear forwards;
 }
 
-@keyframes slideOutRight {
-    from { transform: translateX(0); opacity: 1; }
-    to { transform: translateX(100%); opacity: 0; }
+.toast:hover .toast-progress {
+    animation-play-state: paused;
+}
+
+.toast-progress-success { background: #07c160; }
+.toast-progress-error   { background: #ff4d4f; }
+.toast-progress-warning { background: #faad14; }
+.toast-progress-info    { background: #1890ff; }
+
+@keyframes toastSlideIn {
+    from {
+        opacity: 0;
+        transform: translateX(100%) scale(0.95);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0) scale(1);
+    }
+}
+
+@keyframes toastSlideOut {
+    from {
+        opacity: 1;
+        transform: translateX(0) scale(1);
+    }
+    to {
+        opacity: 0;
+        transform: translateX(110%) scale(0.95);
+    }
+}
+
+@keyframes toastProgressBar {
+    from { transform: scaleX(1); }
+    to { transform: scaleX(0); }
 }
 
 /* ── 模态框 ────────────────────────────────────────────── */

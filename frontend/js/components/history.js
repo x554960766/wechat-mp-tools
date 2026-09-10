@@ -602,6 +602,14 @@ const HistoryPage = {
                             原文链接
                         </button>
                     ` : ''}
+                    ${!isVideo ? `
+                    <button class="btn btn-secondary btn-sm" data-path="${path}" onclick="HistoryPage.openFile(this.dataset.path, 'md')" style="padding: 4px 10px; font-size: 0.78rem;">
+                        📝 打开 MD
+                    </button>
+                    <button class="btn btn-secondary btn-sm" data-path="${path}" onclick="HistoryPage.openFile(this.dataset.path, 'pdf')" style="padding: 4px 10px; font-size: 0.78rem;">
+                        📕 打开 PDF
+                    </button>
+                    ` : ''}
                     <button class="btn btn-secondary btn-sm" data-path="${path}" onclick="HistoryPage.openFile(this.dataset.path)" style="padding: 4px 10px; font-size: 0.78rem;">
                         打开文件夹
                     </button>
@@ -908,14 +916,14 @@ const HistoryPage = {
         }
     },
 
-    async openFile(path) {
+    async openFile(path, type = null) {
         if (!path) {
             Toast.warning('无效的路径');
             return;
         }
         try {
-            await API.articles.openFile(path);
-            Toast.success('正在打开...');
+            await API.articles.openFile(path, type);
+            Toast.success(type ? `正在打开 ${type.toUpperCase()}...` : '正在打开...');
         } catch (err) {
             // shown by API
         }

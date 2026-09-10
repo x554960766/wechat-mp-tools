@@ -37,6 +37,8 @@ PROXY_SESSION_ID = str(int(time.time()))
 
 # 保存 MITM 启动前的 NO_PROXY 环境变量，用于停止时还原
 _original_no_proxy = None
+_last_captured_cred_hash = None
+_last_captured_time = 0
 
 # ── 证书管理 (Certificate Management) ──────────────────────────
 
@@ -163,6 +165,14 @@ def _run_certutil(args, check=False):
 def check_cert_trusted():
     if sys.platform == "darwin":
         try:
+            # 0. 先检查证书是否在钥匙串中存在，若不存在则必定未信任
+            out_find = subprocess.run(
+                ["security", "find-certificate", "-c", "Channels Interceptor CA"],
+                capture_output=True
+            )
+            if out_find.returncode != 0:
+                return False
+
             def has_valid_trust_count(output_text):
                 lines = output_text.splitlines()
                 for i, line in enumerate(lines):
@@ -191,33 +201,15 @@ def check_cert_trusted():
             if out.returncode == 0 and "Channels Interceptor CA" in out.stdout:
                 if has_valid_trust_count(out.stdout):
                     return True
-                    
-            # 4. Fallback: use security verify-cert to directly validate the CA against
-            #    the system trust chain. This handles edge cases where third-party VPN
-            #    software (e.g. Sangfor, Clash) modifies the trust-settings domain layout
-            #    and our CA trust entry is not visible via dump-trust-settings.
-            if CA_CERT_PATH.exists():
-                try:
-                    out_v = subprocess.run(
-                        ["security", "verify-cert", "-c", str(CA_CERT_PATH)],
-                        capture_output=True, text=True, timeout=5
-                    )
-                    if out_v.returncode == 0:
-                        print("check_cert_trusted: trust-settings scan missed, but verify-cert confirmed CA is trusted")
-                        return True
-                except Exception:
-                    pass
 
             return False
         except Exception:
             return False
     elif sys.platform == "win32":
         try:
-            # Check user store first
             out = _run_certutil(["-verifystore", "-user", "root", "Channels Interceptor CA"])
             if out.returncode == 0:
                 return True
-            # Also check LocalMachine store (some tools like dev-sidecar install there)
             out2 = _run_certutil(["-verifystore", "root", "Channels Interceptor CA"])
             if out2.returncode == 0:
                 return True
@@ -226,54 +218,60 @@ def check_cert_trusted():
             return False
     return False
 
+def _delete_all_matching_mac_certs(common_name: str = "Channels Interceptor CA"):
+    """安全清空钥匙串中所有同名（包括历史重复/冲突的）证书，通过 SHA-1 哈希精准删除以杜绝歧义错误。"""
+    try:
+        res = subprocess.run(["security", "find-certificate", "-a", "-c", common_name, "-Z"], capture_output=True, text=True)
+        if res.returncode == 0 and res.stdout:
+            hashes = re.findall(r"SHA-1 hash:\s*([0-9A-Fa-f]+)", res.stdout)
+            for h in set(hashes):
+                subprocess.run(["security", "delete-certificate", "-Z", h], capture_output=True)
+                subprocess.run(["security", "delete-certificate", "-Z", h, "/Library/Keychains/System.keychain"], capture_output=True)
+    except Exception:
+        pass
+    try:
+        subprocess.run(["security", "delete-certificate", "-c", common_name], capture_output=True)
+    except Exception:
+        pass
+
+
 def install_system_cert(ca_cert_path):
     if check_cert_trusted():
         return True
         
     if sys.platform == "darwin":
-        # Delete from ALL keychains to prevent duplicates/conflicts with stale entries
-        for kc_flag in ("-c",):
-            try:
-                subprocess.run(["security", "delete-certificate", kc_flag, "Channels Interceptor CA"], capture_output=True)
-            except Exception:
-                pass
-        # Also remove from System keychain explicitly (may fail without admin, that's OK)
-        try:
-            subprocess.run(
-                ["security", "delete-certificate", "-c", "Channels Interceptor CA",
-                 "/Library/Keychains/System.keychain"],
-                capture_output=True
-            )
-        except Exception:
-            pass
+        # 清理旧残留及可能存在的重复/冲突证书
+        _delete_all_matching_mac_certs("Channels Interceptor CA")
             
-        # 1. Attempt to install system-wide first (targets System.keychain)
+        # 1. 尝试直接安装至用户 Login 钥匙串
         try:
-            subprocess.run([
+            keychain_path = os.path.expanduser("~/Library/Keychains/login.keychain-db")
+            if not os.path.exists(keychain_path):
+                keychain_path = os.path.expanduser("~/Library/Keychains/login.keychain")
+            res = subprocess.run([
                 "security", "add-trusted-cert",
-                "-d",
                 "-r", "trustRoot",
-                "-k", "/Library/Keychains/System.keychain",
+                "-p", "ssl",
+                "-k", keychain_path,
                 str(ca_cert_path)
-            ], check=True, capture_output=True)
-            return True
-        except Exception as system_err:
-            print(f"System keychain installation failed: {system_err}. Falling back to Login keychain...")
-            
-            # 2. Fallback to user login keychain (no admin privileges / GUI prompt required)
-            try:
-                keychain_path = os.path.expanduser("~/Library/Keychains/login.keychain-db")
-                subprocess.run([
-                    "security", "add-trusted-cert",
-                    "-r", "trustRoot",
-                    "-p", "ssl",
-                    "-k", keychain_path,
-                    str(ca_cert_path)
-                ], check=True)
+            ], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and check_cert_trusted():
                 return True
-            except Exception as e:
-                print(f"Failed to install Mac cert to Login keychain: {e}")
-                return False
+        except Exception as e:
+            print(f"Login keychain installation note: {e}")
+
+        # 2. 唤起系统提权弹窗安装至系统钥匙串 (/Library/Keychains/System.keychain)
+        try:
+            cert_str = str(ca_cert_path)
+            inner = f"/usr/bin/security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain '{cert_str}'"
+            osa = f'do shell script "{inner}" with administrator privileges'
+            res = subprocess.run(["osascript", "-e", osa], capture_output=True, text=True, timeout=30)
+            if res.returncode == 0 and check_cert_trusted():
+                return True
+        except Exception as system_err:
+            print(f"System keychain osascript failed: {system_err}")
+
+        return check_cert_trusted()
     elif sys.platform == "win32":
         try:
             _run_certutil(["-addstore", "-user", "root", str(ca_cert_path)], check=True)
@@ -285,50 +283,72 @@ def install_system_cert(ca_cert_path):
 
 def uninstall_system_cert():
     if sys.platform == "darwin":
+        # 0. 若本身已不在钥匙串中且未受信任，直接判定为已卸载
+        out_find = subprocess.run(
+            ["security", "find-certificate", "-c", "Channels Interceptor CA"],
+            capture_output=True
+        )
+        if out_find.returncode != 0 and not check_cert_trusted():
+            return True
+
         cert_path = str(CA_CERT_PATH)
-        # 1. 先删用户登录钥匙串里的(不需要管理员权限)
+        # 1. 通过 SHA-1 哈希彻底清理用户登录钥匙串中的同名证书
+        _delete_all_matching_mac_certs("Channels Interceptor CA")
+
+        # 2. 清理用户域信任设置
+        if CA_CERT_PATH.exists():
+            try:
+                subprocess.run(["security", "remove-trusted-cert", cert_path], capture_output=True)
+            except Exception:
+                pass
+
+        # 3. 仅当证书确实存在于 System.keychain 时才调起系统管理员权限弹窗进行删除
+        in_sys_kc = False
         try:
-            subprocess.run(
-                ["security", "delete-certificate", "-c", "Channels Interceptor CA"],
+            r_sys = subprocess.run(
+                ["security", "find-certificate", "-c", "Channels Interceptor CA", "/Library/Keychains/System.keychain"],
                 capture_output=True
             )
+            in_sys_kc = (r_sys.returncode == 0)
         except Exception:
             pass
 
-        # 2. System.keychain 的删除与去信任需要管理员权限。
-        #    用 osascript 触发一次 GUI 授权(与安装时一致),
-        #    在一个提权 shell 里同时去掉信任设置并删除证书。
-        if CA_CERT_PATH.exists():
+        if in_sys_kc and CA_CERT_PATH.exists():
             inner = (
-                f"/usr/bin/security remove-trusted-cert -d '{cert_path}'; "
+                f"/usr/bin/security remove-trusted-cert -d '{cert_path}' 2>/dev/null || true; "
                 "/usr/bin/security delete-certificate -c 'Channels Interceptor CA' "
-                "/Library/Keychains/System.keychain"
+                "/Library/Keychains/System.keychain 2>/dev/null || true"
             )
             osa = (
-                'do shell script "' + inner.replace('"', '\\"') + '" '
+                'do shell script "' + inner.replace('"', '\"') + '" '
                 'with administrator privileges'
             )
             try:
-                subprocess.run(["osascript", "-e", osa], capture_output=True)
+                subprocess.run(["osascript", "-e", osa], capture_output=True, timeout=15)
             except Exception as e:
                 print(f"osascript uninstall failed: {e}")
 
-        # 3. 以信任状态为准返回真实结果,不再无条件 True
+        # 4. 再次检查钥匙串：若已无该证书即代表卸载成功
+        out_find_after = subprocess.run(
+            ["security", "find-certificate", "-c", "Channels Interceptor CA"],
+            capture_output=True
+        )
+        if out_find_after.returncode != 0:
+            return True
+
         still_trusted = check_cert_trusted()
         if still_trusted:
             print("Cert still trusted after uninstall attempt")
         return not still_trusted
     elif sys.platform == "win32":
         try:
-            _run_certutil(["-delstore", "-user", "root", "Channels Interceptor CA"], check=True)
+            _run_certutil(["-delstore", "-user", "root", "Channels Interceptor CA"])
+            _run_certutil(["-delstore", "root", "Channels Interceptor CA"])
             return True
         except Exception as e:
             print(f"Failed to delete Win cert: {e}")
             return False
     return False
-
-
-# ── 系统代理管理 (System Proxy Control) ─────────────────────────
 
 def get_active_mac_service():
     try:
@@ -374,13 +394,10 @@ def set_windows_proxy(enabled, host="127.0.0.1", port=5202):
         if enabled:
             winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
             winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, f"{host}:{port}")
-            # Clear ProxyOverride set by dev-sidecar or other tools that might
-            # bypass our proxy for target domains. We need channels.weixin.qq.com
-            # to go through our MITM proxy, so any override rules must be removed.
-            try:
-                winreg.DeleteValue(key, "ProxyOverride")
-            except FileNotFoundError:
-                pass  # No ProxyOverride set, that's fine
+            # Ensure local and intranet addresses bypass the proxy to prevent local loops
+            # with Flask (127.0.0.1:5200) and WebView2 / internal services.
+            override_val = "<local>;localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*"
+            winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, override_val)
         else:
             winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
         winreg.CloseKey(key)
@@ -550,6 +567,153 @@ class ChannelsAddon:
                 )
                 return
 
+            if path == "/__wx_official_api/mp-batch-next":
+                self._forward_to_flask(
+                    flow, "http://127.0.0.1:5200/api/auth/mp-batch-next"
+                )
+                return
+
+            if path == "/__wx_official_api/mp-batch-status":
+                self._forward_to_flask(
+                    flow, "http://127.0.0.1:5200/api/auth/mp-batch-status"
+                )
+                return
+
+            if path == "/__wx_official_api/log":
+                try:
+                    payload = json.loads(flow.request.get_text())
+                    msg = payload.get("message", "")
+                    print(f"[AutoRSSTool JS] {msg}", flush=True)
+                except Exception as ex:
+                    print(f"[AutoRSSTool JS LOG FAILED] {ex}", flush=True)
+                self._local_json(flow, 200, b'{"success":true}')
+                return
+
+            # 静默截获 mp.weixin.qq.com 各端 (Web/PC 微信/公众号后台) 客户端凭证参数与 Cookie
+            try:
+                # 消除从 127.0.0.1 聚合页跳转造成的跨域 Referer 拦截 (导致微信返回「操作频繁，请稍后再试」)
+                ref = flow.request.headers.get("Referer", "")
+                if "127.0.0.1" in ref or "localhost" in ref:
+                    flow.request.headers["Referer"] = "https://mp.weixin.qq.com/"
+
+                import urllib.parse, re
+                parsed = urllib.parse.urlparse(flow.request.url)
+                qs = urllib.parse.parse_qs(parsed.query)
+
+                if flow.request.method == "POST":
+                    try:
+                        if flow.request.urlencoded_form:
+                            for k, v in flow.request.urlencoded_form.items():
+                                if k not in qs and v:
+                                    qs[k] = [v]
+                    except Exception:
+                        pass
+
+                token = (qs.get("token") or qs.get("appmsg_token") or [""])[0]
+
+                # 诊断：打印 profile_ext 请求的脱敏 URL（参数名可见、凭证值遮蔽），用于排查客户端协议变化
+                if (parsed.path or "").startswith("/mp/profile_ext"):
+                    from backend.cred_redact import redact_url
+                    _diag_qs = urllib.parse.urlencode({k: f"<len={len(v[0])}>" for k, v in qs.items()})
+                    print(f"[MP-DIAG] params: {_diag_qs}", flush=True)
+
+                key = (qs.get("key") or [""])[0]
+                pass_ticket = (qs.get("pass_ticket") or [""])[0]
+                uin = (qs.get("uin") or [""])[0]
+                poc_token = (qs.get("poc_token") or [""])[0]
+                wxtoken = (qs.get("wxtoken") or ["777"])[0]
+                cookie_str = flow.request.headers.get("Cookie", "")
+                if cookie_str:
+                    cookie_str = cookie_str.replace(", ", "; ")
+
+                if token:
+                    token = urllib.parse.unquote(token)
+
+                if key:
+                    key = urllib.parse.unquote(key)
+
+                if poc_token:
+                    poc_token = urllib.parse.unquote(poc_token)
+
+                poc_sid = ""
+                if cookie_str:
+                    m = re.search(r'(?:^|;\s*)poc_sid=([^;,\s]+)', cookie_str)
+                    if m:
+                        poc_sid = urllib.parse.unquote(m.group(1))
+
+                if not token and cookie_str:
+                    m = re.search(r'(?:^|;\s*)appmsg_token=([^;,\s]+)', cookie_str) or re.search(r'(?:^|;\s*)token=([^;,\s]+)', cookie_str)
+                    if m:
+                        token = urllib.parse.unquote(m.group(1))
+
+                if not key and cookie_str:
+                    m = re.search(r'(?:^|;\s*)key=([^;,\s]+)', cookie_str)
+                    if m:
+                        key = urllib.parse.unquote(m.group(1))
+
+                if not pass_ticket and cookie_str:
+                    m = re.search(r'(?:^|;\s*)pass_ticket=([^;,\s]+)', cookie_str)
+                    if m:
+                        pass_ticket = urllib.parse.unquote(m.group(1))
+
+                if not uin and cookie_str:
+                    m = re.search(r'wxuin=([^;,\s]+)', cookie_str) or re.search(r'(?:^|;\s*)uin=([^;,\s]+)', cookie_str) or re.search(r'data_bizuin=([^;,\s]+)', cookie_str)
+                    if m:
+                        uin = urllib.parse.unquote(m.group(1))
+
+                biz = (qs.get("__biz") or qs.get("biz") or [""])[0]
+                if biz:
+                    biz = urllib.parse.unquote(biz)
+
+                user_agent = flow.request.headers.get("User-Agent", "")
+
+                # 标记凭证来源：只有客户端自己发起的 profile_ext 请求（打开公众号主页/列表）携带的
+                # key 才能用于 getmsg 拉取列表；文章页 /s 来源的 key 会被微信以 ret=-3(no session) 拒绝
+                src_path = (parsed.path or "").rstrip("/")
+                if src_path == "/mp/profile_ext":
+                    biz_source = "profile_ext"
+                elif src_path == "/s":
+                    biz_source = "article"
+                else:
+                    biz_source = "other"
+
+                if (token or pass_ticket or cookie_str or key) and (uin or "slave=" in cookie_str or "wxuin=" in cookie_str or "pass_ticket=" in cookie_str or key):
+                    from backend.account_pool import account_pool, _normalize_uin
+                    norm_uin = _normalize_uin(uin)
+                    cred_hash = f"{norm_uin}_{token}_{key}_{pass_ticket}_{biz}_{poc_token}"
+                    global _last_captured_cred_hash, _last_captured_time
+                    now_ts = time.time()
+                    if cred_hash != _last_captured_cred_hash or (now_ts - _last_captured_time > 5):
+                        _last_captured_cred_hash = cred_hash
+                        _last_captured_time = now_ts
+                        cred_payload = {
+                            "token": token,
+                            "appmsg_token": token,
+                            "key": key,
+                            "pass_ticket": pass_ticket,
+                            "poc_token": poc_token,
+                            "poc_sid": poc_sid,
+                            "wxtoken": wxtoken,
+                            "uin": norm_uin,
+                            "biz": biz,
+                            "biz_source": biz_source,
+                            "cookie_str": cookie_str,
+                            "user_agent": user_agent,
+                            "nickname": "动态微信凭证",
+                            "save_time": time.time(),
+                        }
+                        def _bg_save_cred(payload):
+                            try:
+                                saved_acc = account_pool.add_or_update(payload)
+                                if saved_acc:
+                                    from backend.cred_redact import mask_secret
+                                    print(f"[MITM Captured Credential] src={payload['biz_source']} uin={mask_secret(payload['uin'], 4)} biz={(payload['biz'] or '')[:10]} token={mask_secret(payload['token'], 6)} keylen={len(payload['key'] or '')} ptlen={len(payload['pass_ticket'] or '')}", flush=True)
+                            except Exception as ex:
+                                print(f"[AccountPool Async Save Error] {ex}", flush=True)
+                        threading.Thread(target=_bg_save_cred, args=(cred_payload,), daemon=True).start()
+            except Exception as cap_err:
+                print(f"[MITM Capture Error] {cap_err}")
+
     def response(self, flow):
         host = flow.request.pretty_host
         if host not in TARGET_HOSTS:
@@ -624,7 +788,92 @@ class ChannelsAddon:
                     print(f"[Proxy] Failed to intercept 302 on /web/pages/feed: {ex302}", flush=True)
 
         # 3. Check for channels.weixin.qq.com / mp.weixin.qq.com HTML
-        if "text/html" not in content_type:
+        if host == "mp.weixin.qq.com" and "/mp/profile_ext" in flow.request.path:
+            # 仅在显式批量流转模式 (URL 明确带 batch_mode=1) 且非真实异步 XHR 时才封装为流转 HUD 网页
+            # 避免被 f=json 参数误判为 XHR，确保顶级页面导航能够正常呈现流转 HUD 动画并执行注入脚本
+            is_explicit_batch = "batch_mode=1" in flow.request.url
+            is_xhr_header = flow.request.headers.get("x-requested-with", "").lower() == "xmlhttprequest"
+            if is_explicit_batch and not is_xhr_header and "text/html" not in content_type:
+                # 将 API 响应动态封装为包含可视 HUD 动画和自动流转脚本的完整流转网页
+                raw_text = flow.response.get_text(strict=False) or "{}"
+                flow.response.headers["content-type"] = "text/html; charset=utf-8"
+                flow.response.text = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>正在同步公众号会话凭证</title>
+    <style>
+        body {{
+            margin: 0;
+            padding: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            background: #f7f8fa;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            color: #191919;
+            text-align: center;
+        }}
+        .card {{
+            background: white;
+            padding: 32px 28px;
+            border-radius: 16px;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+            max-width: 360px;
+            width: 90%;
+        }}
+        .icon {{
+            font-size: 44px;
+            margin-bottom: 12px;
+            animation: spin 2s linear infinite;
+        }}
+        @keyframes spin {{ 0% {{ transform: rotate(0deg); }} 100% {{ transform: rotate(360deg); }} }}
+        h2 {{
+            font-size: 1.15rem;
+            margin: 0 0 8px 0;
+        }}
+        p {{
+            font-size: 0.85rem;
+            color: #777;
+            margin: 0 0 16px 0;
+            line-height: 1.5;
+        }}
+        .progress-bar {{
+            height: 6px;
+            background: #eee;
+            border-radius: 3px;
+            overflow: hidden;
+        }}
+        .progress-bar-fill {{
+            height: 100%;
+            background: #07c160;
+            width: 100%;
+            animation: pulse 1.2s infinite ease-in-out;
+        }}
+        @keyframes pulse {{ 0% {{ opacity: 0.4; }} 50% {{ opacity: 1; }} 100% {{ opacity: 0.4; }} }}
+    </style>
+    <script>{get_injected_official_js()}</script>
+</head>
+<body>
+    <div class="card">
+        <div class="icon">🔄</div>
+        <h2 id="stream-title">正在自动同步凭证...</h2>
+        <p id="stream-desc">当前公众号主页凭证已成功捕获，正在准备流转下一个...</p>
+        <div class="progress-bar">
+            <div class="progress-bar-fill"></div>
+        </div>
+    </div>
+    <div id="raw-resp" style="display:none;">{raw_text}</div>
+</body>
+</html>"""
+                for h in ("etag", "last-modified", "expires", "content-security-policy", "x-content-security-policy", "x-webkit-csp", "x-frame-options", "frame-options"):
+                    if h in flow.response.headers:
+                        del flow.response.headers[h]
+                flow.response.headers["cache-control"] = "no-store, no-cache, must-revalidate, max-age=0"
+                return
+        elif "text/html" not in content_type:
             return
 
         try:
@@ -701,8 +950,40 @@ class ChannelsAddon:
             except Exception as ex:
                 print(f"[Proxy] Error reading injection scripts: {ex}", flush=True)
                 inject_script = ""
-        else:
+        elif host == "mp.weixin.qq.com":
             inject_script = f"<script>{get_injected_official_js()}</script>"
+            print(f"[Proxy Injected Official JS] path={flow.request.path}", flush=True)
+
+            # 参考 wechatDownload：从文章 HTML (/s) 页面嗅探 biz、appmsg_token 与 nickname
+            try:
+                if "/s" in flow.request.path:
+                    m_biz = re.search(r'(?:var\s+biz\s*=\s*|window\.biz\s*=\s*|__biz=)"?([^"&\'\s]+)"?', html)
+                    m_token = re.search(r'(?:var\s+appmsg_token\s*=\s*|window\.appmsg_token\s*=\s*|appmsg_token=)"?([^"&\'\s]+)"?', html)
+                    m_nick = re.search(r'(?:var\s+nickname\s*=\s*|window\.nickname\s*=\s*)"([^"\r\n]+)"', html)
+                    sniffed_biz = m_biz.group(1) if m_biz else ""
+                    sniffed_token = m_token.group(1) if m_token else ""
+                    sniffed_nick = m_nick.group(1) if m_nick else ""
+                    if sniffed_biz:
+                        from backend.account_pool import account_pool, AccountPool
+                        if AccountPool._is_favorite_biz(sniffed_biz):
+                            account_pool.add_or_update({
+                                "biz": sniffed_biz,
+                                "appmsg_token": sniffed_token,
+                                "nickname": sniffed_nick or "动态微信凭证",
+                                "biz_name": sniffed_nick,
+                                "biz_source": "article",
+                                "save_time": time.time(),
+                            })
+            except Exception as ex_sniff:
+                print(f"[Proxy HTML Sniff Error] {ex_sniff}", flush=True)
+        else:
+            return
+
+        if host == "mp.weixin.qq.com":
+            meta_csp = re.search(r"<meta[^>]+http-equiv=[\"']?Content-Security-Policy[\"']?[^>]*>", html, flags=re.IGNORECASE)
+            if meta_csp:
+                print(f"[DIAG CSP] Found <meta CSP> tag, stripping: {meta_csp.group(0)}", flush=True)
+                html = html.replace(meta_csp.group(0), "")
 
         m = re.search(r"<head\b[^>]*>", html, flags=re.IGNORECASE)
         if m:
@@ -719,6 +1000,14 @@ class ChannelsAddon:
                 del flow.response.headers[h]
         flow.response.headers["cache-control"] = "no-store, no-cache, must-revalidate, max-age=0"
         flow.response.headers["pragma"] = "no-cache"
+
+        for h in ("content-security-policy", "x-content-security-policy", "x-webkit-csp", "x-frame-options", "frame-options"):
+            if h in flow.response.headers:
+                del flow.response.headers[h]
+
+        for h in ("content-security-policy", "x-content-security-policy", "x-webkit-csp", "x-frame-options", "frame-options"):
+            if h in flow.response.headers:
+                del flow.response.headers[h]
 
 
 # ── Synced Data Saving (同步数据持久化) ──────────────────────────
@@ -876,7 +1165,12 @@ def save_synced_feeds(username, feeds):
             "video_url_h264": video_url_h264,
             "video_url_h265": video_url_h265,
             "createtime": createtime,
-            "decode_key": decode_key
+            "decode_key": decode_key,
+            "nickname": feed.get("contact", {}).get("nickname") or nickname,
+            "like_count": feed.get("likeCount", 0),
+            "comment_count": feed.get("commentCount", 0),
+            "forward_count": feed.get("forwardCount", 0),
+            "fav_count": feed.get("favCount", 0),
         }
         
         found = False
@@ -886,6 +1180,7 @@ def save_synced_feeds(username, feeds):
                 found = True
                 break
         if not found:
+            item["needs_upload"] = True
             feeds_db[username].append(item)
             
     save_json(CHANNELS_FEEDS_FILE, feeds_db)
@@ -1340,6 +1635,238 @@ def get_injected_official_js():
             document.body.appendChild(btn);
         }
         
+        // 3. Inject Auto-Refresh Keep-Alive Loop for Official Account Credentials inside PC WeChat WebView
+        function startAutoCredentialRefreshLoop() {
+            if (window.self !== window.top) {
+                // In iframe mode (e.g. inside batch portal), credentials are automatically captured by MITM on request
+                return;
+            }
+            // 0. 批量授权管道流转 (支持 URL query batch_mode=1 或 profile_ext 页面自动流转)
+            try {
+                const urlParams = new URLSearchParams(window.location.search);
+                const isBatchMode = urlParams.get('batch_mode') === '1' || sessionStorage.getItem('mp_batch_mode') === 'true';
+                let currentBiz = urlParams.get('__biz') || window.biz || '';
+                if (!currentBiz && document.documentElement) {
+                    const m = document.documentElement.outerHTML.match(/(?:var\s+biz\s*=\s*|__biz=)"?([^"&'\s]+)"?/);
+                    if (m && m[1]) currentBiz = m[1];
+                }
+
+                if (isBatchMode && currentBiz && !window.location.pathname.includes('/s')) {
+                    // 若页面中无 HUD 元素（如原生公众号主页），动态注入顶部悬浮指示条
+                    let desc = document.getElementById('stream-desc');
+                    let title = document.getElementById('stream-title');
+                    if (!desc) {
+                        const hud = document.createElement('div');
+                        hud.id = 'stream-hud-floating';
+                        hud.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);background:rgba(20,20,20,0.88);color:#fff;padding:10px 20px;border-radius:24px;z-index:999999;font-size:13px;box-shadow:0 8px 24px rgba(0,0,0,0.2);display:flex;align-items:center;gap:10px;font-family:-apple-system,sans-serif;backdrop-filter:blur(10px);pointer-events:none;';
+                        hud.innerHTML = '<span style="font-size:16px;display:inline-block;animation:stream-spin 2s linear infinite;">🔄</span><span id="stream-desc">正在自动同步凭证...</span><style>@keyframes stream-spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}</style>';
+                        if (document.body) {
+                            document.body.appendChild(hud);
+                        } else {
+                            document.addEventListener('DOMContentLoaded', () => document.body.appendChild(hud));
+                        }
+                        desc = document.getElementById('stream-desc');
+                    }
+
+                    fetch('/__wx_official_api/mp-batch-next?current_biz=' + encodeURIComponent(currentBiz))
+                        .then(r => r.json())
+                        .then(data => {
+                            if (data && data.next_url) {
+                                remoteLog('✅ 凭证已捕获，即将流转至第 [' + (data.step + 1) + '/' + data.total + '] 个公众号【' + (data.next_name || '') + '】...');
+                                if (title) title.innerText = '✅ 凭证捕获成功';
+                                if (desc) desc.innerText = '✅ 凭证已捕获，即将流转至第 [' + (data.step + 1) + '/' + data.total + '] 个【' + (data.next_name || '') + '】...';
+                                setTimeout(() => {
+                                    window.location.href = data.next_url;
+                                }, 1800);
+                            } else if (data && data.completed) {
+                                try { sessionStorage.removeItem('mp_batch_mode'); } catch(e) {}
+                                remoteLog('🎉 全部公众号凭证已完成捕获，正在返回聚合控制台');
+                                if (title) title.innerText = '🎉 全部授权完成！';
+                                if (desc) desc.innerText = '🎉 全部 ' + data.total + ' 个公众号会话凭据已全部就绪，正在返回控制台...';
+                                setTimeout(() => {
+                                    window.location.href = 'http://127.0.0.1:5200/api/auth/mp-batch-portal';
+                                }, 1200);
+                            }
+                        }).catch(err => {
+                            if (desc) desc.innerText = '流转请求异常: ' + err.message;
+                        });
+                }
+            } catch(e) {}
+
+            // 生产配置：动态随机区间 (探针 4~6 分钟，兜底 45~55 分钟)
+            function getNextPingInterval() {
+                return Math.floor(240000 + Math.random() * 120000); // 240s ~ 360s (4 ~ 6分钟)
+            }
+
+            function getNextSafetyReloadInterval() {
+                return Math.floor(2700000 + Math.random() * 600000); // 2700s ~ 3300s (45 ~ 55分钟)
+            }
+
+            function remoteLog(message) {
+                try {
+                    fetch('/__wx_official_api/log', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ message: message })
+                    }).catch(() => {});
+                } catch (e) {}
+            }
+
+            remoteLog('凭证自动续期已激活 (动态随机模式：探针4-6分钟/兜底45-55分钟)');
+
+            function findArticleLinkFromDom() {
+                // 1. 尝试从 window.msgList 或 window.cgiData 中读取 JSON
+                try {
+                    let rawList = window.msgList || (window.cgiData && window.cgiData.msgList);
+                    if (typeof rawList === 'string' && rawList.trim()) {
+                        let txt = rawList.replace(/&quot;/g, '"').replace(/&amp;/g, '&');
+                        rawList = JSON.parse(txt);
+                    }
+                    if (rawList && rawList.list && rawList.list.length > 0) {
+                        for (const item of rawList.list) {
+                            const info = item.app_msg_ext_info;
+                            if (info && info.content_url) {
+                                let u = info.content_url.replace(/\\/g, '').replace(/&amp;/g, '&');
+                                if (u.startsWith('http://') || u.startsWith('https://') || u.startsWith('/s')) {
+                                    if (u.startsWith('/s')) u = 'https://mp.weixin.qq.com' + u;
+                                    return u;
+                                }
+                            }
+                        }
+                    }
+                } catch(e) {}
+
+                // 2. 尝试从 DOM 元素中提取
+                try {
+                    const selectors = ['a[href]', '[href_src]', '[data-link]', '[data-url]', '.weui_media_title', '.msg_title', '.appmsg_title', '.appmsg_title_link'];
+                    for (const sel of selectors) {
+                        const els = document.querySelectorAll(sel);
+                        for (const el of els) {
+                            let val = el.getAttribute('href') || el.getAttribute('href_src') || el.getAttribute('data-link') || el.getAttribute('data-url') || '';
+                            if (el.tagName === 'A' && el.href && !el.href.startsWith('javascript:')) {
+                                val = el.href;
+                            }
+                            val = val.replace(/&amp;/g, '&');
+                            if (val && (val.includes('/s?') || val.includes('/s/')) && !val.startsWith('javascript:')) {
+                                if (val.startsWith('/s')) val = 'https://mp.weixin.qq.com' + val;
+                                return val;
+                            }
+                        }
+                    }
+                } catch(e) {}
+
+                // 3. 尝试直接在 outerHTML 匹配 /s?__biz= 文章链接
+                try {
+                    const html = document.documentElement ? document.documentElement.outerHTML : '';
+                    const match = html.match(/(?:https?:\/\/mp\.weixin\.qq\.com)?\/s\?__biz=[^"'\s<>&]+(?:&amp;[^"'\s<>]+)*/i);
+                    if (match && match[0]) {
+                        let u = match[0].replace(/\\/g, '').replace(/&amp;/g, '&');
+                        if (u.startsWith('/s')) u = 'https://mp.weixin.qq.com' + u;
+                        return u;
+                    }
+                } catch(e) {}
+
+                return null;
+            }
+
+            function forceReloadPage() {
+                const urlParams = new URLSearchParams(window.location.search);
+                const biz = urlParams.get('__biz') || window.biz || '';
+                const onArticlePage = window.location.pathname.includes('/s');
+
+                if (onArticlePage && biz) {
+                    // 文章详情页 -> 跳转到该公众号文章列表页（不同页面，PC 微信重新签发凭证）
+                    remoteLog('导航至列表页获取新凭证');
+                    try {
+                        window.location.href = '/mp/profile_ext?action=home&__biz=' + biz + '&scene=124&_t=' + Date.now();
+                        return;
+                    } catch(e) {}
+                } else {
+                    // 列表页 -> 从页面中提取一篇文章链接跳转过去
+                    const articleUrl = findArticleLinkFromDom();
+                    if (articleUrl) {
+                        remoteLog('导航至文章页获取新凭证: ' + articleUrl);
+                        try {
+                            window.location.href = articleUrl;
+                            return;
+                        } catch(e) {}
+                    }
+                }
+                // 兜底：剥除旧 key 重载当前页面
+                remoteLog('剥除旧 key 重载当前页面');
+                try {
+                    const u = new URL(window.location.href);
+                    u.searchParams.delete('key');
+                    u.searchParams.delete('pass_ticket');
+                    u.searchParams.delete('uin');
+                    u.searchParams.delete('exportkey');
+                    u.searchParams.set('_t', Date.now());
+                    window.location.href = u.toString();
+                    return;
+                } catch(e) {}
+                try { window.location.href = window.location.href; return; } catch(e) {}
+                try { window.location.reload(); } catch(e) {}
+            }
+
+            function doPing() {
+                try {
+                    const urlParams = new URLSearchParams(window.location.search);
+                    let biz = urlParams.get('__biz') || window.biz || (window.cgiData && window.cgiData.biz) || '';
+                    let appmsg_token = urlParams.get('appmsg_token') || window.appmsg_token || '';
+                    let key = urlParams.get('key') || window.key || '';
+                    let pass_ticket = urlParams.get('pass_ticket') || window.pass_ticket || '';
+                    let uin = urlParams.get('uin') || window.uin || '';
+
+                    if (!biz && document.documentElement) {
+                        const m = document.documentElement.outerHTML.match(/(?:var\s+biz\s*=\s*|__biz=)"?([^"&'\s]+)"?/);
+                        if (m && m[1]) biz = m[1];
+                    }
+
+                    if (!biz) return;
+
+                    let pingUrl = `/mp/profile_ext?action=getmsg&__biz=${encodeURIComponent(biz)}&f=json&offset=0&count=1&is_ok=1&scene=126`;
+                    if (appmsg_token) pingUrl += `&appmsg_token=${encodeURIComponent(appmsg_token)}`;
+                    if (key) pingUrl += `&key=${encodeURIComponent(key)}`;
+                    if (pass_ticket) pingUrl += `&pass_ticket=${encodeURIComponent(pass_ticket)}`;
+                    if (uin) pingUrl += `&uin=${encodeURIComponent(uin)}`;
+
+                    fetch(pingUrl, { method: 'GET', cache: 'no-cache', headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+                        .then(r => r.json())
+                        .then(data => {
+                            if (data && (data.ret === -3 || data.ret === -4 || data.ret === 200003)) {
+                                remoteLog('凭证已过期 (ret=' + data.ret + ')，立即刷新');
+                                forceReloadPage();
+                            }
+                        })
+                        .catch(() => {});
+                } catch (e) {}
+            }
+
+            function scheduleNextPing() {
+                const nextMs = getNextPingInterval();
+                setTimeout(() => {
+                    doPing();
+                    scheduleNextPing();
+                }, nextMs);
+            }
+
+            function scheduleNextSafetyReload() {
+                const nextMs = getNextSafetyReloadInterval();
+                setTimeout(() => {
+                    forceReloadPage();
+                    scheduleNextSafetyReload();
+                }, nextMs);
+            }
+
+            setTimeout(doPing, 1000);
+            scheduleNextPing();
+            scheduleNextSafetyReload();
+
+            document.addEventListener('visibilitychange', () => {
+                if (!document.hidden) doPing();
+            });
+        }
+
         const interval = setInterval(() => {
             if (document.body) {
                 clearInterval(interval);
@@ -1349,10 +1876,26 @@ def get_injected_official_js():
                 }
                 // Always try to scan and inject buttons next to article links (e.g. list pages)
                 setInterval(injectListDownloadButtons, 1000);
+                startAutoCredentialRefreshLoop();
             }
         }, 100);
     })();
     """
+
+
+try:
+    import mitmproxy.log
+    _orig_legacy_emit = mitmproxy.log.LegacyLogEvents.emit
+    def _safe_legacy_emit(self, record):
+        try:
+            if getattr(self, "master", None) and getattr(self.master, "event_loop", None):
+                if not self.master.event_loop.is_closed():
+                    _orig_legacy_emit(self, record)
+        except Exception:
+            pass
+    mitmproxy.log.LegacyLogEvents.emit = _safe_legacy_emit
+except Exception:
+    pass
 
 
 def cleanup_mitmproxy_logging_handlers():
@@ -1436,94 +1979,108 @@ class ProxyManager:
         self.loop = None
         self.master = None
         self.port = 5202
+        self.last_error = None
 
     def start(self):
         if self.running:
             return True
 
+        self.last_error = None
         cleanup_mitmproxy_logging_handlers()
         try:
             from mitmproxy.tools.dump import DumpMaster
             from mitmproxy import options
         except ImportError as e:
-            print(f"Error starting ProxyManager: mitmproxy is not installed in this Python environment. {e}")
-            raise RuntimeError("未检测到 mitmproxy 依赖，请确保您是在虚拟环境 venv312 下运行项目（当前 Python 缺少 mitmproxy 库）。")
+            err_msg = "未检测到 mitmproxy 依赖，请确保您是在虚拟环境 venv312 下运行项目（当前 Python 缺少 mitmproxy 库）。"
+            self.last_error = err_msg
+            print(f"Error starting ProxyManager: {err_msg} ({e})")
+            raise RuntimeError(err_msg)
 
-        # 0. 检测系统代理是否已被其他软件占用（VPN/Clash/dev-sidecar 等）
-        if sys.platform == "darwin":
-            try:
-                service = get_active_mac_service()
-                for proxy_cmd in ("getwebproxy", "getsecurewebproxy"):
-                    out = subprocess.run(
-                        ["networksetup", f"-{proxy_cmd}", service],
-                        capture_output=True, text=True, timeout=3
+        try:
+            # 0. 检测系统代理是否已被其他软件占用（VPN/Clash/dev-sidecar 等）
+            if sys.platform == "darwin":
+                try:
+                    service = get_active_mac_service()
+                    for proxy_cmd in ("getwebproxy", "getsecurewebproxy"):
+                        out = subprocess.run(
+                            ["networksetup", f"-{proxy_cmd}", service],
+                            capture_output=True, text=True, timeout=3
+                        )
+                        if out.returncode == 0:
+                            lines = out.stdout.strip().splitlines()
+                            enabled_line = [l for l in lines if l.startswith("Enabled:")]
+                            port_line = [l for l in lines if l.startswith("Port:")]
+                            if enabled_line and "Yes" in enabled_line[0]:
+                                conflict_port = port_line[0].split(":", 1)[1].strip() if port_line else "?"
+                                if conflict_port != str(self.port):
+                                    print(f"[WARNING] 系统代理已被其他软件占用 (端口 {conflict_port})，"
+                                          f"将强制覆盖为 MITM 代理端口 {self.port}。"
+                                          f"如果您正在使用 VPN/Clash，请先关闭它们的系统代理设置。")
+                except Exception as ex:
+                    print(f"[WARNING] 检测系统代理状态失败: {ex}")
+            elif sys.platform == "win32":
+                try:
+                    import winreg
+                    key = winreg.OpenKey(
+                        winreg.HKEY_CURRENT_USER,
+                        r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                        0, winreg.KEY_READ
                     )
-                    if out.returncode == 0:
-                        lines = out.stdout.strip().splitlines()
-                        enabled_line = [l for l in lines if l.startswith("Enabled:")]
-                        port_line = [l for l in lines if l.startswith("Port:")]
-                        if enabled_line and "Yes" in enabled_line[0]:
-                            conflict_port = port_line[0].split(":", 1)[1].strip() if port_line else "?"
-                            if conflict_port != str(self.port):
-                                print(f"[WARNING] 系统代理已被其他软件占用 (端口 {conflict_port})，"
+                    try:
+                        proxy_enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
+                        if proxy_enable:
+                            proxy_server, _ = winreg.QueryValueEx(key, "ProxyServer")
+                            if proxy_server and str(self.port) not in str(proxy_server):
+                                print(f"[WARNING] Windows 系统代理已被其他软件占用 ({proxy_server})，"
                                       f"将强制覆盖为 MITM 代理端口 {self.port}。"
-                                      f"如果您正在使用 VPN/Clash，请先关闭它们的系统代理设置。")
-            except Exception as ex:
-                print(f"[WARNING] 检测系统代理状态失败: {ex}")
-        elif sys.platform == "win32":
-            try:
-                import winreg
-                key = winreg.OpenKey(
-                    winreg.HKEY_CURRENT_USER,
-                    r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                    0, winreg.KEY_READ
-                )
-                try:
-                    proxy_enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
-                    if proxy_enable:
-                        proxy_server, _ = winreg.QueryValueEx(key, "ProxyServer")
-                        if proxy_server and str(self.port) not in str(proxy_server):
-                            print(f"[WARNING] Windows 系统代理已被其他软件占用 ({proxy_server})，"
-                                  f"将强制覆盖为 MITM 代理端口 {self.port}。"
-                                  f"如果您正在使用 dev-sidecar/Clash/VPN，请先关闭它们的系统代理。")
-                except FileNotFoundError:
-                    pass
-                # Check if ProxyOverride might bypass our target domains
-                try:
-                    proxy_override, _ = winreg.QueryValueEx(key, "ProxyOverride")
-                    if proxy_override:
-                        print(f"[WARNING] 检测到 Windows ProxyOverride 设置: {proxy_override}，"
-                              f"某些域名可能绕过 MITM 代理。将在设置代理时清除此项。")
-                except FileNotFoundError:
-                    pass
-                winreg.CloseKey(key)
-            except Exception as ex:
-                print(f"[WARNING] 检测 Windows 系统代理状态失败: {ex}")
+                                      f"如果您正在使用 dev-sidecar/Clash/VPN，请先关闭它们的系统代理。")
+                    except FileNotFoundError:
+                        pass
+                    # Check if ProxyOverride might bypass our target domains
+                    try:
+                        proxy_override, _ = winreg.QueryValueEx(key, "ProxyOverride")
+                        if proxy_override:
+                            print(f"[WARNING] 检测到 Windows ProxyOverride 设置: {proxy_override}，"
+                                  f"某些域名可能绕过 MITM 代理。将在设置代理时清除此项。")
+                    except FileNotFoundError:
+                        pass
+                    winreg.CloseKey(key)
+                except Exception as ex:
+                    print(f"[WARNING] 检测 Windows 系统代理状态失败: {ex}")
 
-        ensure_ca_certificates()
+            ensure_ca_certificates()
 
-        # 1. 安装并信任证书
-        cert_ok = install_system_cert(CA_CERT_PATH)
-        if not cert_ok:
-            print("[WARNING] CA 证书可能未被系统信任，MITM 拦截可能失败。"
-                  "请检查是否有其他 VPN/安全软件的证书冲突。")
+            # 1. 安装并信任证书
+            cert_ok = install_system_cert(CA_CERT_PATH)
+            if not cert_ok:
+                print("[WARNING] CA 证书可能未被系统信任，MITM 拦截可能失败。"
+                      "请检查是否有其他 VPN/安全软件的证书冲突。")
 
-        # 2. 把我们的 CA 喂给 mitmproxy
-        confdir = prepare_mitm_confdir()
+            # 2. 把我们的 CA 喂给 mitmproxy
+            confdir = prepare_mitm_confdir()
 
-        # 3. 在后台线程里跑 mitmproxy 的 asyncio 事件循环
-        self.running = True
-        self.thread = threading.Thread(
-            target=self._run_server, args=(str(confdir),), daemon=True
-        )
-        self.thread.start()
+            # 3. 在后台线程里跑 mitmproxy 的 asyncio 事件循环
+            self.running = True
+            self.thread = threading.Thread(
+                target=self._run_server, args=(str(confdir),), daemon=True
+            )
+            self.thread.start()
 
-        # 4. 设置 NO_PROXY=* 使 Python 后端代码绕过系统代理（仅浏览器需走 MITM）
-        _set_no_proxy()
+            # 4. 设置 NO_PROXY=* 使 Python 后端代码绕过系统代理（仅浏览器需走 MITM）
+            _set_no_proxy()
 
-        # 5. 开启系统代理（浏览器/微信客户端会走此代理）
-        set_system_proxy(True, port=self.port)
-        print(f"Channels MITM proxy started on 127.0.0.1:{self.port} and system proxy enabled.")
+            # 5. 开启系统代理（浏览器/微信客户端会走此代理）
+            set_system_proxy(True, port=self.port)
+            if not getattr(self, "_atexit_registered", False):
+                import atexit
+                atexit.register(self.stop)
+                self._atexit_registered = True
+            print(f"Channels MITM proxy started on 127.0.0.1:{self.port} and system proxy enabled.")
+            return True
+        except Exception as ex:
+            self.running = False
+            self.last_error = str(ex)
+            raise ex
         return True
 
     def stop(self):

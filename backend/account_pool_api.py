@@ -81,3 +81,38 @@ def get_events():
     """取走踢出事件队列"""
     events = account_pool.pop_kick_events()
     return jsonify({"events": events})
+
+
+@account_pool_bp.route("/auto-refresh-config", methods=["GET"])
+def get_auto_refresh_cfg():
+    """获取定时自动同步配置"""
+    try:
+        from scripts.auto_refresh_pc_wechat import get_auto_refresh_config
+        return jsonify(get_auto_refresh_config())
+    except Exception as e:
+        return jsonify({"enabled": False, "interval_minutes": 5, "error": str(e)})
+
+
+@account_pool_bp.route("/auto-refresh-toggle", methods=["POST"])
+def toggle_auto_refresh():
+    """切换定时自动同步开关"""
+    data = request.get_json(silent=True) or {}
+    enabled = data.get("enabled", False)
+    try:
+        from scripts.auto_refresh_pc_wechat import set_auto_refresh_enabled
+        cfg = set_auto_refresh_enabled(enabled)
+        return jsonify(cfg)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@account_pool_bp.route("/sync-manual", methods=["POST"])
+def sync_manual():
+    """手动同步微信公众号凭证"""
+    try:
+        from scripts.auto_refresh_pc_wechat import trigger_pc_wechat_refresh
+        success = trigger_pc_wechat_refresh(force=True)
+        return jsonify({"success": success})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+

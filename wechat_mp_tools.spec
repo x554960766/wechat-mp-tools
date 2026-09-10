@@ -28,6 +28,10 @@ datas = [
     (os.path.join(project_root, 'injection_scripts'), 'injection_scripts'),
 ]
 
+mac_assets_dir = os.path.join(project_root, 'mac', 'assets')
+if os.path.isdir(mac_assets_dir):
+    datas.append((mac_assets_dir, os.path.join('mac', 'assets')))
+
 playwright_browsers = os.path.join(project_root, 'ms-playwright')
 bundle_browser = os.environ.get('WECHAT_MP_TOOLS_BUNDLE_BROWSER', '1') != '0'
 if bundle_browser and os.path.isdir(playwright_browsers):
@@ -93,6 +97,10 @@ hiddenimports = [
     'backend.bilibili_login',
     'backend.bilibili_sign',
     'backend.updater',
+    'backend.cred_redact',
+    'backend.refresh_queue',
+    'scripts',
+    'scripts.auto_refresh_pc_wechat',
     'yaml',
     'httpx',
     'sniffio',
@@ -106,9 +114,24 @@ hiddenimports = [
     'webview.platforms',
 ]
 
-# macOS Cocoa 支持
+# macOS Cocoa 支持与自动化模块
 if sys.platform == 'darwin':
     hiddenimports.extend([
+        'mac',
+        'mac.article_finder',
+        'mac.batch_runner',
+        'mac.mac_as',
+        'mac.mac_input',
+        'mac.mac_ocr',
+        'mac.mac_win',
+        'mac.main_mac',
+        'mac.scale',
+        'mac.waiter',
+        'mac.steps',
+        'mac.steps.step1_launch',
+        'mac.steps.step2_search',
+        'mac.steps.step3_open_article',
+        'mac.steps.step4_cleanup',
         'webview.platforms.cocoa',
         'objc',
         'Cocoa',
@@ -116,9 +139,14 @@ if sys.platform == 'darwin':
         'WebKit',
     ])
 
-# Windows WebView2 (winforms) 支持
+# Windows WebView2 (winforms) 支持与自动化模块
 if sys.platform == 'win32':
     hiddenimports.extend([
+        'windows',
+        'windows.win_batch_runner',
+        'windows.win_flow',
+        'windows.win_input',
+        'windows.win_window',
         'pythonnet',
         'clr',
         'clr_loader',

@@ -11,6 +11,49 @@ const AccountsPage = {
                 <p class="page-description">搜索、收藏和管理您关注的微信公众号</p>
             </div>
 
+            <!-- 添加收藏公众号步骤指引 -->
+            <div class="card" style="margin-bottom: var(--spacing-lg); background: linear-gradient(135deg, rgba(7,193,96,0.06) 0%, rgba(7,193,96,0.02) 100%); border: 1px solid rgba(7,193,96,0.18);">
+                <div class="card-header" style="padding-bottom: 8px; border-bottom: none; display: flex; align-items: center; justify-content: space-between;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 1.2rem;">📖</span>
+                        <h3 class="card-title" style="margin: 0; font-size: 1rem; color: var(--text-primary);">添加收藏公众号步骤指引</h3>
+                    </div>
+                    <span style="font-size: 0.75rem; color: #07c160; background: rgba(7,193,96,0.12); padding: 2px 10px; border-radius: 12px; font-weight: 600;">新手必看</span>
+                </div>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 14px; margin-top: 8px;">
+                    <!-- 步骤 1 -->
+                    <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 10px; padding: 14px 16px; box-shadow: var(--shadow-sm);">
+                        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                            <span style="width: 24px; height: 24px; border-radius: 50%; background: #07c160; color: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: bold;">1</span>
+                            <span style="font-weight: 600; color: var(--text-primary); font-size: 0.92rem;">复制公众号文章链接</span>
+                        </div>
+                        <p style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.55; margin: 0;">
+                            在微信中打开需要关注的公众号，进入任意一篇文章，点击右上角 <strong>「...」</strong> 菜单，选择 <strong>「复制链接」</strong>。
+                        </p>
+                    </div>
+                    <!-- 步骤 2 -->
+                    <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 10px; padding: 14px 16px; box-shadow: var(--shadow-sm);">
+                        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                            <span style="width: 24px; height: 24px; border-radius: 50%; background: #07c160; color: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: bold;">2</span>
+                            <span style="font-weight: 600; color: var(--text-primary); font-size: 0.92rem;">粘贴并点击「解析添加」</span>
+                        </div>
+                        <p style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.55; margin: 0;">
+                            将文章链接粘贴至下方输入框（支持混合文字），点击 <strong>「解析添加」</strong>，系统自动提取公众号信息并收藏。
+                        </p>
+                    </div>
+                    <!-- 步骤 3 -->
+                    <div style="background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 10px; padding: 14px 16px; box-shadow: var(--shadow-sm);">
+                        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                            <span style="width: 24px; height: 24px; border-radius: 50%; background: #07c160; color: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: bold;">3</span>
+                            <span style="font-weight: 600; color: var(--text-primary); font-size: 0.92rem;">前往账号池批量同步</span>
+                        </div>
+                        <p style="font-size: 0.82rem; color: var(--text-secondary); line-height: 1.55; margin: 0;">
+                            添加成功后，前往左侧 <strong>「账号池」</strong> 点击 <strong>「批量同步公众号凭证」</strong>，系统将全自动流转授权并保持凭证新鲜。
+                        </p>
+                    </div>
+                </div>
+            </div>
+
             <!-- 搜索与添加区域 -->
             <div class="card" style="margin-bottom: var(--spacing-lg);">
                 <div class="card-header">
@@ -83,7 +126,9 @@ const AccountsPage = {
                         </svg>
                     </div>
                     <h3 class="empty-state-title">还没有收藏的公众号</h3>
-                    <p class="empty-state-desc">在上方搜索框中输入公众号名称，搜索并添加到收藏</p>
+                    <p class="empty-state-desc" style="max-width: 480px; margin: 0 auto;">
+                        请参考上方 3 步操作指引：复制公众号任意一篇文章的链接粘贴至上方输入框，点击「解析添加」即可完成收藏。
+                    </p>
                 </div>
             `;
             return;
