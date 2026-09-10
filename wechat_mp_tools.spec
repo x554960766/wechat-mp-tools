@@ -99,6 +99,7 @@ hiddenimports = [
     'backend.updater',
     'backend.cred_redact',
     'backend.refresh_queue',
+    'backend.proxy_worker',
     'scripts',
     'scripts.auto_refresh_pc_wechat',
     'yaml',

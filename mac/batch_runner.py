@@ -157,13 +157,88 @@ class WeChatBatchRunner:
         img = capture_window(main)
         boxes = ocr(img)
 
+        def _find_dropdown_filehelper_box(boxes: list) -> any:
+            """从微信搜索下拉列表或独立浮层窗口中精准定位「功能」分类下的「文件传输助手」。"""
+            if not boxes:
+                return None
+            import re
+
+            # 1. 寻找「聊天记录」分类标题作为绝对下边界
+            chat_top = float("inf")
+            for b in boxes:
+                txt = b.text.strip().replace(" ", "")
+                if any(k in txt for k in ("聊天记录", "相关的聊天记录", "条聊天记录")) and len(txt) <= 12:
+                    if b.top < chat_top:
+                        chat_top = b.top
+
+            # 2. 寻找「功能」分类标题
+            func_header = None
+            for b in boxes:
+                txt = b.text.strip().replace(" ", "")
+                if (txt == "功能" or (len(txt) <= 4 and "功能" in txt and "助手" not in txt and "搜索" not in txt)) and b.top < chat_top:
+                    func_header = b
+                    break
+
+            # 3. 寻找「功能」下方的其他分类标题以确定下边界
+            next_section_top = chat_top
+            if func_header:
+                for b in boxes:
+                    if b.top > func_header.top and b.top < next_section_top:
+                        txt = b.text.strip().replace(" ", "")
+                        if txt in ("联系人", "群聊", "公众号", "收藏", "小程序", "表情", "文章") or (len(txt) <= 4 and any(k in txt for k in ("联系人", "群聊", "收藏"))):
+                            next_section_top = b.top
+
+            # 4. 严格清洗候选块：只保留纯粹的「文件传输助手」，排除任何聊天对话
+            def _is_pure_filehelper_item(b) -> bool:
+                raw = b.text.strip()
+                txt = raw.replace(" ", "")
+                if ":" in raw or "：" in raw:
+                    return False
+                chat_keywords = ("记录", "相关的", "条相关", "昨天", "今天", "撤回", "图片", "视频", "语音", "弱智")
+                if any(k in txt for k in chat_keywords):
+                    return False
+                if re.search(r'\d{1,2}:\d{2}', raw) or re.search(r'\d{4}[-/.]\d{1,2}', raw):
+                    return False
+                clean_txt = re.sub(r'^[^\u4e00-\u9fa5]+', '', txt)
+                if "文件传输助手" not in clean_txt or len(clean_txt) > 8:
+                    return False
+                if b.top >= chat_top:
+                    return False
+                return True
+
+            valid_cands = [b for b in boxes if _is_pure_filehelper_item(b)]
+            if not valid_cands:
+                return None
+
+            valid_cands.sort(key=lambda x: x.top)
+
+            # 优先匹配「功能」标题下方的第一项
+            if func_header:
+                below_func = [b for b in valid_cands if b.top > func_header.top and b.top < next_section_top]
+                if below_func:
+                    logger.info("🎯 成功在「功能」标题 (y=%d) 下方匹配到文件传输助手: %s (y=%d)", func_header.top, below_func[0].text, below_func[0].top)
+                    return below_func[0]
+
+            # 次优先：纯净完全匹配项
+            strict_cands = [b for b in valid_cands if re.sub(r'^[^\u4e00-\u9fa5]+', '', b.text.strip().replace(" ", "")) == "文件传输助手"]
+            if strict_cands:
+                logger.info("🎯 精确定位到纯净「文件传输助手」功能条目: %s (y=%d)", strict_cands[0].text, strict_cands[0].top)
+                return strict_cands[0]
+
+            return valid_cands[0]
+
         def _is_in_filehelper_window(w) -> bool:
             img_c = capture_window(w)
             if img_c is None:
                 return False
             boxes_c = ocr(img_c)
-            r_start = int(img_c.shape[1] * 0.35)
-            return any("文件传输助手" in b.text and b.top < 80 and b.left > r_start for b in boxes_c)
+            # 严格校验会话窗口顶部标题栏
+            for b in boxes_c:
+                txt = b.text.strip().replace(" ", "")
+                if (txt in ("文件传输助手", "文件传输助手(FileTransfer)") or (txt.startswith("文件传输助手") and len(txt) <= 8)) and b.top < 65 and b.left >= 180:
+                    if ":" not in b.text and "：" not in b.text and "记录" not in txt:
+                        return True
+            return False
 
         if not _is_in_filehelper_window(main):
             for attempt in range(1, 3):
@@ -175,32 +250,68 @@ class WeChatBatchRunner:
                 human_sleep(0.3, 0.5)
                 img = capture_window(main)
                 boxes = ocr(img)
-                left_limit = int(img.shape[1] * 0.38)
-                helper_box = next((b for b in boxes if b.left < left_limit and b.top > 50 and '文件传输助手' in b.text), None)
+                helper_box = next((b for b in boxes if b.left < 230 and b.top > 45 and ('文件传' in b.text or '传输助手' in b.text) and ':' not in b.text and '：' not in b.text and len(b.text.strip()) <= 8), None)
                 if helper_box:
                     sx, sy = cs.img_to_screen(helper_box.center[0], helper_box.center[1])
                     move_and_click(sx, sy)
+                    human_sleep(0.8, 1.2)
                 else:
                     # 搜索框精准查找文件传输助手
                     move_and_click(main.x + 100, main.y + 25)
                     human_sleep(0.2, 0.3)
                     type_text_via_clipboard('文件传输助手', clear_first=True)
-                    human_sleep(0.6, 0.9)
-                    img_s = capture_window(main)
-                    boxes_s = ocr(img_s)
-                    cand = next((b for b in boxes_s if b.left < left_limit + 100 and '文件传输助手' in b.text and b.top > 45), None)
-                    if cand:
-                        cs_s = CoordSpace(main.window_id, {'x': main.x, 'y': main.y, 'w': main.w, 'h': main.h})
-                        move_and_click(*cs_s.img_to_screen(*cand.center))
+                    human_sleep(0.6, 0.8)
+
+                    # 捕获搜索下拉浮层：优先检测微信搜索的独立浮层窗口 (Popover Window)
+                    popover_win = None
+                    from mac.mac_win import list_wechat_windows
+                    t_start = time.time()
+                    while time.time() - t_start < 1.5:
+                        for w in list_wechat_windows():
+                            if not w.title and 200 <= w.w <= 550 and w.h >= 180:
+                                if abs(w.x - main.x) <= 350:
+                                    popover_win = w
+                                    break
+                        if popover_win:
+                            break
+                        human_sleep(0.15, 0.25)
+
+                    target_box = None
+                    target_cs = cs
+
+                    if popover_win:
+                        cs_pop = CoordSpace(popover_win.window_id, {"x": popover_win.x, "y": popover_win.y, "w": popover_win.w, "h": popover_win.h})
+                        img_pop = capture_window(popover_win)
+                        boxes_pop = ocr(img_pop) if img_pop is not None else []
+                        target_box = _find_dropdown_filehelper_box(boxes_pop)
+                        if target_box:
+                            target_cs = cs_pop
+                            logger.info("🎯 在独立搜索浮层窗口 (id=%s) 中检测到文件传输助手", popover_win.window_id)
+
+                    # 若未找到浮层窗口，回退截取主窗口
+                    if not target_box:
+                        img_s = capture_window(main)
+                        boxes_s = ocr(img_s)
+                        drop_cands = [b for b in boxes_s if b.left < 350]
+                        target_box = _find_dropdown_filehelper_box(drop_cands)
+
+                    if target_box:
+                        sx, sy = target_cs.img_to_screen(*target_box.center)
+                        logger.info("✅ 精确定位到「功能 -> 文件传输助手」[%s]，点击屏幕坐标 (%d, %d)", target_box.text, sx, sy)
+                        move_and_click(sx, sy)
+                        human_sleep(0.8, 1.2)
                     else:
-                        press("down")
-                        human_sleep(0.2, 0.3)
-                        press("return")
-                        human_sleep(0.4, 0.6)
-                        move_and_click(main.x + 150, main.y + 75)
-                human_sleep(0.8, 1.2)
+                        logger.warning("⚠️ 未在搜索浮层中定位到「功能」下方的文件传输助手，按 Escape 取消搜索防误触...")
+                        press("escape")
+                        human_sleep(0.3, 0.5)
+
                 if _is_in_filehelper_window(main):
+                    logger.info("🎉 成功准确选中并显示「文件传输助手」聊天页面！")
                     break
+                else:
+                    logger.warning("⚠️ 安全校验未通过：当前窗口非「文件传输助手」，按 Escape 退出以防误操作...")
+                    press("escape", times=2)
+                    human_sleep(0.4, 0.6)
 
         def _is_portal_link(text: str) -> bool:
             t = text.lower()
@@ -212,7 +323,7 @@ class WeChatBatchRunner:
 
         img2 = capture_window(main)
         boxes2 = ocr(img2)
-        link_box = next((b for b in reversed(boxes2) if b.left > 280 and _is_portal_link(b.text)), None)
+        link_box = next((b for b in reversed(boxes2) if b.left >= 200 and _is_portal_link(b.text)), None)
         if link_box:
             logger.info("✅ 找到已有聚合页链接气泡 [%s]，直接点击打开...", link_box.text)
             sx, sy = cs.img_to_screen(link_box.center[0], link_box.center[1])

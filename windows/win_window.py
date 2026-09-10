@@ -94,6 +94,10 @@ def _bind_apis():
     user32.GetWindowThreadProcessId.restype = wintypes.DWORD
     user32.SetForegroundWindow.argtypes = [wintypes.HWND]
     user32.SetForegroundWindow.restype = wintypes.BOOL
+    user32.SetFocus.argtypes = [wintypes.HWND]
+    user32.SetFocus.restype = wintypes.HWND
+    user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+    user32.AttachThreadInput.restype = wintypes.BOOL
     user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
     user32.ShowWindow.restype = wintypes.BOOL
     user32.IsIconic.argtypes = [wintypes.HWND]
@@ -103,6 +107,8 @@ def _bind_apis():
     user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
     user32.PostMessageW.restype = wintypes.BOOL
 
+    kernel32.GetCurrentThreadId.argtypes = []
+    kernel32.GetCurrentThreadId.restype = wintypes.DWORD
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     kernel32.OpenProcess.restype = wintypes.HANDLE
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
@@ -228,16 +234,29 @@ def find_article_windows(windows: list = None) -> list:
 
 
 def activate_window(hwnd: int, timeout: float = 2.0) -> bool:
-    """把窗口带到前台（最小化时先还原）。SetForegroundWindow 失败时静默降级。"""
+    """把窗口真正带到系统最前台（绕过 Windows 前台锁定限制，还原最小化）。"""
     try:
         if not user32.IsWindow(hwnd):
             return False
         if user32.IsIconic(hwnd):
             user32.ShowWindow(hwnd, SW_RESTORE)
-            time.sleep(0.2)
-        ok = bool(user32.SetForegroundWindow(hwnd))
+            time.sleep(0.15)
+        else:
+            user32.ShowWindow(hwnd, SW_SHOW)
+
+        # 穿透 Windows 前台锁定限制：通过附加线程输入状态夺取前台激活权
+        cur_tid = kernel32.GetCurrentThreadId()
+        target_tid = user32.GetWindowThreadProcessId(hwnd, None)
+        if cur_tid != target_tid:
+            user32.AttachThreadInput(cur_tid, target_tid, True)
+            user32.SetForegroundWindow(hwnd)
+            user32.SetFocus(hwnd)
+            user32.AttachThreadInput(cur_tid, target_tid, False)
+        else:
+            user32.SetForegroundWindow(hwnd)
+            user32.SetFocus(hwnd)
         time.sleep(0.2)
-        return ok
+        return True
     except Exception as e:
         logger.debug("activate_window(%s) 异常: %s", hwnd, e)
         return False
@@ -274,7 +293,8 @@ def launch_wechat_windows(wait_seconds: float = 12.0) -> bool:
         logger.warning("⚠️ 未找到微信安装路径，请手动启动微信后重试。")
         return False
     try:
-        subprocess.Popen([exe], close_fds=True)
+        flags = 0x08000000 if sys.platform == "win32" else 0
+        subprocess.Popen([exe], close_fds=True, creationflags=flags)
     except Exception as e:
         logger.warning("⚠️ 启动微信失败: %s", e)
         return False

@@ -155,68 +155,82 @@ def _run_certutil(args, check=False):
         # Force the PATH to contain ONLY system paths to completely isolate certutil.exe
         # from any outside or packaged DLLs that might conflict.
         env["PATH"] = f"{system32}{os.pathsep}{system_root}"
+        flags = 0x08000000  # CREATE_NO_WINDOW: 彻底阻止 Windows 弹出的黑色命令行闪烁窗口
         return subprocess.run(
             [certutil] + list(args),
             capture_output=True, check=check, env=env, cwd=system32,
+            creationflags=flags
         )
     return subprocess.run(["certutil"] + list(args), capture_output=True, check=check)
 
+_cert_trusted_cache = {"ts": 0.0, "val": False}
 
 def check_cert_trusted():
-    if sys.platform == "darwin":
-        try:
-            # 0. 先检查证书是否在钥匙串中存在，若不存在则必定未信任
-            out_find = subprocess.run(
-                ["security", "find-certificate", "-c", "Channels Interceptor CA"],
-                capture_output=True
-            )
-            if out_find.returncode != 0:
+    now = time.time()
+    if now - _cert_trusted_cache["ts"] < 4.0:
+        return _cert_trusted_cache["val"]
+
+    def _eval():
+        if sys.platform == "darwin":
+            try:
+                # 0. 先检查证书是否在钥匙串中存在，若不存在则必定未信任
+                out_find = subprocess.run(
+                    ["security", "find-certificate", "-c", "Channels Interceptor CA"],
+                    capture_output=True
+                )
+                if out_find.returncode != 0:
+                    return False
+
+                def has_valid_trust_count(output_text):
+                    lines = output_text.splitlines()
+                    for i, line in enumerate(lines):
+                        if "Channels Interceptor CA" in line:
+                            for j in range(i + 1, min(i + 5, len(lines))):
+                                if "Number of trust settings" in lines[j]:
+                                    match = re.search(r"Number of trust settings\s*:\s*(\d+)", lines[j])
+                                    if match:
+                                        return True
+                            return True
+                    return False
+
+                # 1. Check System-wide domain trust settings
+                out_d = subprocess.run(["security", "dump-trust-settings", "-d"], capture_output=True, text=True)
+                if out_d.returncode == 0 and "Channels Interceptor CA" in out_d.stdout:
+                    if has_valid_trust_count(out_d.stdout):
+                        return True
+                
+                # 2. Check User domain trust settings (installed via fallback to login keychain)
+                out_s = subprocess.run(["security", "dump-trust-settings", "-s"], capture_output=True, text=True)
+                if out_s.returncode == 0 and "Channels Interceptor CA" in out_s.stdout:
+                    if has_valid_trust_count(out_s.stdout):
+                        return True
+                        
+                # 3. Check Default domain trust settings
+                out = subprocess.run(["security", "dump-trust-settings"], capture_output=True, text=True)
+                if out.returncode == 0 and "Channels Interceptor CA" in out.stdout:
+                    if has_valid_trust_count(out.stdout):
+                        return True
+
                 return False
-
-            def has_valid_trust_count(output_text):
-                lines = output_text.splitlines()
-                for i, line in enumerate(lines):
-                    if "Channels Interceptor CA" in line:
-                        for j in range(i + 1, min(i + 5, len(lines))):
-                            if "Number of trust settings" in lines[j]:
-                                match = re.search(r"Number of trust settings\s*:\s*(\d+)", lines[j])
-                                if match and int(match.group(1)) > 0:
-                                    return True
+            except Exception:
                 return False
+        elif sys.platform == "win32":
+            try:
+                out = _run_certutil(["-verifystore", "-user", "root", "Channels Interceptor CA"])
+                if out.returncode == 0:
+                    return True
+                out2 = _run_certutil(["-verifystore", "root", "Channels Interceptor CA"])
+                if out2.returncode == 0:
+                    return True
+                return False
+            except Exception:
+                return False
+        return False
 
-            # 1. Check System-wide domain trust settings
-            out_d = subprocess.run(["security", "dump-trust-settings", "-d"], capture_output=True, text=True)
-            if out_d.returncode == 0 and "Channels Interceptor CA" in out_d.stdout:
-                if has_valid_trust_count(out_d.stdout):
-                    return True
-            
-            # 2. Check User domain trust settings (installed via fallback to login keychain)
-            out_s = subprocess.run(["security", "dump-trust-settings", "-s"], capture_output=True, text=True)
-            if out_s.returncode == 0 and "Channels Interceptor CA" in out_s.stdout:
-                if has_valid_trust_count(out_s.stdout):
-                    return True
-                    
-            # 3. Check Default domain trust settings
-            out = subprocess.run(["security", "dump-trust-settings"], capture_output=True, text=True)
-            if out.returncode == 0 and "Channels Interceptor CA" in out.stdout:
-                if has_valid_trust_count(out.stdout):
-                    return True
-
-            return False
-        except Exception:
-            return False
-    elif sys.platform == "win32":
-        try:
-            out = _run_certutil(["-verifystore", "-user", "root", "Channels Interceptor CA"])
-            if out.returncode == 0:
-                return True
-            out2 = _run_certutil(["-verifystore", "root", "Channels Interceptor CA"])
-            if out2.returncode == 0:
-                return True
-            return False
-        except Exception:
-            return False
-    return False
+    val = _eval()
+    _cert_trusted_cache["ts"] = now
+    _cert_trusted_cache["val"] = val
+    return val
 
 def _delete_all_matching_mac_certs(common_name: str = "Channels Interceptor CA"):
     """安全清空钥匙串中所有同名（包括历史重复/冲突的）证书，通过 SHA-1 哈希精准删除以杜绝歧义错误。"""
@@ -240,9 +254,6 @@ def install_system_cert(ca_cert_path):
         return True
         
     if sys.platform == "darwin":
-        # 清理旧残留及可能存在的重复/冲突证书
-        _delete_all_matching_mac_certs("Channels Interceptor CA")
-            
         # 1. 尝试直接安装至用户 Login 钥匙串
         try:
             keychain_path = os.path.expanduser("~/Library/Keychains/login.keychain-db")
@@ -251,13 +262,13 @@ def install_system_cert(ca_cert_path):
             res = subprocess.run([
                 "security", "add-trusted-cert",
                 "-r", "trustRoot",
-                "-p", "ssl",
                 "-k", keychain_path,
                 str(ca_cert_path)
             ], capture_output=True, text=True, timeout=5)
             if res.returncode == 0 and check_cert_trusted():
                 return True
         except Exception as e:
+            print(f"Login keychain installation note: {e}")
             print(f"Login keychain installation note: {e}")
 
         # 2. 唤起系统提权弹窗安装至系统钥匙串 (/Library/Keychains/System.keychain)
@@ -370,28 +381,194 @@ def get_active_mac_service():
         print(f"Error getting active service: {e}")
     return "Wi-Fi"
 
-def set_mac_proxy(enabled, host="127.0.0.1", port=5202):
-    service = get_active_mac_service()
+_original_socks_state = {}
+
+def get_all_mac_network_services():
+    """获取 macOS 上所有有效的网络服务名称列表（如 'USB 10/100 LAN', 'Wi-Fi' 等）"""
+    services = []
     try:
-        if enabled:
-            subprocess.run(["networksetup", "-setwebproxy", service, host, str(port)], check=True)
-            subprocess.run(["networksetup", "-setsecurewebproxy", service, host, str(port)], check=True)
-        else:
-            subprocess.run(["networksetup", "-setwebproxystate", service, "off"], check=True)
-            subprocess.run(["networksetup", "-setsecurewebproxystate", service, "off"], check=True)
+        out = subprocess.check_output(["networksetup", "-listallnetworkservices"], timeout=3).decode("utf-8")
+        for line in out.splitlines():
+            line = line.strip()
+            if line and not line.startswith("*") and "An asterisk" not in line:
+                services.append(line)
     except Exception as e:
-        print(f"Error setting Mac proxy state to {enabled}: {e}")
+        print(f"Error listing network services: {e}")
+    if not services:
+        services = ["Wi-Fi"]
+    return services
+
+import socket
+
+def _is_tcp_port_open(host: str, port: int, timeout: float = 0.25) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+def detect_upstream_proxy() -> str | None:
+    """智能探测本机正在运行的 VPN / 科学上网代理服务（如 Clash, Surge, V2Ray, Clash Verge 等）。
+    探测优先级：
+    1. 检查 macOS/Windows 当前系统网络配置中原本设置的 HTTP/HTTPS/SOCKS 代理；
+    2. 主动快速探活常见的本地 VPN 默认监听端口 (7897, 7890, 10809, 10808, 1087, 20811, 6152 等)。
+    若探测到存活且非本服务的上游代理，返回格式如 'http://127.0.0.1:7897'；未运行 VPN 时返回 None。
+    """
+    # 1. 检查 macOS 系统中原有的 Web 代理设置
+    if sys.platform == "darwin":
+        try:
+            services = get_all_mac_network_services()
+            active = get_active_mac_service()
+            if active in services:
+                services.remove(active)
+                services.insert(0, active)
+            for s in services:
+                for opt in ("-getwebproxy", "-getsecurewebproxy", "-getsocksfirewallproxy"):
+                    try:
+                        out = subprocess.check_output(["networksetup", opt, s], timeout=1.5, text=True)
+                        if "Enabled: Yes" in out:
+                            m_srv = re.search(r"Server:\s*(\S+)", out)
+                            m_prt = re.search(r"Port:\s*(\d+)", out)
+                            if m_srv and m_prt:
+                                srv, prt = m_srv.group(1), int(m_prt.group(1))
+                                if prt not in (5202, 5200) and _is_tcp_port_open(srv, prt):
+                                    return f"http://{srv}:{prt}"
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    # 2. 检查 Windows 注册表中原有的 ProxyServer
+    elif sys.platform == "win32":
+        try:
+            import winreg
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                0,
+                winreg.KEY_READ
+            )
+            enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            server, _ = winreg.QueryValueEx(key, "ProxyServer")
+            winreg.CloseKey(key)
+            if enabled and server:
+                if "=" in server:
+                    parts = dict(p.split("=", 1) for p in server.split(";") if "=" in p)
+                    server = parts.get("http") or parts.get("https") or ""
+                if server and ":" in server:
+                    srv, prt_str = server.split(":", 1)
+                    prt = int(prt_str)
+                    if prt not in (5202, 5200) and _is_tcp_port_open(srv, prt):
+                        return f"http://{srv}:{prt}"
+        except Exception:
+            pass
+
+    # 3. 常见本地 VPN 客户端默认端口的主动探活（如 Clash Verge 7897, Clash 7890, V2Ray 10809, Surge 6152 等）
+    common_vpn_ports = [7897, 7890, 10809, 10808, 1087, 20811, 6152]
+    for port in common_vpn_ports:
+        if port not in (5202, 5200) and _is_tcp_port_open("127.0.0.1", port):
+            return f"http://127.0.0.1:{port}"
+
+    return None
+
+_original_mac_proxy_backup = {}
+
+def set_mac_proxy(enabled, host="127.0.0.1", port=5202):
+    global _original_socks_state, _original_mac_proxy_backup
+    services = get_all_mac_network_services()
+    active_service = get_active_mac_service()
+    if active_service in services:
+        services.remove(active_service)
+        services.insert(0, active_service)
+
+    for service in services:
+        try:
+            if enabled:
+                # 备份原有 HTTP / HTTPS 代理配置，防止关闭时误杀用户的 VPN
+                if service not in _original_mac_proxy_backup:
+                    info = {}
+                    try:
+                        w_out = subprocess.check_output(["networksetup", "-getwebproxy", service], timeout=2, text=True)
+                        if "Enabled: Yes" in w_out:
+                            m_s = re.search(r"Server:\s*(\S+)", w_out)
+                            m_p = re.search(r"Port:\s*(\d+)", w_out)
+                            if m_s and m_p and int(m_p.group(1)) not in (port, 5200):
+                                info["web"] = (m_s.group(1), m_p.group(1))
+                    except Exception:
+                        pass
+                    try:
+                        s_out = subprocess.check_output(["networksetup", "-getsecurewebproxy", service], timeout=2, text=True)
+                        if "Enabled: Yes" in s_out:
+                            m_s = re.search(r"Server:\s*(\S+)", s_out)
+                            m_p = re.search(r"Port:\s*(\d+)", s_out)
+                            if m_s and m_p and int(m_p.group(1)) not in (port, 5200):
+                                info["secure"] = (m_s.group(1), m_p.group(1))
+                    except Exception:
+                        pass
+                    _original_mac_proxy_backup[service] = info
+
+                # 检查并临时关闭 PAC 自动代理（防止 PAC 脚本覆盖）
+                try:
+                    pac_out = subprocess.check_output(["networksetup", "-getautoproxyurl", service], timeout=2, text=True)
+                    if "Enabled: Yes" in pac_out:
+                        subprocess.run(["networksetup", "-setautoproxystate", service, "off"], capture_output=True)
+                except Exception:
+                    pass
+
+                # 设置 HTTP / HTTPS 代理至 5202
+                subprocess.run(["networksetup", "-setwebproxy", service, host, str(port)], check=True)
+                subprocess.run(["networksetup", "-setsecurewebproxy", service, host, str(port)], check=True)
+            else:
+                # 关闭时：若原本开启了用户的 VPN 代理，则精准恢复，绝不切断用户的科学上网！
+                orig = _original_mac_proxy_backup.get(service, {})
+                if "web" in orig:
+                    subprocess.run(["networksetup", "-setwebproxy", service, orig["web"][0], orig["web"][1]], check=True)
+                    subprocess.run(["networksetup", "-setwebproxystate", service, "on"], check=True)
+                else:
+                    subprocess.run(["networksetup", "-setwebproxystate", service, "off"], check=True)
+
+                if "secure" in orig:
+                    subprocess.run(["networksetup", "-setsecurewebproxy", service, orig["secure"][0], orig["secure"][1]], check=True)
+                    subprocess.run(["networksetup", "-setsecurewebproxystate", service, "on"], check=True)
+                else:
+                    subprocess.run(["networksetup", "-setsecurewebproxystate", service, "off"], check=True)
+        except Exception as e:
+            print(f"Error setting Mac proxy for {service} (enabled={enabled}): {e}")
+
+_original_windows_pac = None
+_original_win_proxy_backup = None
 
 def set_windows_proxy(enabled, host="127.0.0.1", port=5202):
+    global _original_windows_pac, _original_win_proxy_backup
     try:
         import winreg
         key = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
             0,
-            winreg.KEY_WRITE
+            winreg.KEY_READ | winreg.KEY_WRITE
         )
         if enabled:
+            # 备份用户原有的 ProxyServer 与 ProxyEnable
+            try:
+                penable, _ = winreg.QueryValueEx(key, "ProxyEnable")
+                pserver, _ = winreg.QueryValueEx(key, "ProxyServer")
+                if penable and pserver and f":{port}" not in pserver:
+                    _original_win_proxy_backup = (penable, pserver)
+            except Exception:
+                pass
+
+            # 备份并临时清理 PAC 脚本，避免第三方代理的 PAC 规则冲突
+            try:
+                pac_val, _ = winreg.QueryValueEx(key, "AutoConfigURL")
+                if pac_val:
+                    _original_windows_pac = pac_val
+                    winreg.DeleteValue(key, "AutoConfigURL")
+            except FileNotFoundError:
+                pass
+            except Exception:
+                pass
+
             winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 1)
             winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, f"{host}:{port}")
             # Ensure local and intranet addresses bypass the proxy to prevent local loops
@@ -399,7 +576,21 @@ def set_windows_proxy(enabled, host="127.0.0.1", port=5202):
             override_val = "<local>;localhost;127.*;10.*;172.16.*;172.17.*;172.18.*;172.19.*;172.20.*;172.21.*;172.22.*;172.23.*;172.24.*;172.25.*;172.26.*;172.27.*;172.28.*;172.29.*;172.30.*;172.31.*;192.168.*"
             winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, override_val)
         else:
-            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+            if _original_win_proxy_backup:
+                # 优雅还原用户原有的 VPN 代理设置
+                penable, pserver = _original_win_proxy_backup
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, penable)
+                winreg.SetValueEx(key, "ProxyServer", 0, winreg.REG_SZ, pserver)
+                _original_win_proxy_backup = None
+            else:
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+
+            if _original_windows_pac:
+                try:
+                    winreg.SetValueEx(key, "AutoConfigURL", 0, winreg.REG_SZ, _original_windows_pac)
+                except Exception:
+                    pass
+                _original_windows_pac = None
         winreg.CloseKey(key)
         
         import ctypes
@@ -423,6 +614,16 @@ def set_system_proxy(enabled, port=5202):
 
 class ChannelsAddon:
     """只对视频号 / 公众号两个域名做拦截与注入,其余流量透传。"""
+
+    def __init__(self, ready_callback=None):
+        self.ready_callback = ready_callback
+
+    def running(self):
+        if self.ready_callback:
+            try:
+                self.ready_callback()
+            except Exception:
+                pass
 
     def _local_json(self, flow, status, payload_bytes):
         from mitmproxy import http
@@ -1870,13 +2071,18 @@ def get_injected_official_js():
         const interval = setInterval(() => {
             if (document.body) {
                 clearInterval(interval);
-                // Only show detail floating button on article details pages
+                // 仅在文章详情页注入下载按钮
                 if (window.location.pathname.includes('/s')) {
                     injectDetailFloatingButton();
+                    setInterval(injectListDownloadButtons, 1000);
                 }
-                // Always try to scan and inject buttons next to article links (e.g. list pages)
-                setInterval(injectListDownloadButtons, 1000);
-                startAutoCredentialRefreshLoop();
+                // 仅在显式带 batch_mode=1 参数时执行批量流转（普通公众号主页绝不干扰与劫持）
+                try {
+                    const urlParams = new URLSearchParams(window.location.search);
+                    if (urlParams.get('batch_mode') === '1') {
+                        startAutoCredentialRefreshLoop();
+                    }
+                } catch(e) {}
             }
         }, 100);
     })();
@@ -1974,102 +2180,174 @@ class ProxyManager:
         return cls._instance
         
     def __init__(self):
-        self.running = False
-        self.thread = None
-        self.loop = None
-        self.master = None
+        self._running = False
+        self.process = None
         self.port = 5202
         self.last_error = None
+        self._monitor_thread = None
+
+    @property
+    def running(self):
+        if self._running and self.process and self.process.poll() is None:
+            return True
+        return False
+
+    @running.setter
+    def running(self, val):
+        self._running = bool(val)
+
+    def _is_port_listening(self, port: int, timeout: float = 1.0) -> bool:
+        import socket
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=timeout):
+                return True
+        except Exception:
+            return False
+
+    def _kill_port_owner(self, port: int):
+        """强制清理霸占代理端口的任何遗留孤儿进程"""
+        try:
+            if sys.platform == "win32":
+                flags = 0x08000000  # CREATE_NO_WINDOW
+                out = subprocess.check_output(f"netstat -ano | findstr :{port}", shell=True, text=True, creationflags=flags)
+                for line in out.strip().splitlines():
+                    parts = line.strip().split()
+                    if len(parts) >= 5 and "LISTENING" in parts:
+                        pid = parts[-1]
+                        subprocess.run(f"taskkill /F /PID {pid}", shell=True, capture_output=True, creationflags=flags)
+            else:
+                out = subprocess.check_output(["lsof", "-ti", f":{port}"], text=True).strip()
+                if out:
+                    for pid in out.splitlines():
+                        try:
+                            os.kill(int(pid), 9)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
 
     def start(self):
-        if self.running:
+        if self.running and self._is_port_listening(self.port):
             return True
 
         self.last_error = None
         cleanup_mitmproxy_logging_handlers()
-        try:
-            from mitmproxy.tools.dump import DumpMaster
-            from mitmproxy import options
-        except ImportError as e:
-            err_msg = "未检测到 mitmproxy 依赖，请确保您是在虚拟环境 venv312 下运行项目（当前 Python 缺少 mitmproxy 库）。"
-            self.last_error = err_msg
-            print(f"Error starting ProxyManager: {err_msg} ({e})")
-            raise RuntimeError(err_msg)
 
         try:
-            # 0. 检测系统代理是否已被其他软件占用（VPN/Clash/dev-sidecar 等）
-            if sys.platform == "darwin":
-                try:
-                    service = get_active_mac_service()
-                    for proxy_cmd in ("getwebproxy", "getsecurewebproxy"):
-                        out = subprocess.run(
-                            ["networksetup", f"-{proxy_cmd}", service],
-                            capture_output=True, text=True, timeout=3
-                        )
-                        if out.returncode == 0:
-                            lines = out.stdout.strip().splitlines()
-                            enabled_line = [l for l in lines if l.startswith("Enabled:")]
-                            port_line = [l for l in lines if l.startswith("Port:")]
-                            if enabled_line and "Yes" in enabled_line[0]:
-                                conflict_port = port_line[0].split(":", 1)[1].strip() if port_line else "?"
-                                if conflict_port != str(self.port):
-                                    print(f"[WARNING] 系统代理已被其他软件占用 (端口 {conflict_port})，"
-                                          f"将强制覆盖为 MITM 代理端口 {self.port}。"
-                                          f"如果您正在使用 VPN/Clash，请先关闭它们的系统代理设置。")
-                except Exception as ex:
-                    print(f"[WARNING] 检测系统代理状态失败: {ex}")
-            elif sys.platform == "win32":
-                try:
-                    import winreg
-                    key = winreg.OpenKey(
-                        winreg.HKEY_CURRENT_USER,
-                        r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                        0, winreg.KEY_READ
-                    )
-                    try:
-                        proxy_enable, _ = winreg.QueryValueEx(key, "ProxyEnable")
-                        if proxy_enable:
-                            proxy_server, _ = winreg.QueryValueEx(key, "ProxyServer")
-                            if proxy_server and str(self.port) not in str(proxy_server):
-                                print(f"[WARNING] Windows 系统代理已被其他软件占用 ({proxy_server})，"
-                                      f"将强制覆盖为 MITM 代理端口 {self.port}。"
-                                      f"如果您正在使用 dev-sidecar/Clash/VPN，请先关闭它们的系统代理。")
-                    except FileNotFoundError:
-                        pass
-                    # Check if ProxyOverride might bypass our target domains
-                    try:
-                        proxy_override, _ = winreg.QueryValueEx(key, "ProxyOverride")
-                        if proxy_override:
-                            print(f"[WARNING] 检测到 Windows ProxyOverride 设置: {proxy_override}，"
-                                  f"某些域名可能绕过 MITM 代理。将在设置代理时清除此项。")
-                    except FileNotFoundError:
-                        pass
-                    winreg.CloseKey(key)
-                except Exception as ex:
-                    print(f"[WARNING] 检测 Windows 系统代理状态失败: {ex}")
-
+            # 0. 准备证书与目录
             ensure_ca_certificates()
-
-            # 1. 安装并信任证书
             cert_ok = install_system_cert(CA_CERT_PATH)
             if not cert_ok:
                 print("[WARNING] CA 证书可能未被系统信任，MITM 拦截可能失败。"
                       "请检查是否有其他 VPN/安全软件的证书冲突。")
 
-            # 2. 把我们的 CA 喂给 mitmproxy
             confdir = prepare_mitm_confdir()
 
-            # 3. 在后台线程里跑 mitmproxy 的 asyncio 事件循环
-            self.running = True
-            self.thread = threading.Thread(
-                target=self._run_server, args=(str(confdir),), daemon=True
-            )
-            self.thread.start()
+            # 1. 检查端口是否有残留，若有则强制清理孤儿进程
+            if self._is_port_listening(self.port):
+                print(f"[Proxy] 检测到端口 {self.port} 处于监听状态，正在清理旧实例...")
+                self._kill_port_owner(self.port)
+                self.stop()
+                time.sleep(0.5)
 
-            # 4. 设置 NO_PROXY=* 使 Python 后端代码绕过系统代理（仅浏览器需走 MITM）
+            # 2. 智能探测本机是否运行着 VPN / 科学上网代理客户端
+            upstream_proxy = detect_upstream_proxy()
+            if upstream_proxy:
+                print(f"[Proxy] 🚀 自动探测到本机正在运行的 VPN 代理 ({upstream_proxy})，"
+                      f"已启用链式上游转发 (Upstream Chaining)，实现 VPN 与同步助手无缝并存！")
+
+            # 3. 以完全隔离的独立子进程启动 mitmproxy worker
+            if getattr(sys, 'frozen', False):
+                cmd = [
+                    sys.executable,
+                    "--proxy-worker",
+                    "--port", str(self.port),
+                    "--confdir", str(confdir),
+                ]
+            else:
+                cmd = [
+                    sys.executable,
+                    "-m", "backend.proxy_worker",
+                    "--port", str(self.port),
+                    "--confdir", str(confdir),
+                ]
+            if upstream_proxy:
+                cmd.extend(["--upstream", upstream_proxy])
+            
+            popen_kwargs = {
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+                "text": True,
+                "bufsize": 1,
+            }
+            if sys.platform == "win32":
+                popen_kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW: 彻底隐藏子进程黑色控制台窗口
+
+            self.process = subprocess.Popen(
+                cmd,
+                **popen_kwargs
+            )
+
+            # 3. 等待子进程启动就绪握手（最多 6 秒）
+            is_ready = False
+            start_wait = time.time()
+            while time.time() - start_wait < 6.0:
+                if self.process.poll() is not None:
+                    # 子进程提前退出
+                    out_text = self.process.stdout.read() if self.process.stdout else ""
+                    raise RuntimeError(f"代理工作进程异常退出: {out_text.strip()}")
+                
+                # 读取一行输出验证 WORKER_READY
+                import select
+                if sys.platform != "win32":
+                    rlist, _, _ = select.select([self.process.stdout], [], [], 0.2)
+                    if rlist:
+                        line = self.process.stdout.readline()
+                        if "WORKER_READY" in line:
+                            is_ready = True
+                            break
+                else:
+                    if self._is_port_listening(self.port, timeout=0.2):
+                        is_ready = True
+                        break
+                    time.sleep(0.2)
+
+            if not is_ready:
+                is_ready = self._is_port_listening(self.port, timeout=1.0)
+
+            if not is_ready:
+                self.stop()
+                raise RuntimeError("mitmproxy 代理助手启动握手超时，未能成功就绪。")
+
+            self._running = True
+
+            # 4. 启动后台监控线程：收集日志并在子进程意外退出时自动回滚系统代理
+            def _monitor_worker():
+                try:
+                    while self.process and self.process.poll() is None:
+                        line = self.process.stdout.readline()
+                        if not line:
+                            break
+                        line_s = line.strip()
+                        if line_s and not line_s.startswith("WORKER_READY"):
+                            print(f"[ProxyWorker] {line_s}", flush=True)
+                except Exception:
+                    pass
+                if self._running:
+                    print("[ProxyWorker] 代理进程退出，正在自动还原系统代理...", flush=True)
+                    self._running = False
+                    try:
+                        set_system_proxy(False, port=self.port)
+                    except Exception:
+                        pass
+
+            self._monitor_thread = threading.Thread(target=_monitor_worker, daemon=True)
+            self._monitor_thread.start()
+
+            # 5. 设置 NO_PROXY=* 使 Python 后端代码绕过系统代理（仅浏览器需走 MITM）
             _set_no_proxy()
 
-            # 5. 开启系统代理（浏览器/微信客户端会走此代理）
+            # 6. 开启系统代理（浏览器/微信客户端会走此代理）
             set_system_proxy(True, port=self.port)
             if not getattr(self, "_atexit_registered", False):
                 import atexit
@@ -2078,81 +2356,45 @@ class ProxyManager:
             print(f"Channels MITM proxy started on 127.0.0.1:{self.port} and system proxy enabled.")
             return True
         except Exception as ex:
-            self.running = False
+            self._running = False
             self.last_error = str(ex)
+            # 兜底清理，确保系统网络立即可用
+            self.stop()
             raise ex
-        return True
 
     def stop(self):
-        if not self.running:
-            return True
+        # 1. 首先无论如何优先还原系统代理，保障用户系统网络通畅
+        try:
+            set_system_proxy(False, port=self.port)
+        except Exception as e:
+            print(f"Error restoring system proxy: {e}")
 
-        self.running = False
+        self._running = False
 
-        # 还原系统代理
-        set_system_proxy(False, port=self.port)
-
-        # 关闭 mitmproxy
-        if self.master and self.loop:
+        # 2. 干净终结子进程，操作系统内核会在微秒级回收所有绑定的 socket
+        if self.process:
             try:
-                self.loop.call_soon_threadsafe(self.master.shutdown)
+                if self.process.poll() is None:
+                    self.process.terminate()
+                    try:
+                        self.process.wait(timeout=2.0)
+                    except subprocess.TimeoutExpired:
+                        self.process.kill()
+                        self.process.wait(timeout=1.0)
             except Exception as e:
-                print(f"Error shutting down mitmproxy: {e}")
-
-        # 等待后台线程完全退出以确保关闭完成
-        if self.thread and self.thread.is_alive():
-            try:
-                self.thread.join(timeout=5)
-            except Exception:
-                pass
-
-        self.master = None
-        self.loop = None
-        self.thread = None
+                print(f"Error terminating proxy worker process: {e}")
+            finally:
+                try:
+                    if self.process.stdout:
+                        self.process.stdout.close()
+                except Exception:
+                    pass
+                self.process = None
 
         cleanup_mitmproxy_logging_handlers()
 
-        # 还原 NO_PROXY 环境变量
+        # 3. 还原 NO_PROXY 环境变量
         _restore_no_proxy()
 
         print("Channels MITM proxy stopped and system proxy disabled.")
         return True
-
-    def _run_server(self, confdir):
-        import asyncio
-        from mitmproxy.tools.dump import DumpMaster
-        from mitmproxy import options
-
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        self.loop = loop
-
-        async def _serve():
-            opts = options.Options(
-                listen_host="127.0.0.1",
-                listen_port=self.port,
-                confdir=confdir,
-                # 只解密这两个域名,其余 CONNECT 直接透传(不碰证书、不碰内容)
-                allow_hosts=[
-                    r"channels\.weixin\.qq\.com",
-                    r"mp\.weixin\.qq\.com",
-                    r"res\.wx\.qq\.com",
-                ],
-            )
-            master = DumpMaster(opts, with_termlog=False, with_dumper=False)
-            master.addons.add(ChannelsAddon())
-            self.master = master
-            try:
-                await master.run()
-            except Exception as e:
-                print(f"[Proxy] mitmproxy run error: {e}")
-
-        try:
-            loop.run_until_complete(_serve())
-        except Exception as e:
-            print(f"[Proxy] event loop error: {e}")
-        finally:
-            try:
-                loop.close()
-            except Exception:
-                pass

@@ -35,10 +35,41 @@ VK_F5 = 0x74
 VK_RETURN = 0x0D
 VK_ESCAPE = 0x1B
 VK_CONTROL = 0x11
+VK_UP = 0x26
+VK_DOWN = 0x28
 VK_KEY_W = 0x57
 VK_KEY_F = 0x46
 VK_KEY_V = 0x56
 VK_KEY_R = 0x52
+
+KEYEVENTF_KEYUP = 0x0002
+
+user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, ctypes.c_size_t]
+user32.keybd_event.restype = None
+
+def send_key_combo(vk_modifier: int, vk_key: int):
+    """通过系统级 keybd_event 真实发送组合键 (如 Ctrl+A, Ctrl+V, Ctrl+F)"""
+    try:
+        user32.keybd_event(vk_modifier, 0, 0, 0)
+        time.sleep(0.04)
+        user32.keybd_event(vk_key, 0, 0, 0)
+        time.sleep(0.05)
+        user32.keybd_event(vk_key, 0, KEYEVENTF_KEYUP, 0)
+        time.sleep(0.03)
+        user32.keybd_event(vk_modifier, 0, KEYEVENTF_KEYUP, 0)
+        time.sleep(0.04)
+    except Exception:
+        pass
+
+def send_single_key(vk_key: int):
+    """通过系统级 keybd_event 真实发送单个物理按键 (如 Enter, Down, Escape, Backspace)"""
+    try:
+        user32.keybd_event(vk_key, 0, 0, 0)
+        time.sleep(0.04)
+        user32.keybd_event(vk_key, 0, KEYEVENTF_KEYUP, 0)
+        time.sleep(0.04)
+    except Exception:
+        pass
 
 # Per-Monitor-V2 DPI 感知上下文句柄（Win10 1703+，旧系统调用失败则忽略）
 DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 = ctypes.c_void_p(-4)
@@ -150,6 +181,14 @@ def post_escape(hwnd: int) -> bool:
     return post_key(hwnd, VK_ESCAPE)
 
 
+def post_down(hwnd: int) -> bool:
+    return post_key(hwnd, VK_DOWN)
+
+
+def post_return(hwnd: int) -> bool:
+    return post_key(hwnd, VK_RETURN)
+
+
 # ── 剪贴板与搜索输入（中文关键词无法用按键消息直接输入，走剪贴板粘贴） ──
 
 CF_UNICODETEXT = 13
@@ -216,15 +255,60 @@ def type_via_clipboard(hwnd: int, text: str, confirm: bool = True) -> bool:
     return True
 
 
-def focus_search_and_type(main_hwnd: int, keyword: str, confirm: bool = True) -> bool:
-    """微信主窗口 Ctrl+F 聚焦搜索框，清空残留内容后粘贴关键词（可选回车确认）。"""
-    post_key(main_hwnd, VK_KEY_F, with_ctrl=True)
-    time.sleep(0.5)  # 等搜索框获得焦点
-    # 清空搜索框已有内容，防止残留上一次关键词
-    user32.PostMessageW(main_hwnd, WM_KEYDOWN, 0x11, 0x001D0001)   # Ctrl down
-    user32.PostMessageW(main_hwnd, WM_KEYDOWN, 0x41, 0x001E0001)   # 'A' down (全选)
-    time.sleep(0.05)
-    user32.PostMessageW(main_hwnd, WM_KEYUP, 0x41, 0xC01E0001)
-    user32.PostMessageW(main_hwnd, WM_KEYUP, 0x11, 0xC01D0001)     # Ctrl up
-    time.sleep(0.15)
-    return type_via_clipboard(main_hwnd, keyword, confirm=confirm)
+def focus_search_and_type(main_hwnd: int, keyword: str, confirm: bool = False) -> bool:
+    """微信主窗口聚焦搜索框并输入关键词（UIA精确查找 -> 物理几何坐标点击 -> 全局系统按键输入）。"""
+    from windows.win_window import activate_window
+    activate_window(main_hwnd)
+    time.sleep(0.3)
+
+    # 1. 优先通过 UIA 在微信窗口左上方寻找搜索框控件
+    focused = False
+    try:
+        import uiautomation as auto
+        ctrl = auto.ControlFromHandle(main_hwnd)
+        if ctrl:
+            for c, _ in auto.WalkControl(ctrl, maxDepth=8):
+                name = (c.Name or "").strip()
+                # 微信搜索框特征：EditControl 或名字包含 搜索 / Search
+                if c.ControlType in (auto.ControlType.EditControl, 50004) or any(k in name for k in ("搜索", "Search")):
+                    r = c.BoundingRectangle
+                    if r.top < 150 and r.right > r.left and r.bottom > r.top:
+                        cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
+                        post_click(main_hwnd, cx, cy)
+                        try:
+                            c.SetFocus()
+                        except Exception:
+                            pass
+                        focused = True
+                        break
+    except Exception:
+        pass
+
+    # 2. 若 UIA 未定位到，按微信 Windows 版主窗口左上角物理位置点击（侧栏右侧，通常在 left+120, top+32）
+    if not focused:
+        rect = wintypes.RECT()
+        user32.GetWindowRect(main_hwnd, ctypes.byref(rect))
+        search_x = rect.left + 120
+        search_y = rect.top + 32
+        post_click(main_hwnd, search_x, search_y)
+        time.sleep(0.15)
+        send_key_combo(VK_CONTROL, VK_KEY_F)
+
+    time.sleep(0.35)
+
+    # 3. 系统级按键：全选并清空输入框
+    send_key_combo(VK_CONTROL, 0x41)  # Ctrl+A
+    time.sleep(0.08)
+    send_single_key(0x08)            # Backspace
+    time.sleep(0.12)
+
+    # 4. 写入剪贴板并通过系统级按键 Ctrl+V 粘贴关键词
+    if not set_clipboard_text(keyword):
+        return False
+    send_key_combo(VK_CONTROL, VK_KEY_V)  # Ctrl+V
+    time.sleep(0.8)  # 等待微信搜索下拉列表完全渲染出来
+
+    if confirm:
+        send_single_key(VK_RETURN)
+        time.sleep(0.35)
+    return True

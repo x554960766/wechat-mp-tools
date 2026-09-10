@@ -126,38 +126,158 @@ class WinBatchRunner:
         ww.activate_window(main.hwnd)
         wi.human_sleep(0.3, 0.5)
 
-        logger.info("👉 正在检查 Windows 微信「文件传输助手」，准备唤起聚合页...")
-        # 优先通过 UIA 在会话列表查找「文件传输助手」
-        filehelper_found = False
-        try:
-            import uiautomation as auto
-            ctrl = auto.ControlFromHandle(main.hwnd)
-            if ctrl:
-                for c, _ in auto.WalkControl(ctrl, maxDepth=8):
-                    name = c.Name or ""
-                    if "文件传输助手" in name:
-                        r = c.BoundingRectangle
-                        if r.right > r.left and r.bottom > r.top:
-                            cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
-                            wi.post_click(main.hwnd, cx, cy)
-                            filehelper_found = True
-                            wi.human_sleep(0.5, 0.8)
-                            break
-        except Exception:
-            pass
+        import re
 
-        if not filehelper_found:
-            # 快捷搜索进入文件传输助手（支持未显示自动重试一次）
+        def _is_in_filehelper(hwnd: int) -> bool:
+            try:
+                import uiautomation as auto
+                ctrl = auto.ControlFromHandle(hwnd)
+                if not ctrl:
+                    return False
+                for c, _ in auto.WalkControl(ctrl, maxDepth=6):
+                    name = (c.Name or "").strip().replace(" ", "")
+                    r = c.BoundingRectangle
+                    # 顶部标题栏特征：y 坐标较小，名称纯粹为文件传输助手
+                    if (name in ("文件传输助手", "文件传输助手(FileTransfer)") or (name.startswith("文件传输助手") and len(name) <= 8)) and r.top < 120:
+                        if ":" not in name and "：" not in name and "记录" not in name:
+                            return True
+            except Exception:
+                pass
+            return False
+
+        def _enter_filehelper_window() -> bool:
+            if _is_in_filehelper(main.hwnd):
+                logger.info("🎉 当前已停留在 Windows 微信「文件传输助手」会话界面！")
+                return True
+
             for attempt in range(1, 3):
-                wi.focus_search_and_type(main.hwnd, "文件传输助手", confirm=True)
-                wi.human_sleep(0.8, 1.2)
+                logger.info("👉 正在定位并打开 Windows 微信「文件传输助手」会话 (第 %d/2 次尝试)...", attempt)
+                if attempt > 1:
+                    wi.post_escape(main.hwnd)
+                    time.sleep(0.1)
+                    wi.post_escape(main.hwnd)
+                    wi.human_sleep(0.3, 0.5)
+
+                # 1. 优先通过 UIA 检查左侧会话列表中是否直接可见纯粹的「文件传输助手」
+                filehelper_item = None
                 try:
                     import uiautomation as auto
                     ctrl = auto.ControlFromHandle(main.hwnd)
-                    if ctrl and any("文件传输助手" in (c.Name or "") for c, _ in auto.WalkControl(ctrl, maxDepth=6)):
-                        break
+                    if ctrl:
+                        for c, _ in auto.WalkControl(ctrl, maxDepth=8):
+                            name = (c.Name or "").strip().replace(" ", "")
+                            r = c.BoundingRectangle
+                            # 左侧会话栏：排除聊天内容，只匹配纯粹的文件传输助手
+                            if r.right > r.left and r.bottom > r.top:
+                                if ("文件传" in name or "传输助手" in name) and len(name) <= 8 and ":" not in name and "：" not in name and "记录" not in name:
+                                    filehelper_item = c
+                                    break
                 except Exception:
-                    break
+                    pass
+
+                if filehelper_item:
+                    r = filehelper_item.BoundingRectangle
+                    cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
+                    logger.info("✅ 直接在会话列表中定位到「文件传输助手」，点击坐标 (%d, %d)...", cx, cy)
+                    wi.post_click(main.hwnd, cx, cy)
+                    wi.human_sleep(0.8, 1.2)
+                else:
+                    # 2. 搜索框精准查找：输入「文件传输助手」，confirm=False 绝不直接回车！
+                    logger.info("🔍 正在通过搜索框查找「文件传输助手」...")
+                    wi.focus_search_and_type(main.hwnd, "文件传输助手", confirm=False)
+                    wi.human_sleep(0.6, 0.9)
+
+                    # 3. 在搜索结果列表中精准匹配「功能」分类下的「文件传输助手」
+                    target_cand = None
+                    try:
+                        import uiautomation as auto
+                        # 查找范围包括主窗口以及属于微信进程的所有顶级窗口（兼容独立搜索下拉浮层窗口）
+                        wechat_hwnds = [main.hwnd]
+                        for w in ww.find_wechat_windows():
+                            if w.hwnd not in wechat_hwnds:
+                                wechat_hwnds.append(w.hwnd)
+
+                        func_header_top = None
+                        all_cands = []
+                        for h in wechat_hwnds:
+                            c_root = auto.ControlFromHandle(h)
+                            if not c_root:
+                                continue
+                            for c, _ in auto.WalkControl(c_root, maxDepth=10):
+                                txt = (c.Name or "").strip().replace(" ", "")
+                                r = c.BoundingRectangle
+                                if r.right <= r.left or r.bottom <= r.top:
+                                    continue
+                                # 检测「功能」分类标题
+                                if (txt == "功能" or (len(txt) <= 4 and "功能" in txt and "助手" not in txt)) and func_header_top is None:
+                                    func_header_top = r.top
+                                # 严格清洗候选条目：排除聊天记录、冒号、长度过长的项
+                                if ":" in txt or "：" in txt or any(k in txt for k in ("记录", "相关的", "条相关", "昨天", "今天", "撤回", "图片", "视频", "语音")):
+                                    continue
+                                clean_txt = re.sub(r'^[^\u4e00-\u9fa5]+', '', txt)
+                                if "文件传输助手" in clean_txt and len(clean_txt) <= 8:
+                                    all_cands.append((c, r, clean_txt))
+
+                        if all_cands:
+                            # 优先匹配在「功能」标题下方的第一项
+                            if func_header_top is not None:
+                                below_func = [item for item in all_cands if item[1].top > func_header_top]
+                                if below_func:
+                                    below_func.sort(key=lambda x: x[1].top)
+                                    target_cand = below_func[0]
+                                    logger.info("🎯 成功在「功能」标题下方匹配到文件传输助手: %s", target_cand[2])
+
+                            if target_cand is None:
+                                # 次优先：完全等于「文件传输助手」的纯净项
+                                strict = [item for item in all_cands if item[2] == "文件传输助手"]
+                                if strict:
+                                    strict.sort(key=lambda x: x[1].top)
+                                    target_cand = strict[0]
+                                    logger.info("🎯 精确定位到纯净「文件传输助手」条目: %s", target_cand[2])
+                                else:
+                                    all_cands.sort(key=lambda x: x[1].top)
+                                    target_cand = all_cands[0]
+                    except Exception as e_find:
+                        logger.debug("UIA 搜索条目定位异常: %s", e_find)
+
+                    if target_cand:
+                        r = target_cand[1]
+                        cx, cy = (r.left + r.right) // 2, (r.top + r.bottom) // 2
+                        logger.info("✅ 精确定位到「功能 -> 文件传输助手」，点击屏幕坐标 (%d, %d)", cx, cy)
+                        wi.post_click(main.hwnd, cx, cy)
+                        wi.human_sleep(0.8, 1.2)
+                    else:
+                        # 降级多重保障：真实系统级方向下键 + 回车确认，同时辅以几何物理坐标点击
+                        logger.info("👉 UIA 未直接捕获独立浮层条目，使用系统级按键选择搜索首项功能...")
+                        wi.send_single_key(wi.VK_DOWN)
+                        wi.human_sleep(0.2, 0.3)
+                        wi.send_single_key(wi.VK_RETURN)
+                        wi.human_sleep(0.6, 0.8)
+
+                        # 若仍未进入，直接点击搜索框正下方第一项功能条目物理区域 (通常在 left+120, top+75)
+                        if not _is_in_filehelper(main.hwnd):
+                            l, t, r, b = main.rect
+                            fallback_cand_x = l + 120
+                            fallback_cand_y = t + 75
+                            logger.info("👉 尝试直接点击搜索下拉浮层首项坐标 (%d, %d)...", fallback_cand_x, fallback_cand_y)
+                            wi.post_click(main.hwnd, fallback_cand_x, fallback_cand_y)
+                            wi.human_sleep(0.8, 1.2)
+
+                # 4. 验证是否成功显示「文件传输助手」聊天页面
+                if _is_in_filehelper(main.hwnd):
+                    logger.info("🎉 成功准确选中并显示 Windows 微信「文件传输助手」聊天页面！")
+                    return True
+                else:
+                    logger.warning("⚠️ 安全校验未通过：当前窗口非「文件传输助手」，按 Escape 退出以防误操作...")
+                    wi.send_single_key(wi.VK_ESCAPE)
+                    time.sleep(0.15)
+                    wi.send_single_key(wi.VK_ESCAPE)
+                    wi.human_sleep(0.4, 0.6)
+
+            return _is_in_filehelper(main.hwnd)
+
+        if not _enter_filehelper_window():
+            logger.warning("未能自动进入「文件传输助手」页面，请手动在微信中打开文件传输助手。")
 
         # 检查会话内是否已有聚合页链接气泡，若没有则在输入框发送（绝不误触其它无关链接）
         has_portal_link = False

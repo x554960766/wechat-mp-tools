@@ -39,6 +39,13 @@ from backend.runtime import configure_runtime, log_file, write_startup_error
 
 # PyInstaller 打包时防止多进程死循环（Playwright 依赖 multiprocessing）
 multiprocessing.freeze_support()
+
+# 独立代理子进程模式（打包为单一二进制后，作为子进程启动 mitmproxy 工作线程）
+if "--proxy-worker" in sys.argv:
+    from backend.proxy_worker import main as proxy_worker_main
+    proxy_worker_main()
+    sys.exit(0)
+
 configure_runtime()
 
 # ── 修复打包后白屏：当 console=False 时 stdout/stderr 为 None，

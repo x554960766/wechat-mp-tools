@@ -6,7 +6,7 @@
 
 > [!TIP]
 > **开箱即用，无需配置本地 Python 开发环境！**
-> 本项目已通过 GitHub Actions 自动构建 Windows 与 macOS 双平台客户端。请直接前往 [👉 GitHub Releases 下载最新版本 (v2.0.0)](https://github.com/x554960766/wechat-mp-tools/releases)。
+> 本项目已通过 GitHub Actions 自动构建 Windows 与 macOS 双平台客户端。请直接前往 [👉 GitHub Releases 下载最新版本 (v2.0.1)](https://github.com/x554960766/wechat-mp-tools/releases)。
 
 ### macOS 版本选择
 
@@ -21,7 +21,7 @@
 
 ## 核心功能
 
-### 📱 微信公众号（v2.0.0 核心引擎全面重构）
+### 📱 微信公众号（v2.0.1 核心引擎全面升级）
 
 - **全格式离线保存与导出**：
   - **原生 HTML 离线归档**：完整保存微信原文样式排版，自动将高清原图、音频（Voice）、视频（Video）下载至本地并完成相对路径改写；针对微信特殊的画廊图集（Gallery）与特殊贴图排版均能完整提取与解析。
