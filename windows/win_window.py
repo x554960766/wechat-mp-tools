@@ -234,28 +234,33 @@ def find_article_windows(windows: list = None) -> list:
 
 
 def activate_window(hwnd: int, timeout: float = 2.0) -> bool:
-    """把窗口真正带到系统最前台（绕过 Windows 前台锁定限制，还原最小化）。"""
+    """把窗口平滑带到系统最前台（安全绕过 Windows 前台限制，还原最小化，绝不锁死目标线程输入队列）。"""
     try:
         if not user32.IsWindow(hwnd):
             return False
         if user32.IsIconic(hwnd):
             user32.ShowWindow(hwnd, SW_RESTORE)
-            time.sleep(0.15)
+            time.sleep(0.12)
         else:
             user32.ShowWindow(hwnd, SW_SHOW)
 
-        # 穿透 Windows 前台锁定限制：通过附加线程输入状态夺取前台激活权
-        cur_tid = kernel32.GetCurrentThreadId()
-        target_tid = user32.GetWindowThreadProcessId(hwnd, None)
-        if cur_tid != target_tid:
-            user32.AttachThreadInput(cur_tid, target_tid, True)
+        # 1. 优先尝试直接 SetForegroundWindow
+        if user32.SetForegroundWindow(hwnd):
+            time.sleep(0.15)
+            return True
+
+        # 2. 微软官方推荐的 Alt 键无害穿透法（模拟 Alt 键下弹，使当前线程获得置顶特权，绝不干涉输入队列）
+        try:
+            user32.keybd_event(0x12, 0, 0, 0)         # VK_MENU (Alt) down
             user32.SetForegroundWindow(hwnd)
-            user32.SetFocus(hwnd)
-            user32.AttachThreadInput(cur_tid, target_tid, False)
-        else:
-            user32.SetForegroundWindow(hwnd)
-            user32.SetFocus(hwnd)
-        time.sleep(0.2)
+        finally:
+            user32.keybd_event(0x12, 0, 0x0002, 0)    # VK_MENU (Alt) up
+
+        # 3. 辅以 SwitchToThisWindow 平滑前台切换
+        if hasattr(user32, "SwitchToThisWindow"):
+            user32.SwitchToThisWindow(hwnd, True)
+
+        time.sleep(0.15)
         return True
     except Exception as e:
         logger.debug("activate_window(%s) 异常: %s", hwnd, e)

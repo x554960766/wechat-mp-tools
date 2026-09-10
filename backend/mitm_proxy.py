@@ -285,7 +285,8 @@ def install_system_cert(ca_cert_path):
         return check_cert_trusted()
     elif sys.platform == "win32":
         try:
-            _run_certutil(["-addstore", "-user", "root", str(ca_cert_path)], check=True)
+            # 使用 -f 强制覆盖，防止 certutil 弹窗询问“是否覆盖”导致后台挂起
+            _run_certutil(["-f", "-addstore", "-user", "root", str(ca_cert_path)], check=True)
             return True
         except Exception as e:
             print(f"Failed to install Win cert: {e}")
@@ -537,9 +538,10 @@ def set_mac_proxy(enabled, host="127.0.0.1", port=5202):
 
 _original_windows_pac = None
 _original_win_proxy_backup = None
+_original_win_override_backup = None
 
 def set_windows_proxy(enabled, host="127.0.0.1", port=5202):
-    global _original_windows_pac, _original_win_proxy_backup
+    global _original_windows_pac, _original_win_proxy_backup, _original_win_override_backup
     try:
         import winreg
         key = winreg.OpenKey(
@@ -555,6 +557,14 @@ def set_windows_proxy(enabled, host="127.0.0.1", port=5202):
                 pserver, _ = winreg.QueryValueEx(key, "ProxyServer")
                 if penable and pserver and f":{port}" not in pserver:
                     _original_win_proxy_backup = (penable, pserver)
+            except Exception:
+                pass
+
+            # 备份用户原有的 ProxyOverride（例外名单）
+            try:
+                p_override, _ = winreg.QueryValueEx(key, "ProxyOverride")
+                if p_override and _original_win_override_backup is None:
+                    _original_win_override_backup = p_override
             except Exception:
                 pass
 
@@ -584,6 +594,14 @@ def set_windows_proxy(enabled, host="127.0.0.1", port=5202):
                 _original_win_proxy_backup = None
             else:
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+
+            # 还原用户原有的 ProxyOverride 例外列表
+            if _original_win_override_backup:
+                try:
+                    winreg.SetValueEx(key, "ProxyOverride", 0, winreg.REG_SZ, _original_win_override_backup)
+                except Exception:
+                    pass
+                _original_win_override_backup = None
 
             if _original_windows_pac:
                 try:
@@ -2205,24 +2223,34 @@ class ProxyManager:
             return False
 
     def _kill_port_owner(self, port: int):
-        """强制清理霸占代理端口的任何遗留孤儿进程"""
+        """强制清理霸占代理端口的任何遗留孤儿进程（排除当前进程本身）"""
         try:
+            curr_pid = os.getpid()
             if sys.platform == "win32":
                 flags = 0x08000000  # CREATE_NO_WINDOW
-                out = subprocess.check_output(f"netstat -ano | findstr :{port}", shell=True, text=True, creationflags=flags)
+                out = subprocess.check_output(
+                    f"netstat -ano | findstr :{port}",
+                    shell=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="ignore",
+                    creationflags=flags
+                )
                 for line in out.strip().splitlines():
                     parts = line.strip().split()
                     if len(parts) >= 5 and "LISTENING" in parts:
                         pid = parts[-1]
-                        subprocess.run(f"taskkill /F /PID {pid}", shell=True, capture_output=True, creationflags=flags)
+                        if pid.isdigit() and int(pid) != curr_pid:
+                            subprocess.run(f"taskkill /F /PID {pid}", shell=True, capture_output=True, creationflags=flags)
             else:
                 out = subprocess.check_output(["lsof", "-ti", f":{port}"], text=True).strip()
                 if out:
                     for pid in out.splitlines():
-                        try:
-                            os.kill(int(pid), 9)
-                        except Exception:
-                            pass
+                        if pid.strip().isdigit() and int(pid.strip()) != curr_pid:
+                            try:
+                                os.kill(int(pid.strip()), 9)
+                            except Exception:
+                                pass
         except Exception:
             pass
 

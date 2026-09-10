@@ -50,7 +50,7 @@ binaries = []
 #    隐藏子模块、数据文件与原生扩展(mitmproxy_rs 等),否则冻结后启动代理失败 ──
 try:
     from PyInstaller.utils.hooks import collect_all
-    for _pkg in ('mitmproxy', 'mitmproxy_rs', 'publicsuffix2'):
+    for _pkg in ('mitmproxy', 'mitmproxy_rs', 'publicsuffix2', 'curl_cffi'):
         _d, _b, _h = collect_all(_pkg)
         datas += _d
         binaries += _b
@@ -59,6 +59,7 @@ except Exception as _e:
 
 # ── 依赖配置 ──────────────────────────────────────────────
 hiddenimports = [
+    'curl_cffi',
     'flask',
     'flask_cors',
     'requests',

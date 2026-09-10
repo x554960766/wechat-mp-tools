@@ -74,6 +74,9 @@ def _try_uia_find_and_get_center(hwnd: int, name_keywords: tuple, max_depth: int
             return None
         target = None
         for c, depth in auto.WalkControl(ctrl, includeTop=False, maxDepth=max_depth):
+            # 过滤掉输入框控件本身，防止误点搜索框
+            if c.ControlType in (auto.ControlType.EditControl, 50004):
+                continue
             name = c.Name or ""
             if name and any(k in name for k in name_keywords):
                 target = c
@@ -240,18 +243,24 @@ def _search_and_open_account_profile(main_win: ww.WinWindow, keyword: str,
             logger.info("♻️ 复用已打开的主页窗口: %s", w)
             return w
 
-    # 2. Ctrl+F 聚焦搜索框（清空残留）→ 剪贴板粘贴关键词，先不回车，尝试点选联想结果
+    # 2. Ctrl+F 聚焦搜索框（清空残留）→ 剪贴板粘贴关键词
     wi.focus_search_and_type(main_win.hwnd, keyword, confirm=False)
-    wi.human_sleep(0.8, 1.2)
+    wi.human_sleep(0.5, 0.8)
 
-    # 3. UIA 在主窗口联想下拉中定位该公众号条目并点击；失败则回车兜底
+    # 3. 优先使用系统级【向下键 + 回车】直接秒选匹配的第一项公众号
+    logger.info("👉 发送系统级【向下键 + 回车】打开搜索公众号结果...")
+    wi.send_single_key(wi.VK_DOWN)
+    time.sleep(0.15)
+    wi.send_single_key(wi.VK_RETURN)
+    wi.human_sleep(0.6, 1.0)
+    wi.release_all_modifiers()
+
+    # 若未打开，辅以 UIA 联想下拉定位（排除搜索框本体）
     point = _try_uia_find_and_get_center(main_win.hwnd, (keyword,))
-    if point:
-        logger.info("🖱️ 点击搜索联想中的公众号条目: %s", point)
+    if point and point[1] > main_win.rect[1] + 55:
+        logger.info("🖱️ 辅助点击搜索联想中的公众号条目: %s", point)
         wi.post_click(main_win.hwnd, point[0], point[1])
-    else:
-        logger.info("UIA 未定位到联想条目，回车搜索兜底...")
-        wi.post_key(main_win.hwnd, wi.VK_RETURN)
+        wi.human_sleep(0.6, 1.0)
 
     # 4. 等待公众号主页窗口（标题含关键词，排除搜一搜结果页）
     def _is_profile(w):
