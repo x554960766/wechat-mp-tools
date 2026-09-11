@@ -378,8 +378,15 @@ def sync_pc_wechat():
 def sync_batch_pc_wechat():
     """全自动触发 UI 自动化一键为全部公众号建立主页授权会话"""
     try:
-        from scripts.auto_refresh_pc_wechat import run_batch_portal_flow_macos
-        success = run_batch_portal_flow_macos()
+        import sys
+        if sys.platform == "darwin":
+            from scripts.auto_refresh_pc_wechat import run_batch_portal_flow_macos
+            success = run_batch_portal_flow_macos()
+        elif sys.platform == "win32":
+            from scripts.auto_refresh_pc_wechat import run_batch_portal_flow_windows
+            success = run_batch_portal_flow_windows()
+        else:
+            return jsonify({"error": f"不支持的操作系统: {sys.platform}"}), 400
         return jsonify({"success": success})
     except Exception as e:
         return jsonify({"error": str(e)}), 500

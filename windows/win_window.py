@@ -320,24 +320,60 @@ def is_portal_window_windows(win: WinWindow) -> bool:
 def find_portal_window_windows(windows: list = None) -> WinWindow | None:
     """查找屏幕上已打开的公众号批量授权聚合页窗口（兼容 Windows 微信 4.x 内嵌三栏与 3.x 独立弹窗）。"""
     wins = windows if windows is not None else find_wechat_windows()
-    # 1. 独立窗口模式 (3.x 或独立网页窗口)
+    portal_keywords = (
+        "公众号批量授权", "批量授权", "授权聚合中心", "mp-batch-portal",
+        "5200", "5202", "授权清单", "一键开始全自动流转授权", "流转授权",
+        "全部公众号授权就绪", "低风控安全建议", "同步代理助手", "仅复制待授权链接"
+    )
+
+    # 1. 优先通过窗口标题精准匹配
     for w in wins:
         if is_portal_window_windows(w):
             return w
-    for w in wins:
-        if w.exe_lower in WEBVIEW_PROCESS_NAMES and is_portal_window_windows(w):
-            return w
 
-    # 2. 检测微信 4.x 主窗口内嵌的第三栏分栏模式 (主窗口宽度 >= 1000)
+    # 2. 检查独立 Web 窗口（即便窗口标题为默认 "微信"、空或其它，只要属于 Web 进程或类名即做 UIA 特征探测）
     main = find_main_window(wins)
-    if main and main.width >= 1000:
+    main_hwnd = main.hwnd if main else None
+
+    for w in wins:
+        if main_hwnd and w.hwnd == main_hwnd:
+            continue
+        # 候选独立 Webview 窗口：属于 WebView 进程，或具有独立弹窗特征（面积 >= 350x300）
+        is_cand = (
+            w.exe_lower in WEBVIEW_PROCESS_NAMES
+            or any(k in w.cls.lower() for k in ("cef", "webview", "chrome"))
+            or (w.width >= 350 and w.height >= 300 and w.title != "公众号")
+        )
+        if not is_cand:
+            continue
+
+        try:
+            import uiautomation as auto
+            ctrl = auto.ControlFromHandle(w.hwnd)
+            if ctrl:
+                for c, _ in auto.WalkControl(ctrl, maxDepth=8):
+                    name = (c.Name or "").strip()
+                    if name and any(k in name for k in portal_keywords):
+                        return WinWindow(
+                            hwnd=w.hwnd,
+                            title=w.title or "公众号批量授权聚合中心",
+                            cls=w.cls,
+                            pid=w.pid,
+                            process_name=w.process_name,
+                            rect=w.rect
+                        )
+        except Exception:
+            pass
+
+    # 3. 检测微信 4.x 主窗口内嵌的第三栏分栏模式 (主窗口宽度 >= 800)
+    if main and main.width >= 800:
         try:
             import uiautomation as auto
             ctrl = auto.ControlFromHandle(main.hwnd)
             if ctrl:
-                for c, _ in auto.WalkControl(ctrl, maxDepth=6):
-                    name = c.Name or ""
-                    if any(k in name for k in ("公众号批量授权", "批量授权", "5200", "mp-batch-portal")):
+                for c, _ in auto.WalkControl(ctrl, maxDepth=8):
+                    name = (c.Name or "").strip()
+                    if name and any(k in name for k in portal_keywords):
                         return WinWindow(
                             hwnd=main.hwnd,
                             title="公众号批量授权聚合中心(内嵌)",

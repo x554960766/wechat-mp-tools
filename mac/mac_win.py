@@ -5,7 +5,6 @@ import subprocess
 import time
 from dataclasses import dataclass
 
-import numpy as np
 import Quartz
 from AppKit import NSWorkspace
 
@@ -29,6 +28,40 @@ class MacWindow:
 
     def __repr__(self) -> str:
         return f"MacWindow(id={self.window_id}, title={self.title!r}, bounds=({self.x},{self.y},{self.w},{self.h}))"
+
+
+class MacScreenImage:
+    """轻量原生截屏图像包装器，无需依赖 numpy / cv2，支持切片与形状属性以兼容历史代码。"""
+    def __init__(self, cg_image):
+        self.cg_image = cg_image
+        self.w = int(Quartz.CGImageGetWidth(cg_image)) if cg_image else 0
+        self.h = int(Quartz.CGImageGetHeight(cg_image)) if cg_image else 0
+
+    @property
+    def shape(self) -> tuple[int, int, int]:
+        return (self.h, self.w, 4)
+
+    @property
+    def size(self) -> int:
+        return self.w * self.h * 4
+
+    def __getitem__(self, item) -> MacScreenImage:
+        """支持形如 img[0:65, pane_x0:main.w] 的 2D 裁剪切片语法"""
+        if not self.cg_image or self.w == 0 or self.h == 0:
+            return MacScreenImage(None)
+        if isinstance(item, tuple) and len(item) == 2:
+            slice_y, slice_x = item
+            y0 = slice_y.start or 0
+            y1 = slice_y.stop if slice_y.stop is not None else self.h
+            x0 = slice_x.start or 0
+            x1 = slice_x.stop if slice_x.stop is not None else self.w
+            w = max(0, x1 - x0)
+            h = max(0, y1 - y0)
+            if w == 0 or h == 0:
+                return MacScreenImage(None)
+            sub = Quartz.CGImageCreateWithImageInRect(self.cg_image, Quartz.CGRectMake(x0, y0, w, h))
+            return MacScreenImage(sub)
+        raise NotImplementedError("仅支持 [y0:y1, x0:x1] 格式的切片")
 
 
 # ---------------------------------------------------------------- 枚举与查找
@@ -132,20 +165,20 @@ def find_portal_window(verify_content: bool = True) -> MacWindow | None:
     """查找屏幕上已打开的公众号批量授权聚合页窗口（兼容微信 4.x 内嵌分栏与 3.x 独立弹窗）。"""
     portal_keywords = (
         "公众号批量授权", "批量授权", "授权聚合中心", "mp-batch-portal",
-        "5200", "5202", "授权清单", "一键开始全自动流转授权",
+        "5200", "5202", "授权清单", "一键开始全自动流转授权", "流转授权",
         "全部公众号授权就绪", "低风控安全建议", "同步代理助手", "仅复制待授权链接"
     )
 
-    # 1. 优先检测微信 4.x 主窗口内嵌的第三栏 Webview 分栏（常见于 4.1.x+）
+    # 1. 优先检测微信 4.x 主窗口内嵌的第三栏 Webview 分栏（常见于 4.x+ 分栏视图）
     main_win = find_main_window(timeout=0.3)
-    if main_win and main_win.w >= 850:
+    if main_win and main_win.w >= 700:
         try:
             from mac.mac_ocr import ocr
             img_main = capture_window(main_win)
             if img_main is not None:
                 boxes = ocr(img_main)
-                # 检查右侧分栏区域（通常在 x >= main_win.w * 0.5）
-                right_boxes = [b for b in boxes if b.left >= int(main_win.w * 0.5)]
+                # 检查右侧分栏区域（通常在 x >= main_win.w * 0.4）
+                right_boxes = [b for b in boxes if b.left >= int(main_win.w * 0.4)]
                 if any(any(k in b.text for k in portal_keywords) for b in right_boxes):
                     return MacWindow(
                         window_id=main_win.window_id,
@@ -158,24 +191,31 @@ def find_portal_window(verify_content: bool = True) -> MacWindow | None:
         except Exception:
             pass
 
-    # 2. 检测独立 Web 窗口（兼容微信 3.x 或用户独立弹窗模式）
+    # 2. 检测独立 Web 窗口（兼容微信 3.x 或微信独立弹窗模式）
     wins = list_wechat_windows()
+    main_id = main_win.window_id if main_win else None
     candidates = []
     for w in wins:
-        title = w.title or ""
-        # 排除明确不是聚合页的窗口
-        if title in ("微信", "WeChat", "公众号"):
+        if main_id and w.window_id == main_id:
             continue
-        if any(k in title for k in ("聚合", "批量授权", "batch-portal", "5200")):
-            candidates.append(w)
-        elif "(窗口)" in title or (w.w >= 500 and w.h >= 400 and title not in ("微信", "WeChat", "公众号")):
+        title = (w.title or "").strip()
+        # 明确排除公众号名片与明显非网页窗口
+        if title == "公众号":
+            continue
+        # 命中标题关键词的置顶候选
+        if any(k in title for k in ("聚合", "批量授权", "batch-portal", "5200", "授权中心")):
+            candidates.insert(0, w)
+        # 独立网页窗口尺寸常在 400x380 以上，即使标题为 "微信"、空或 "(窗口)" 也不放过
+        elif w.w >= 400 and w.h >= 350:
             candidates.append(w)
 
     for w in candidates:
-        if not verify_content:
+        if not verify_content and any(k in (w.title or "") for k in ("聚合", "批量授权", "batch-portal", "5200")):
             return w
         try:
             img = capture_window(w)
+            if img is None:
+                continue
             from mac.mac_ocr import ocr
             boxes = ocr(img)
             # 严格排除视频号相关窗口（避免误把视频号窗口识别为聚合页）
@@ -254,10 +294,10 @@ def launch_wechat() -> None:
 
 # ---------------------------------------------------------------- 截图（后台可截）
 
-def capture_window(win: MacWindow) -> np.ndarray:
+def capture_window(win: MacWindow) -> MacScreenImage:
     """
-    按窗口 ID 截图，返回 BGR ndarray（像素坐标系，Retina 下通常为 2x 分辨率）。
-    窗口被遮挡也能截到正确内容。
+    按窗口 ID 截图，返回轻量原生的 MacScreenImage 包装对象（包含原生 CGImageRef）。
+    完全不依赖 numpy 或 cv2，窗口被遮挡也能截到正确内容。
     """
     img_ref = Quartz.CGWindowListCreateImage(
         Quartz.CGRectNull,
@@ -269,13 +309,4 @@ def capture_window(win: MacWindow) -> np.ndarray:
     if img_ref is None:
         raise RuntimeError(f"截图失败 window_id={win.window_id}（请检查终端是否授予'屏幕录制'权限）")
 
-    w = Quartz.CGImageGetWidth(img_ref)
-    h = Quartz.CGImageGetHeight(img_ref)
-    bpr = Quartz.CGImageGetBytesPerRow(img_ref)
-    provider = Quartz.CGImageGetDataProvider(img_ref)
-    data = Quartz.CGDataProviderCopyData(provider)
-
-    arr = np.frombuffer(data, dtype=np.uint8)
-    arr = arr.reshape((h, bpr // 4, 4))[:, :w, :]
-    bgr = arr[:, :, [2, 1, 0]].copy()   # BGRA -> BGR
-    return bgr
+    return MacScreenImage(img_ref)

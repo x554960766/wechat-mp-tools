@@ -34,10 +34,11 @@ def _gen_id() -> str:
 
 
 def _normalize_uin(uin_str: str) -> str:
-    """规范化 UIN：自动把 base64 编码的 UIN (如 MTQ1NDk1MDMyMA==) 解码为纯数字文本"""
+    """规范化 UIN：自动把 base64 编码的 UIN (如 MTQ1NDk1MDMyMA== 或 MTQ1NDk1MDMyMA%3D%3D) 解码为纯数字文本"""
     if not uin_str:
         return ""
-    uin_str = str(uin_str).strip()
+    import urllib.parse
+    uin_str = urllib.parse.unquote(str(uin_str)).strip()
     if uin_str.endswith("==") or (len(uin_str) >= 12 and uin_str.isalnum()):
         try:
             import base64

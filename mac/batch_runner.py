@@ -240,7 +240,9 @@ class WeChatBatchRunner:
                         return True
             return False
 
-        if not _is_in_filehelper_window(main):
+        if _is_in_filehelper_window(main):
+            logger.info("🎉 当前已直接停留在微信「文件传输助手」会话界面，无需搜索！")
+        else:
             for attempt in range(1, 3):
                 if attempt > 1:
                     press("escape", times=2)
@@ -249,7 +251,7 @@ class WeChatBatchRunner:
                 move_and_click(main.x + 35, main.y + 145)
                 human_sleep(0.3, 0.5)
                 img = capture_window(main)
-                boxes = ocr(img)
+                boxes = ocr(img) if img is not None else []
                 helper_box = next((b for b in boxes if b.left < 230 and b.top > 45 and ('文件传' in b.text or '传输助手' in b.text) and ':' not in b.text and '：' not in b.text and len(b.text.strip()) <= 8), None)
                 if helper_box:
                     sx, sy = cs.img_to_screen(helper_box.center[0], helper_box.center[1])
@@ -291,7 +293,7 @@ class WeChatBatchRunner:
                     # 若未找到浮层窗口，回退截取主窗口
                     if not target_box:
                         img_s = capture_window(main)
-                        boxes_s = ocr(img_s)
+                        boxes_s = ocr(img_s) if img_s is not None else []
                         drop_cands = [b for b in boxes_s if b.left < 350]
                         target_box = _find_dropdown_filehelper_box(drop_cands)
 
@@ -313,43 +315,80 @@ class WeChatBatchRunner:
                     press("escape", times=2)
                     human_sleep(0.4, 0.6)
 
+        # 再次检查聚合页是否已被调出
+        portal = find_portal_window()
+        if portal:
+            raise_window(portal)
+            human_sleep(0.3, 0.5)
+            return portal
+
+        def _clean_text(text: str) -> str:
+            import re
+            return re.sub(r'[\s\u3000]+', '', (text or "").lower()).replace('：', ':').replace('，', ',').replace('。', '.')
+
         def _is_portal_link(text: str) -> bool:
-            t = text.lower()
-            if '5200' in t and any(k in t for k in ('mp-batch', 'batch', 'portal', 'auth', '127.0.0.1')):
+            t = _clean_text(text)
+            if '5200' in t and any(k in t for k in ('mp-batch', 'batch', 'portal', 'auth', '127.0.0.1', 'localhost')):
                 return True
-            if 'mp-batch-portal' in t or 'batch-portal' in t:
+            if 'mp-batch-portal' in t or 'batch-portal' in t or 'auth/mp-batch' in t:
+                return True
+            if any(k in t for k in ("公众号批量授权", "批量授权聚合中心", "公众号主页批量授权", "批量授权中心")):
                 return True
             return False
 
         img2 = capture_window(main)
-        boxes2 = ocr(img2)
-        link_box = next((b for b in reversed(boxes2) if b.left >= 200 and _is_portal_link(b.text)), None)
+        boxes2 = ocr(img2) if img2 is not None else []
+
+        # 扫描已有链接或卡片
+        link_box = None
+        for b in reversed(boxes2):
+            if b.left >= 200 and _is_portal_link(b.text):
+                link_box = b
+                break
+
+        # 尝试相邻块拼接
+        if not link_box and len(boxes2) >= 2:
+            sorted_boxes = sorted([b for b in boxes2 if b.left >= 200], key=lambda x: (x.top, x.left))
+            for i in range(len(sorted_boxes) - 1, 0, -1):
+                b1, b2 = sorted_boxes[i - 1], sorted_boxes[i]
+                if abs(b2.top - b1.bottom) < 30 and _is_portal_link(b1.text + b2.text):
+                    link_box = b2
+                    break
+
         if link_box:
             logger.info("✅ 找到已有聚合页链接气泡 [%s]，直接点击打开...", link_box.text)
             sx, sy = cs.img_to_screen(link_box.center[0], link_box.center[1])
             move_and_click(sx, sy)
         else:
-            # 严格遵循用户指示：未找到聚合页链接时直接在输入框发送链接，绝对不乱点其它链接！
+            # 严格遵循用户指示：未找到聚合页链接时直接在输入框发送链接
             portal_url = "http://127.0.0.1:5200/api/auth/mp-batch-portal"
             logger.info("👉 未在聊天记录中检测到有效的聚合页链接，正在输入框发送聚合页入口链接...")
             input_x = main.x + int(main.w * 0.5)
-            input_y = main.y + main.h - 60
+            input_y = main.y + main.h - 50
             move_and_click(input_x, input_y)
             human_sleep(0.2, 0.3)
             type_text_via_clipboard(portal_url, clear_first=False)
             human_sleep(0.2, 0.3)
             press("return")
-            human_sleep(0.8, 1.2)
+            human_sleep(0.9, 1.3)
             img3 = capture_window(main)
-            boxes3 = ocr(img3)
-            link_box = next((b for b in reversed(boxes3) if b.left > 280 and _is_portal_link(b.text)), None)
+            boxes3 = ocr(img3) if img3 is not None else []
+            link_box = next((b for b in reversed(boxes3) if b.left > 240 and _is_portal_link(b.text)), None)
             if link_box:
                 logger.info("✅ 成功识别刚发送的聚合页链接 [%s]，点击打开...", link_box.text)
                 sx, sy = cs.img_to_screen(link_box.center[0], link_box.center[1])
                 move_and_click(sx, sy)
             else:
-                logger.info("👉 点击刚发送的最新消息气泡...")
-                move_and_click(main.x + int(main.w * 0.55), main.y + main.h - 130)
+                msg_cands = [b for b in boxes3 if b.left > 240 and b.top > img3.shape[0] * 0.35 and b.bottom < img3.shape[0] - 70]
+                if msg_cands:
+                    msg_cands.sort(key=lambda x: x.bottom, reverse=True)
+                    bottom_bubble = msg_cands[0]
+                    bx, by = cs.img_to_screen(bottom_bubble.center[0], bottom_bubble.center[1])
+                    logger.info("🎯 点击刚发出的最新消息气泡底部条目 [%s] (%d, %d)...", bottom_bubble.text, bx, by)
+                    move_and_click(bx, by)
+                else:
+                    logger.info("👉 兜底点击输入框上方区域...")
+                    move_and_click(input_x, main.y + main.h - 100)
 
         deadline = time.time() + 8.0
         portal = None
@@ -385,7 +424,6 @@ class WeChatBatchRunner:
         在微信 4.1.x 三栏内嵌分栏中，精准定位并点击 Tab 标题右侧的圆形关闭叉号 (ⓧ)，
         关闭当前公众号主页/文章页 Tab，优雅回到聚合页。
         """
-        import cv2
         main = find_main_window(timeout=1.0)
         if not main or main.w < 850:
             return False
@@ -402,18 +440,22 @@ class WeChatBatchRunner:
 
         click_target = None
 
-        # 1. 优先模板匹配名字右侧的圆圈叉号图标 (ⓧ)
-        icon_path = os.path.join(os.path.dirname(__file__), 'assets', 'close_tab_icon.png')
-        if os.path.exists(icon_path):
-            icon = cv2.imread(icon_path)
-            if icon is not None and header_crop.shape[0] >= icon.shape[0] and header_crop.shape[1] >= icon.shape[1]:
-                res = cv2.matchTemplate(header_crop, icon, cv2.TM_CCOEFF_NORMED)
-                min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
-                if max_val >= 0.70:
-                    cx = pane_x0 + max_loc[0] + icon.shape[1] // 2
-                    cy = max_loc[1] + icon.shape[0] // 2
-                    click_target = (cx, cy)
-                    logger.info("🎯 [Close Tab] 模板匹配定位到标签页关闭图标: (%d, %d), 置信度: %.2f", cx, cy, max_val)
+        # 1. 优先模板匹配名字右侧的圆圈叉号图标 (ⓧ)（若环境包含 cv2 则尝试，否则优雅跳过）
+        try:
+            import cv2
+            icon_path = os.path.join(os.path.dirname(__file__), 'assets', 'close_tab_icon.png')
+            if os.path.exists(icon_path):
+                icon = cv2.imread(icon_path)
+                if icon is not None and header_crop.shape[0] >= icon.shape[0] and header_crop.shape[1] >= icon.shape[1]:
+                    res = cv2.matchTemplate(header_crop, icon, cv2.TM_CCOEFF_NORMED)
+                    min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+                    if max_val >= 0.70:
+                        cx = pane_x0 + max_loc[0] + icon.shape[1] // 2
+                        cy = max_loc[1] + icon.shape[0] // 2
+                        click_target = (cx, cy)
+                        logger.info("🎯 [Close Tab] 模板匹配定位到标签页关闭图标: (%d, %d), 置信度: %.2f", cx, cy, max_val)
+        except Exception:
+            pass
 
         # 2. OCR 查找名字右侧的关闭按钮
         if not click_target:

@@ -197,8 +197,15 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
         proxies = get_proxies_dict()
         proxy_url = proxies.get("http") if proxies else None
 
-        import base64
-        uin_str = str(uin).strip() if uin else ""
+        import base64, urllib.parse
+        uin_str = urllib.parse.unquote(str(uin)).strip() if uin else ""
+        if uin_str.endswith("==") or (len(uin_str) >= 12 and uin_str.isalnum()):
+            try:
+                decoded = base64.b64decode(uin_str).decode('utf-8', errors='ignore').strip()
+                if decoded.isdigit():
+                    uin_str = decoded
+            except Exception:
+                pass
         if uin_str and uin_str.isdigit():
             uin_encoded = base64.b64encode(uin_str.encode()).decode()
         else:

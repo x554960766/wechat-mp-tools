@@ -262,12 +262,39 @@ class WinBatchRunner:
                     wi.human_sleep(0.4, 0.6)
                     wi.release_all_modifiers()
 
-            return _is_in_filehelper(main.hwnd)
+        # 再次确认主窗口激活后是否直接检测到聚合页
+        portal = ww.find_portal_window_windows()
+        if portal:
+            logger.info("🎉 激活主窗口后直接检测到 Windows 聚合页窗口，立即复用！")
+            ww.activate_window(portal.hwnd)
+            wi.human_sleep(0.3, 0.5)
+            return portal
 
-        if not _enter_filehelper_window():
-            logger.warning("未能自动进入「文件传输助手」页面，请手动在微信中打开文件传输助手。")
+        if _is_in_filehelper(main.hwnd):
+            logger.info("🎉 当前已直接停留在 Windows 微信「文件传输助手」会话界面，无需重复进入！")
+        else:
+            if not _enter_filehelper_window():
+                logger.warning("未能自动进入「文件传输助手」页面，请手动在微信中打开文件传输助手。")
 
-        # 检查会话内是否已有聚合页链接气泡，若没有则在输入框发送（绝不误触其它无关链接）
+        # 再次检查是否有聚合页在会话激活后呈现
+        portal = ww.find_portal_window_windows()
+        if portal:
+            logger.info("🎉 切换至文件助手后检测到 Windows 聚合页窗口，立即复用！")
+            ww.activate_window(portal.hwnd)
+            wi.human_sleep(0.3, 0.5)
+            return portal
+
+        def _is_win_portal_link(name: str) -> bool:
+            t = re.sub(r'[\s\u3000]+', '', (name or "").lower()).replace('：', ':').replace('，', ',').replace('。', '.')
+            if "5200" in t and any(k in t for k in ("mp-batch", "batch", "portal", "auth", "127.0.0.1", "localhost")):
+                return True
+            if "mp-batch-portal" in t or "batch-portal" in t or "auth/mp-batch" in t:
+                return True
+            if any(k in t for k in ("公众号批量授权", "批量授权聚合中心", "公众号主页批量授权", "批量授权中心")):
+                return True
+            return False
+
+        # 检查会话内是否已有聚合页链接气泡，若没有则在输入框发送
         has_portal_link = False
         link_click_pt = None
         try:
@@ -276,7 +303,7 @@ class WinBatchRunner:
             if ctrl:
                 for c, _ in auto.WalkControl(ctrl, maxDepth=10):
                     name = c.Name or ""
-                    if "5200" in name and any(k in name for k in ("mp-batch", "batch", "portal", "auth", "127.0.0.1")):
+                    if _is_win_portal_link(name):
                         r = c.BoundingRectangle
                         if r.right > r.left and r.bottom > r.top:
                             link_click_pt = ((r.left + r.right) // 2, (r.top + r.bottom) // 2)
@@ -286,41 +313,60 @@ class WinBatchRunner:
             pass
 
         if has_portal_link and link_click_pt:
-            logger.info("✅ 检测到已有聚合页链接气泡，点击坐标: %s...", link_click_pt)
+            logger.info("✅ 检测到已有聚合页链接/卡片气泡，点击坐标: %s...", link_click_pt)
             wi.post_click(main.hwnd, link_click_pt[0], link_click_pt[1])
         else:
             logger.info("👉 未在聊天记录中检测到有效的 5200 聚合页链接，正在输入框发送聚合页入口链接...")
-            # 点击聊天窗口下方的输入区域 (main 窗口底部约 80px 处)
+            # 点击聊天窗口底部的输入区域
             l, t, r, b = main.rect
             input_x = l + (r - l) // 2
-            input_y = b - 70
+            input_y = b - 50
             wi.post_click(main.hwnd, input_x, input_y)
             wi.human_sleep(0.2, 0.3)
             wi.type_via_clipboard(main.hwnd, portal_url, confirm=True)
             wi.human_sleep(1.0, 1.5)
 
-            # 再次通过 UIA 点击刚发送的链接气泡，或点击输入框上方刚发出的消息
+            # 再次通过 UIA 点击刚发送的链接气泡，或定位最新一条消息条目
             sent_clicked = False
             try:
                 import uiautomation as auto
                 ctrl = auto.ControlFromHandle(main.hwnd)
                 if ctrl:
+                    msg_cands = []
                     for c, _ in auto.WalkControl(ctrl, maxDepth=10):
                         name = c.Name or ""
-                        if "5200" in name and any(k in name for k in ("mp-batch", "batch", "portal", "auth", "127.0.0.1")):
-                            r = c.BoundingRectangle
-                            if r.right > r.left and r.bottom > r.top:
-                                wi.post_click(main.hwnd, (r.left + r.right) // 2, (r.top + r.bottom) // 2)
-                                sent_clicked = True
-                                break
+                        r = c.BoundingRectangle
+                        if r.right <= r.left or r.bottom <= r.top:
+                            continue
+                        if _is_win_portal_link(name):
+                            wi.post_click(main.hwnd, (r.left + r.right) // 2, (r.top + r.bottom) // 2)
+                            sent_clicked = True
+                            break
+                        # 记录输入框上方的聊天消息控件候选
+                        if r.top > t + (b - t) * 0.35 and r.bottom < b - 70 and r.left > l + 200:
+                            msg_cands.append((c, r))
+
+                    if not sent_clicked and msg_cands:
+                        msg_cands.sort(key=lambda x: x[1].bottom, reverse=True)
+                        target_r = msg_cands[0][1]
+                        cx, cy = (target_r.left + target_r.right) // 2, (target_r.top + target_r.bottom) // 2
+                        logger.info("🎯 点击刚发出的最新消息气泡条目 (%d, %d)...", cx, cy)
+                        wi.post_click(main.hwnd, cx, cy)
+                        sent_clicked = True
             except Exception:
                 pass
             if not sent_clicked:
-                wi.post_click(main.hwnd, input_x, b - 150)
+                wi.post_click(main.hwnd, input_x, b - 110)
 
-        wi.human_sleep(1.5, 2.5)
+        # 轮询等待聚合页窗口出现
+        deadline = time.time() + 8.0
+        portal = None
+        while time.time() < deadline:
+            time.sleep(0.5)
+            portal = ww.find_portal_window_windows()
+            if portal:
+                break
 
-        portal = ww.find_portal_window_windows()
         if not portal:
             raise RuntimeError(
                 f"未能自动唤起批量授权聚合页窗口。请在微信文件传输助手中手动点击链接: {portal_url}"

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import cv2
+import Quartz
 import Vision
 from Foundation import NSData
 
@@ -33,28 +33,32 @@ class TextBox:
         return f"TextBox({self.text!r}, conf={self.score:.2f}, rect=({self.left},{self.top},{self.right},{self.bottom}))"
 
 
-def ocr(img_bgr, upscale: float = 1.0, min_score: float = 0.3) -> list[TextBox]:
+def ocr(img, upscale: float = 1.0, min_score: float = 0.3) -> list[TextBox]:
     """
-    对 BGR 图像做 OCR。坐标返回的是传入图像的像素坐标。
-    使用 macOS Vision 框架，高精度识别中英文。
+    对图像做 OCR。坐标返回的是传入图像的像素坐标。
+    使用 macOS Vision 框架，高精度原生识别中英文，无需 numpy / cv2。
+    入参支持 MacScreenImage、CGImageRef 或包含 cg_image 属性的对象。
     """
-    if upscale != 1.0:
-        img_bgr = cv2.resize(img_bgr, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
-
-    ok, buf = cv2.imencode(".png", img_bgr)
-    if not ok:
+    if img is None:
         return []
-    ns_data = NSData.dataWithBytes_length_(buf.tobytes(), len(buf))
+
+    cg_img = getattr(img, "cg_image", img)
+    if not cg_img:
+        return []
+
+    w = int(Quartz.CGImageGetWidth(cg_img))
+    h = int(Quartz.CGImageGetHeight(cg_img))
+    if w == 0 or h == 0:
+        return []
 
     request = Vision.VNRecognizeTextRequest.alloc().init()
     request.setRecognitionLanguages_(["zh-Hans", "en-US"])
     request.setRecognitionLevel_(Vision.VNRequestTextRecognitionLevelAccurate)
     request.setUsesLanguageCorrection_(True)
 
-    handler = Vision.VNImageRequestHandler.alloc().initWithData_options_(ns_data, None)
+    handler = Vision.VNImageRequestHandler.alloc().initWithCGImage_options_(cg_img, None)
     handler.performRequests_error_([request], None)
 
-    h, w = img_bgr.shape[:2]
     boxes: list[TextBox] = []
     for obs in (request.results() or []):
         cands = obs.topCandidates_(1)
@@ -67,10 +71,10 @@ def ocr(img_bgr, upscale: float = 1.0, min_score: float = 0.3) -> list[TextBox]:
         if not text or conf < min_score:
             continue
         bb = obs.boundingBox()   # 归一化坐标，原点在左下角
-        left = int(bb.origin.x * w / upscale)
-        right = int((bb.origin.x + bb.size.width) * w / upscale)
-        top = int((1 - bb.origin.y - bb.size.height) * h / upscale)  # y 轴翻转
-        bottom = int((1 - bb.origin.y) * h / upscale)
+        left = int(bb.origin.x * w)
+        right = int((bb.origin.x + bb.size.width) * w)
+        top = int((1 - bb.origin.y - bb.size.height) * h)  # y 轴翻转
+        bottom = int((1 - bb.origin.y) * h)
         boxes.append(TextBox(text, conf, left, top, right, bottom))
 
     # 按自上而下、从左到右排序
@@ -100,10 +104,17 @@ def find_text_fuzzy(boxes: list[TextBox], keyword: str, threshold: float = 0.6) 
 
 
 def dump_debug(img, boxes: list[TextBox], path: str) -> None:
-    """在图像上绘制识别出的文本矩形框并保存，便于排查调试。"""
-    vis = img.copy()
-    for b in boxes:
-        cv2.rectangle(vis, (b.left, b.top), (b.right, b.bottom), (0, 200, 0), 1)
-        cv2.putText(vis, b.text[:10], (b.left, max(b.top - 2, 10)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
-    cv2.imwrite(path, vis)
+    """在图像上绘制识别出的文本矩形框并保存（可选调试功能，若未安装 cv2 则安全跳过）。"""
+    try:
+        import cv2
+        if hasattr(img, "cg_image"):
+            # 若为原生 MacScreenImage，调试时暂不强制依赖绘制
+            return
+        vis = img.copy()
+        for b in boxes:
+            cv2.rectangle(vis, (b.left, b.top), (b.right, b.bottom), (0, 200, 0), 1)
+            cv2.putText(vis, b.text[:10], (b.left, max(b.top - 2, 10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 255), 1)
+        cv2.imwrite(path, vis)
+    except Exception:
+        pass

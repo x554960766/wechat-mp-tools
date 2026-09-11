@@ -8,8 +8,8 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 from dataclasses import dataclass
-import numpy as np
 
 from mac.mac_ocr import TextBox, ocr
 
@@ -42,7 +42,7 @@ def _x_overlap(a: TextBox, b: TextBox) -> float:
     return ov / max(min(a.width, b.width), 1)
 
 
-def find_article_cards(img: np.ndarray, min_title_len: int = 4) -> list[ArticleCard]:
+def find_article_cards(img: Any, min_title_len: int = 4) -> list[ArticleCard]:
     """在传入的图像中识别搜一搜文章卡片列表。"""
     boxes = ocr(img)
 
