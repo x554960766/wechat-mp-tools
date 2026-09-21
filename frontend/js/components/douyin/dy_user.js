@@ -30,11 +30,10 @@ const DyUserPage = {
                                 <h3 class="card-title" style="margin: 0; display: flex; align-items: center; gap: 8px; font-size: 1.05rem; color: var(--text-primary);">
                                     👥 已收藏作者
                                 </h3>
-                                <span id="dy-user-fav-count" class="badge" style="background: rgba(102, 126, 234, 0.18); color: #8ea5ff; border: 1px solid rgba(102, 126, 234, 0.35); font-size: 0.75rem; padding: 2px 10px; border-radius: 20px; font-weight: 600;">已收藏 0 位</span>
+                                <span id="dy-user-fav-count" class="badge" style="background: rgba(254, 44, 85, 0.1); color: var(--primary); border: 1px solid rgba(254, 44, 85, 0.2); font-size: 0.75rem; padding: 2px 8px; border-radius: 12px; font-weight: 500;">已收藏 0 位</span>
                             </div>
-                            <button class="btn btn-secondary btn-sm" onclick="Router.navigate('dy_search')" style="font-size: 0.85rem; padding: 6px 14px; font-weight: 500; display: flex; align-items: center; gap: 6px;">
-                                <svg viewBox="0 0 24 24" fill="none" width="14" height="14" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                                搜索添加作者
+                            <button class="btn btn-secondary btn-sm" onclick="Router.navigate('dy_search')" style="font-size: 0.85rem; padding: 6px 12px; font-weight: 500; display: flex; align-items: center; gap: 6px;">
+                                ➕ 搜索/添加新作者
                             </button>
                         </div>
 
@@ -51,8 +50,8 @@ const DyUserPage = {
                                     <circle cx="9" cy="7" r="4"/>
                                 </svg>
                             </div>
-                            <div class="empty-state-title" style="font-size: 1.05rem; font-weight: 600; color: #ffffff;">暂无收藏的作者</div>
-                            <div class="empty-state-desc" style="color: var(--text-secondary); font-size: 0.85rem; margin-top: 6px;">在“搜索用户”中找到喜欢的创作者并添加收藏，即可在此快速访问主页。</div>
+                            <div class="empty-state-title" style="font-size: 1.05rem; font-weight: 600; color: var(--text-primary);">暂无收藏的作者</div>
+                            <div class="empty-state-desc" style="color: var(--text-muted); font-size: 0.85rem; margin-top: 6px;">在“搜索用户”中找到喜欢的创作者并添加收藏，即可在此快速访问主页。</div>
                             <button class="btn btn-primary" onclick="Router.navigate('dy_search')" style="margin-top: 16px; padding: 8px 18px; font-size: 0.88rem;">
                                 🔍 前往搜索用户
                             </button>
@@ -921,23 +920,23 @@ const DyUserPage = {
             const escUniqueId = this.esc(uniqueId);
 
             return `
-                <div class="favorite-author-card card" 
-                     style="display: flex; gap: 12px; align-items: center; padding: 12px 14px; cursor: pointer; transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s; border-radius: 10px; border: 1.5px solid var(--border-color); background: var(--bg-card); position: relative;"
+                <div class="favorite-card card" 
+                     style="display: flex; gap: 10px; align-items: center; padding: 12px 14px; cursor: pointer; transition: transform 0.2s, border-color 0.2s, box-shadow 0.2s; border-radius: 10px; border: 1.5px solid var(--border-color); background: var(--bg-card); position: relative;"
                      onmouseenter="this.style.transform='translateY(-3px)'; this.style.borderColor='var(--primary)'; this.style.boxShadow='var(--shadow-md)';"
                      onmouseleave="this.style.transform=''; this.style.borderColor='var(--border-color)'; this.style.boxShadow='';"
                      onclick="DyUserPage.selectAuthor('${escSecUid}')">
                     <img src="${escAvatar}" alt="${escName}" 
-                         style="width: 44px; height: 44px; border-radius: 50%; object-fit: cover; border: 2px solid var(--primary-light); background: var(--bg-secondary); flex-shrink: 0;" 
+                         style="width: 44px; height: 44px; border-radius: 50%; object-fit: cover; border: 1.5px solid rgba(0,0,0,0.08); background: var(--bg-secondary); flex-shrink: 0;" 
                          onerror="this.src='${defaultAvatar}'">
-                    <div style="flex: 1; min-width: 0; padding-right: 4px;">
-                        <h4 style="margin: 0; font-size: 0.98rem; font-weight: 600; color: #ffffff !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.3;" title="${escName}">${escName}</h4>
-                        <p style="margin: 4px 0 0 0; font-family: monospace; font-size: 0.75rem; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escUniqueId}">${escUniqueId ? 'ID: ' + escUniqueId : '点击查看作品'}</p>
+                    <div style="flex: 1; min-width: 0; overflow: hidden;">
+                        <h4 style="margin: 0; font-size: 0.96rem; font-weight: 600; color: var(--text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.3;" title="${escName}">${escName}</h4>
+                        <p style="margin: 4px 0 0 0; font-family: monospace; font-size: 0.75rem; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${escUniqueId}">${escUniqueId ? 'ID: ' + escUniqueId : '点击进入主页'}</p>
                     </div>
                     <button onclick="event.stopPropagation(); DyUserPage.removeFavoriteAuthor('${escSecUid}')" 
                             title="取消收藏" 
-                            style="width: 24px; height: 24px; border-radius: 50%; border: none; background: rgba(255, 255, 255, 0.08); color: var(--text-muted); display: flex; align-items: center; justify-content: center; font-size: 13px; cursor: pointer; flex-shrink: 0; transition: all 0.2s; padding: 0;" 
-                            onmouseenter="this.style.background='rgba(239, 68, 68, 0.25)'; this.style.color='#ef4444';" 
-                            onmouseleave="this.style.background='rgba(255, 255, 255, 0.08)'; this.style.color='var(--text-muted)';">✕</button>
+                            style="width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--border-color); background: transparent; color: var(--text-muted); display: flex; align-items: center; justify-content: center; font-size: 12px; cursor: pointer; flex-shrink: 0; transition: all 0.2s; padding: 0;" 
+                            onmouseenter="this.style.background='rgba(239, 68, 68, 0.12)'; this.style.color='#ef4444'; this.style.borderColor='rgba(239, 68, 68, 0.3)';" 
+                            onmouseleave="this.style.background='transparent'; this.style.color='var(--text-muted)'; this.style.borderColor='var(--border-color)';">✕</button>
                 </div>
             `;
         }).join('');
