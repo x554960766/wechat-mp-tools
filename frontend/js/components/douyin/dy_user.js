@@ -102,12 +102,24 @@ const DyUserPage = {
 
         this.isSelectMode = false;
 
+        if (!this._favListenerAdded) {
+            this._favListenerAdded = true;
+            window.addEventListener('dy-fav-changed', (e) => {
+                if (this.secUid && (!e.detail || !e.detail.secUid || e.detail.secUid === this.secUid)) {
+                    this.updateFavoriteAuthorButton();
+                }
+            });
+        }
+
         if (secUid) {
             await this.loadUser(secUid);
         }
     },
 
     onShow() {
+        if (this.secUid) {
+            this.updateFavoriteAuthorButton();
+        }
         if (this.user) {
             fetch('/api/douyin/progress')
                 .then(res => res.json())
@@ -314,68 +326,18 @@ const DyUserPage = {
         empty.style.display = 'none';
         container.style.display = 'grid';
 
-        const headerActions = document.getElementById('dy-user-header-actions');
-        if (headerActions) {
-            headerActions.innerHTML = `
-                <div style="display: flex; gap: var(--spacing-sm); align-items: center;">
-                    <button class="btn btn-secondary btn-sm" onclick="DyUserPage.toggleSelectMode()" id="dy-user-select-mode-btn">
-                        ${this.isSelectMode ? '取消批量' : '批量选择'}
-                    </button>
-                    <div id="dy-user-batch-actions" style="display: ${this.isSelectMode ? 'flex' : 'none'}; gap: var(--spacing-sm); align-items: center;">
-                        <button class="btn btn-secondary btn-sm" onclick="DyUserPage.selectAll()">全选</button>
-                        <button class="btn btn-secondary btn-sm" onclick="DyUserPage.deselectAll()">取消全选</button>
-                    </div>
-                </div>
-            `;
+        if (this.currentTab === 'mix') {
+            container.innerHTML = this.videos.map(mix => this.renderMixCard(mix)).join('');
+        } else {
+            container.innerHTML = this.videos.map(video => this.renderVideoCard(video)).join('');
         }
-
-        let html = '';
-        this.videos.forEach(item => {
-            if (this.currentTab === 'mix') {
-                html += this.renderMixCard(item);
-            } else {
-                html += this.renderAwemeItem(item);
-            }
-        });
-        container.innerHTML = html;
 
         if (moreContainer) {
             moreContainer.style.display = this.hasMore ? 'block' : 'none';
         }
-    },
 
-    renderAwemeItem(item) {
-        const awemeId = item.aweme_id;
-        const title = item.desc || '无标题';
-        const cover = item.video?.cover?.url_list?.[0] || item.video?.origin_cover?.url_list?.[0] || '';
-        const likes = this.formatNumber(item.statistics?.digg_count || 0);
-        const comments = this.formatNumber(item.statistics?.comment_count || 0);
-        const duration = this.formatDuration(item.video?.duration || 0);
-        const isReplay = item.is_live_replay || item.aweme_type === 101;
-
-        return `
-            <div class="video-card ${this.selectedVideos.has(awemeId) ? 'selected' : ''}" id="video-card-${awemeId}" style="border-radius: 12px; overflow: hidden; background: var(--bg-secondary); transition: transform 0.3s, box-shadow 0.3s;" onmouseenter="this.style.transform='translateY(-4px)'; this.style.boxShadow='0 8px 24px rgba(0,0,0,0.15)';" onmouseleave="this.style.transform=''; this.style.boxShadow='';">
-                <div style="position: relative; padding-top: 133%; background: #000; cursor: pointer;" onclick="DyUserPage.handleCardClick('${awemeId}')">
-                    <img src="${cover}" alt="${title}" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: cover;" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%22100%25%22 height=%22100%25%22%3E%3Crect fill=%22%23333%22 width=%22100%25%22 height=%22100%25%22/%3E%3C/svg%3E'">
-                    <span style="position: absolute; bottom: 8px; right: 8px; background: rgba(0,0,0,0.7); color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem;">${duration}</span>
-                    ${isReplay ? '<span style="position: absolute; top: 8px; left: 8px; background: #8b5cf6; color: #fff; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; font-weight: 600;">直播回放</span>' : ''}
-                    <div class="video-select-checkbox" style="display: ${this.isSelectMode ? 'flex' : 'none'}; position: absolute; top: 8px; right: 8px; width: 22px; height: 22px; border-radius: 4px; background: ${this.selectedVideos.has(awemeId) ? 'var(--primary-color)' : 'rgba(0,0,0,0.5)'}; border: 2px solid #fff; align-items: center; justify-content: center; z-index: 2;">
-                        ${this.selectedVideos.has(awemeId) ? '<svg viewBox="0 0 24 24" fill="none" style="width: 14px; height: 14px;"><polyline points="20 6 9 17 4 12" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg>' : ''}
-                    </div>
-                </div>
-                <div style="padding: var(--spacing-md);">
-                    <h3 style="font-size: 0.95rem; margin-bottom: 8px; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.4; color: #ffffff;">${title}</h3>
-                    <div style="display: flex; gap: var(--spacing-md); font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px;">
-                        <span>❤️ ${likes}</span>
-                        <span>💬 ${comments}</span>
-                    </div>
-                    <div style="display: flex; gap: 8px;">
-                        <button class="btn btn-primary btn-sm" onclick="DyUserPage.downloadVideo('${awemeId}')" style="flex: 1;">${isReplay ? '下载回放' : '下载视频'}</button>
-                        <button class="btn btn-secondary btn-sm" onclick="DyUserPage.downloadComments('${awemeId}')" title="下载并导出该视频全部评论" style="padding: 0 10px; font-size: 0.8rem; white-space: nowrap;">💬 评论</button>
-                    </div>
-                </div>
-            </div>
-        `;
+        this.updateHeaderActions();
+        this.updateDownloadButton();
     },
 
     renderMixCard(mix) {
@@ -446,11 +408,16 @@ const DyUserPage = {
                         <span>❤️ ${likes}</span>
                         <span>💬 ${comments}</span>
                     </div>
-                    <button class="btn btn-primary btn-sm" onclick="DyUserPage.downloadVideo('${awemeId}')" style="width: 100%;">${isReplay ? '下载回放' : '下载视频'}</button>
+                    <div style="display: flex; gap: 8px;">
+                        <button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); DyUserPage.downloadVideo('${awemeId}')" style="flex: 1;">${isReplay ? '下载回放' : '下载视频'}</button>
+                        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); DyUserPage.downloadComments('${awemeId}')" title="下载并导出该视频全部评论" style="padding: 0 10px; font-size: 0.8rem; white-space: nowrap;">💬 评论</button>
+                    </div>
                 </div>
             </div>
         `;
     },
+
+
 
     async downloadVideo(awemeId) {
         const videoObj = this.videos.find(v => v.aweme_id === awemeId);
@@ -797,9 +764,11 @@ const DyUserPage = {
         if (!this.user || !this.secUid) return;
         const list = this.getFavoriteAuthors();
         const existingIdx = list.findIndex(item => item.sec_uid === this.secUid);
+        let isFav = false;
         if (existingIdx >= 0) {
             list.splice(existingIdx, 1);
             Toast.show('已取消收藏该作者', 'info');
+            isFav = false;
         } else {
             const avatar = this.user.avatar_thumb?.url_list?.[0] || this.user.avatar_larger?.url_list?.[0] || '';
             list.unshift({
@@ -811,11 +780,13 @@ const DyUserPage = {
                 time: Date.now()
             });
             Toast.show('⭐ 已收藏该作者！可在「搜索用户」下方快速访问', 'success');
+            isFav = true;
         }
         try {
             localStorage.setItem('dy_favorite_authors', JSON.stringify(list));
         } catch (e) {}
         this.updateFavoriteAuthorButton();
+        window.dispatchEvent(new CustomEvent('dy-fav-changed', { detail: { secUid: this.secUid, isFav } }));
     },
 
     updateFavoriteAuthorButton() {

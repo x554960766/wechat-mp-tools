@@ -1,4 +1,7 @@
 const DySearchPage = {
+    cachedUsers: {},
+    _favListenerAdded: false,
+
     render() {
         return `
             <div class="page-header">
@@ -17,14 +20,16 @@ const DySearchPage = {
             </div>
 
             <!-- ⭐ 收藏作者快捷访问面板 -->
-            <div id="dy-fav-authors-box" class="card" style="margin-bottom: var(--spacing-lg); display: none;">
+            <div id="dy-fav-authors-box" class="card" style="margin-bottom: var(--spacing-lg); padding: 16px 20px; background: linear-gradient(145deg, rgba(30, 41, 59, 0.6), rgba(15, 23, 42, 0.7)); border: 1px solid rgba(245, 158, 11, 0.25); box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15); border-radius: 14px; display: none;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-                    <div style="font-weight: 600; font-size: 0.95rem; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
-                        <span>⭐</span> <span>我的收藏作者</span>
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <div style="width: 24px; height: 24px; border-radius: 6px; background: linear-gradient(135deg, #f59e0b, #d97706); display: flex; align-items: center; justify-content: center; color: #fff; font-size: 13px; box-shadow: 0 2px 6px rgba(245, 158, 11, 0.4);">★</div>
+                        <span style="font-weight: 600; font-size: 0.95rem; color: var(--text-primary); letter-spacing: 0.3px;">我的收藏作者</span>
+                        <span id="dy-fav-authors-count" style="font-size: 0.75rem; padding: 2px 8px; border-radius: 20px; background: rgba(245, 158, 11, 0.15); color: #f59e0b; font-weight: 500; border: 1px solid rgba(245, 158, 11, 0.3);">已收藏 0 位</span>
                     </div>
-                    <span id="dy-fav-authors-count" style="font-size: 0.8rem; color: var(--text-muted);">已收藏 0 位</span>
+                    <span style="font-size: 0.78rem; color: var(--text-muted);">点击直达主页</span>
                 </div>
-                <div id="dy-fav-authors-list" style="display: flex; gap: 12px; overflow-x: auto; padding-bottom: 4px; flex-wrap: wrap;"></div>
+                <div id="dy-fav-authors-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px;"></div>
             </div>
 
             <div id="dy-search-results" class="card-grid" style="display: none;"></div>
@@ -36,11 +41,33 @@ const DySearchPage = {
             </div>
         `;
     },
+
     async init() {
         const input = document.getElementById('dy-search-input');
         if (input) input.focus();
+
+        if (!this._favListenerAdded) {
+            this._favListenerAdded = true;
+            window.addEventListener('dy-fav-changed', (e) => {
+                this.renderFavoriteAuthors();
+                if (e.detail && e.detail.secUid) {
+                    const isFav = this.isFavoriteAuthor(e.detail.secUid);
+                    this.updateCardFavButton(e.detail.secUid, isFav);
+                }
+            });
+        }
+
         this.renderFavoriteAuthors();
     },
+
+    onShow() {
+        this.renderFavoriteAuthors();
+        // 刷新当前所有已渲染卡片的收藏状态
+        Object.keys(this.cachedUsers).forEach(secUid => {
+            this.updateCardFavButton(secUid, this.isFavoriteAuthor(secUid));
+        });
+    },
+
     async doSearch() {
         const keyword = document.getElementById('dy-search-input').value.trim();
         if (!keyword) {
@@ -66,6 +93,7 @@ const DySearchPage = {
             btn.textContent = '搜索';
         }
     },
+
     formatNumber(num) {
         if (!num || isNaN(num)) return '0';
         num = Number(num);
@@ -82,6 +110,7 @@ const DySearchPage = {
         const empty = document.getElementById('dy-search-empty');
         
         container.innerHTML = '';
+        this.cachedUsers = {};
         
         const users = (data.user_list || []).map(item => {
             const info = item.user_info || item;
@@ -109,6 +138,9 @@ const DySearchPage = {
             const signature = user.signature || '暂无签名';
             const sec_uid = user.sec_uid;
             const douyinId = user.unique_id || user.short_id || '';
+            const isFav = this.isFavoriteAuthor(sec_uid);
+
+            this.cachedUsers[sec_uid] = user;
             
             const card = document.createElement('div');
             card.className = 'card';
@@ -116,7 +148,6 @@ const DySearchPage = {
             card.onmouseenter = () => { card.style.transform = 'translateY(-3px)'; card.style.boxShadow = '0 8px 24px rgba(0,0,0,0.15)'; };
             card.onmouseleave = () => { card.style.transform = ''; card.style.boxShadow = ''; };
             card.onclick = () => {
-                // Navigate to user detail page and pass sec_uid via hash params or global state
                 window.location.hash = `#dy_user?sec_uid=${sec_uid}`;
             };
             
@@ -129,19 +160,21 @@ const DySearchPage = {
                         <p style="font-size: 0.82rem; color: var(--text-muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; margin: 0; line-height: 1.4;">${signature}</p>
                     </div>
                 </div>
-                <div style="display: flex; gap: 12px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-color); align-items: center;">
-                    <div style="flex: 1; text-align: center;">
-                        <div style="font-size: 1.05rem; font-weight: 600; color: var(--text-primary);">${this.formatNumber(user.follower_count || 0)}</div>
-                        <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">粉丝</div>
+                <div style="display: flex; gap: 8px; margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border-color); align-items: center;">
+                    <div style="text-align: center; min-width: 48px;">
+                        <div style="font-size: 0.95rem; font-weight: 600; color: var(--text-primary);">${this.formatNumber(user.follower_count || 0)}</div>
+                        <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 1px;">粉丝</div>
                     </div>
-                    <div style="width: 1px; background: var(--border-color); height: 24px;"></div>
-                    <div style="flex: 1; text-align: center;">
-                        <div style="font-size: 1.05rem; font-weight: 600; color: var(--text-primary);">${this.formatNumber(user.total_favorited || 0)}</div>
-                        <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">获赞</div>
+                    <div style="width: 1px; background: var(--border-color); height: 20px;"></div>
+                    <div style="text-align: center; min-width: 48px;">
+                        <div style="font-size: 0.95rem; font-weight: 600; color: var(--text-primary);">${this.formatNumber(user.total_favorited || 0)}</div>
+                        <div style="font-size: 0.72rem; color: var(--text-muted); margin-top: 1px;">获赞</div>
                     </div>
-                    <div style="width: 1px; background: var(--border-color); height: 24px;"></div>
-                    <div style="flex: 1; text-align: center;">
-                        <span class="btn btn-sm btn-primary" style="padding: 4px 10px; font-size: 0.75rem; pointer-events: none;">进入主页</span>
+                    <div style="flex: 1; display: flex; gap: 6px; justify-content: flex-end; align-items: center;">
+                        <button class="btn btn-sm btn-secondary" id="dy-search-fav-${sec_uid}" onclick="event.stopPropagation(); DySearchPage.toggleFavorite('${sec_uid}')" style="padding: 4px 10px; font-size: 0.78rem; display: inline-flex; align-items: center; gap: 4px; border-radius: 6px; ${isFav ? 'color: #f59e0b; border-color: rgba(245, 158, 11, 0.5); background: rgba(245, 158, 11, 0.12);' : ''}">
+                            <span>${isFav ? '★' : '☆'}</span> <span>${isFav ? '已收藏' : '收藏'}</span>
+                        </button>
+                        <button class="btn btn-sm btn-primary" onclick="event.stopPropagation(); window.location.hash='#dy_user?sec_uid=${sec_uid}';" style="padding: 4px 10px; font-size: 0.78rem; border-radius: 6px;">进入主页</button>
                     </div>
                 </div>
             `;
@@ -154,6 +187,65 @@ const DySearchPage = {
             return JSON.parse(localStorage.getItem('dy_favorite_authors') || '[]');
         } catch (e) {
             return [];
+        }
+    },
+
+    isFavoriteAuthor(secUid) {
+        if (!secUid) return false;
+        const list = this.getFavoriteAuthors();
+        return list.some(item => item.sec_uid === secUid);
+    },
+
+    toggleFavorite(secUid) {
+        const user = this.cachedUsers[secUid];
+        let list = this.getFavoriteAuthors();
+        const existingIdx = list.findIndex(item => item.sec_uid === secUid);
+        let isFav = false;
+
+        if (existingIdx >= 0) {
+            list.splice(existingIdx, 1);
+            Toast.show('已取消收藏该作者', 'info');
+            isFav = false;
+        } else {
+            const avatar = (user && user.avatar_thumb && user.avatar_thumb.url_list && user.avatar_thumb.url_list[0]) || (user && user.avatar) || '';
+            const nickname = (user && user.nickname) || '未知作者';
+            const signature = (user && user.signature) || '';
+            const uniqueId = (user && (user.unique_id || user.short_id)) || '';
+
+            list.unshift({
+                sec_uid: secUid,
+                nickname: nickname,
+                avatar: avatar,
+                signature: signature,
+                unique_id: uniqueId,
+                time: Date.now()
+            });
+            Toast.show('⭐ 已收藏该作者！', 'success');
+            isFav = true;
+        }
+
+        try {
+            localStorage.setItem('dy_favorite_authors', JSON.stringify(list));
+        } catch (e) {}
+
+        this.updateCardFavButton(secUid, isFav);
+        this.renderFavoriteAuthors();
+        window.dispatchEvent(new CustomEvent('dy-fav-changed', { detail: { secUid, isFav } }));
+    },
+
+    updateCardFavButton(secUid, isFav) {
+        const btn = document.getElementById(`dy-search-fav-${secUid}`);
+        if (!btn) return;
+        if (isFav) {
+            btn.innerHTML = '<span>★</span> <span>已收藏</span>';
+            btn.style.color = '#f59e0b';
+            btn.style.borderColor = 'rgba(245, 158, 11, 0.5)';
+            btn.style.background = 'rgba(245, 158, 11, 0.12)';
+        } else {
+            btn.innerHTML = '<span>☆</span> <span>收藏</span>';
+            btn.style.color = '';
+            btn.style.borderColor = '';
+            btn.style.background = '';
         }
     },
 
@@ -176,11 +268,17 @@ const DySearchPage = {
             const avatar = author.avatar || 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2244%22 height=%2244%22%3E%3Ccircle fill=%22%23444%22 cx=%2222%22 cy=%2222%22 r=%2222%22/%3E%3C/svg%3E';
             const name = author.nickname || '未知作者';
             const secUid = author.sec_uid || '';
+            const uniqueId = author.unique_id || '';
             return `
-                <div class="fav-author-chip" onclick="window.location.hash='#dy_user?sec_uid=${encodeURIComponent(secUid)}'" style="position: relative; display: flex; align-items: center; gap: 10px; padding: 6px 14px 6px 8px; background: var(--bg-input); border-radius: 30px; border: 1px solid var(--border-color); cursor: pointer; transition: all 0.2s;" onmouseenter="this.style.borderColor='var(--primary)'; this.style.transform='translateY(-2px)';" onmouseleave="this.style.borderColor='var(--border-color)'; this.style.transform='';">
-                    <img src="${avatar}" style="width: 32px; height: 32px; border-radius: 50%; object-fit: cover; background: #222;">
-                    <div style="font-size: 0.88rem; font-weight: 500; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary);">${name}</div>
-                    <span onclick="event.stopPropagation(); DySearchPage.removeFavoriteAuthor('${secUid}')" title="取消收藏" style="color: var(--text-muted); font-size: 1.1rem; line-height: 1; padding: 0 2px; margin-left: 2px; cursor: pointer;" onmouseenter="this.style.color='#ef4444'" onmouseleave="this.style.color='var(--text-muted)'">×</span>
+                <div class="fav-author-card" onclick="window.location.hash='#dy_user?sec_uid=${encodeURIComponent(secUid)}'" style="position: relative; display: flex; align-items: center; gap: 10px; padding: 8px 12px; background: var(--bg-input, rgba(255, 255, 255, 0.05)); border-radius: 10px; border: 1px solid var(--border-color, rgba(255, 255, 255, 0.1)); cursor: pointer; transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);" onmouseenter="this.style.borderColor='rgba(245, 158, 11, 0.7)'; this.style.transform='translateY(-2px)'; this.style.boxShadow='0 6px 16px rgba(0,0,0,0.2)';" onmouseleave="this.style.borderColor='var(--border-color, rgba(255, 255, 255, 0.1))'; this.style.transform=''; this.style.boxShadow='';">
+                    <div style="position: relative; flex-shrink: 0;">
+                        <img src="${avatar}" style="width: 36px; height: 36px; border-radius: 50%; object-fit: cover; border: 1.5px solid rgba(245, 158, 11, 0.5); background: #222; display: block;">
+                    </div>
+                    <div style="flex: 1; min-width: 0;">
+                        <div style="font-size: 0.86rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary);">${name}</div>
+                        <div style="font-size: 0.72rem; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-top: 1px;">${uniqueId ? 'ID: ' + uniqueId : '点击直达'}</div>
+                    </div>
+                    <button onclick="event.stopPropagation(); DySearchPage.removeFavoriteAuthor('${secUid}')" title="取消收藏" style="width: 22px; height: 22px; border-radius: 50%; border: none; background: transparent; color: var(--text-muted); display: flex; align-items: center; justify-content: center; font-size: 14px; cursor: pointer; flex-shrink: 0; transition: all 0.2s; padding: 0;" onmouseenter="this.style.background='rgba(239, 68, 68, 0.2)'; this.style.color='#ef4444';" onmouseleave="this.style.background='transparent'; this.style.color='var(--text-muted)';">×</button>
                 </div>
             `;
         }).join('');
@@ -192,6 +290,8 @@ const DySearchPage = {
             localStorage.setItem('dy_favorite_authors', JSON.stringify(list));
         } catch (e) {}
         this.renderFavoriteAuthors();
+        this.updateCardFavButton(secUid, false);
+        window.dispatchEvent(new CustomEvent('dy-fav-changed', { detail: { secUid, isFav: false } }));
         Toast.show('已移除该收藏作者', 'info');
     }
 };
