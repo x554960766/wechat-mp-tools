@@ -158,22 +158,30 @@ if sys.platform == 'win32':
 
     # ── 关键修复：收集 pythonnet / clr_loader 的原生 .NET DLL ──
     # PyInstaller hiddenimports 不会自动收集 .NET 运行时 DLL，
-    # 必须手动收集否则打包后 pywebview WinForms 后端初始化失败 → 白屏/加载中
+    # 必须完整收集否则打包后 pywebview WinForms 后端初始化失败 → 白屏/加载中
     try:
-        from PyInstaller.utils.hooks import collect_dynamic_libs
+        from PyInstaller.utils.hooks import collect_all
         for pkg in ('clr_loader', 'pythonnet'):
-            dlls = collect_dynamic_libs(pkg)
-            binaries.extend(dlls)
+            _d, _b, _h = collect_all(pkg)
+            datas += _d
+            binaries += _b
+            hiddenimports += _h
     except Exception:
-        # PyInstaller 版本过老时 fallback：手动扫描 clr_loader 目录
-        import clr_loader
-        clr_path = os.path.dirname(clr_loader.__file__)
-        for root, dirs, files in os.walk(clr_path):
-            for f in files:
-                if f.endswith(('dll', 'so', 'pyd')):
-                    src = os.path.join(root, f)
-                    dst = os.path.relpath(src, os.path.dirname(clr_loader.__file__))
-                    binaries.append((src, os.path.join('clr_loader', dst)))
+        try:
+            from PyInstaller.utils.hooks import collect_dynamic_libs
+            for pkg in ('clr_loader', 'pythonnet'):
+                dlls = collect_dynamic_libs(pkg)
+                binaries.extend(dlls)
+        except Exception:
+            # PyInstaller 版本过老时 fallback：手动扫描 clr_loader 目录
+            import clr_loader
+            clr_path = os.path.dirname(clr_loader.__file__)
+            for root, dirs, files in os.walk(clr_path):
+                for f in files:
+                    if f.endswith(('dll', 'so', 'pyd')):
+                        src = os.path.join(root, f)
+                        dst = os.path.relpath(src, os.path.dirname(clr_loader.__file__))
+                        binaries.append((src, os.path.join('clr_loader', dst)))
 
 block_cipher = None
 
@@ -284,10 +292,26 @@ elif sys.platform == 'win32':
         a.zipfiles,
         a.datas,
         strip=False,
-        upx=True,
-        upx_exclude=[],
+        upx=False,  # ── 关键修复：Windows 端 COLLECT 必须禁用 UPX，否则损坏 .NET 运行库 (Python.Runtime.dll) 导致无法启动
+        upx_exclude=['*.dll', 'Python.Runtime.dll', 'clr_loader*'],
         name='WeChat MP Tools',
     )
+    # 自动生成 .NET 运行时配置，解除 Windows 网络下载 DLL 锁定 (loadFromRemoteSources)
+    try:
+        dist_app_dir = os.path.join(project_root, 'dist', 'WeChat MP Tools')
+        os.makedirs(dist_app_dir, exist_ok=True)
+        config_path = os.path.join(dist_app_dir, 'WeChat MP Tools.exe.config')
+        with open(config_path, 'w', encoding='utf-8') as _cfg_f:
+            _cfg_f.write(
+                '<?xml version="1.0" encoding="utf-8" ?>\n'
+                '<configuration>\n'
+                '  <runtime>\n'
+                '    <loadFromRemoteSources enabled="true"/>\n'
+                '  </runtime>\n'
+                '</configuration>\n'
+            )
+    except Exception as _cfg_e:
+        print(f"[spec] Notice: could not pre-create WeChat MP Tools.exe.config: {_cfg_e}")
 else:
     # Linux 平台打包配置
     exe = EXE(

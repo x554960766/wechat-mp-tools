@@ -189,8 +189,8 @@ def check_cert_trusted():
                                 if "Number of trust settings" in lines[j]:
                                     match = re.search(r"Number of trust settings\s*:\s*(\d+)", lines[j])
                                     if match:
-                                        return True
-                            return True
+                                        return int(match.group(1)) > 0
+                            return False
                     return False
 
                 # 1. Check System-wide domain trust settings
@@ -262,6 +262,7 @@ def install_system_cert(ca_cert_path):
             res = subprocess.run([
                 "security", "add-trusted-cert",
                 "-r", "trustRoot",
+                "-p", "ssl",
                 "-k", keychain_path,
                 str(ca_cert_path)
             ], capture_output=True, text=True, timeout=5)
@@ -269,12 +270,11 @@ def install_system_cert(ca_cert_path):
                 return True
         except Exception as e:
             print(f"Login keychain installation note: {e}")
-            print(f"Login keychain installation note: {e}")
 
         # 2. 唤起系统提权弹窗安装至系统钥匙串 (/Library/Keychains/System.keychain)
         try:
             cert_str = str(ca_cert_path)
-            inner = f"/usr/bin/security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain '{cert_str}'"
+            inner = f"/usr/bin/security add-trusted-cert -d -r trustRoot -p ssl -k /Library/Keychains/System.keychain '{cert_str}'"
             osa = f'do shell script "{inner}" with administrator privileges'
             res = subprocess.run(["osascript", "-e", osa], capture_output=True, text=True, timeout=30)
             if res.returncode == 0 and check_cert_trusted():
@@ -440,6 +440,20 @@ def detect_upstream_proxy() -> str | None:
                             if m_srv and m_prt:
                                 srv, prt = m_srv.group(1), int(m_prt.group(1))
                                 if prt not in (5202, 5200) and _is_tcp_port_open(srv, prt):
+                                    if opt == "-getsocksfirewallproxy":
+                                        # mitmproxy 的 upstream 模式仅支持 HTTP/HTTPS 代理协议。
+                                        # 检测该端口是否同时支持 HTTP 代理请求（如 Clash/v2ray/Shadowrocket 的 mixed-port），
+                                        # 若支持则以 http:// 格式供 mitmproxy 链式转发；若为纯 SOCKS5 端口则跳过以防抛出 Invalid server scheme 异常。
+                                        try:
+                                            with socket.create_connection((srv, prt), timeout=0.3) as s:
+                                                s.sendall(b"CONNECT 127.0.0.1:80 HTTP/1.1\r\nHost: 127.0.0.1:80\r\n\r\n")
+                                                s.settimeout(0.3)
+                                                resp = s.recv(16)
+                                                if resp.startswith(b"HTTP/"):
+                                                    return f"http://{srv}:{prt}"
+                                        except Exception:
+                                            pass
+                                        continue
                                     return f"http://{srv}:{prt}"
                     except Exception:
                         pass
@@ -680,6 +694,9 @@ class ChannelsAddon:
         host = flow.request.pretty_host
         path = flow.request.path.split("?", 1)[0]
 
+        if host in TARGET_HOSTS:
+            print(f"[TARGET REQ] {flow.request.method} https://{host}{flow.request.path[:150]}", flush=True)
+
         if host == "channels.weixin.qq.com":
             if path == "/__wx_channels_api/sync-feed":
                 try:
@@ -893,7 +910,7 @@ class ChannelsAddon:
                 src_path = (parsed.path or "").rstrip("/")
                 if src_path == "/mp/profile_ext":
                     biz_source = "profile_ext"
-                elif src_path == "/s":
+                elif src_path in ("/s", "/mp/jsmonitor", "/mp/getappmsgext", "/mp/wapcommreport") or src_path.startswith("/s/"):
                     biz_source = "article"
                 else:
                     biz_source = "other"
@@ -920,6 +937,7 @@ class ChannelsAddon:
                             "biz_source": biz_source,
                             "cookie_str": cookie_str,
                             "user_agent": user_agent,
+                            "src_path": src_path,
                             "nickname": "动态微信凭证",
                             "save_time": time.time(),
                         }
@@ -928,7 +946,7 @@ class ChannelsAddon:
                                 saved_acc = account_pool.add_or_update(payload)
                                 if saved_acc:
                                     from backend.cred_redact import mask_secret
-                                    print(f"[MITM Captured Credential] src={payload['biz_source']} uin={mask_secret(payload['uin'], 4)} biz={(payload['biz'] or '')[:10]} token={mask_secret(payload['token'], 6)} keylen={len(payload['key'] or '')} ptlen={len(payload['pass_ticket'] or '')}", flush=True)
+                                    print(f"[MITM Captured Credential] src={payload['biz_source']} path={payload.get('src_path')} uin={mask_secret(payload['uin'], 4)} biz={(payload['biz'] or '')[:10]} token={mask_secret(payload['token'], 6)} keylen={len(payload['key'] or '')} ptlen={len(payload['pass_ticket'] or '')}", flush=True)
                             except Exception as ex:
                                 print(f"[AccountPool Async Save Error] {ex}", flush=True)
                         threading.Thread(target=_bg_save_cred, args=(cred_payload,), daemon=True).start()
@@ -2188,6 +2206,30 @@ def _restore_no_proxy():
     print("NO_PROXY restored to original.")
 
 
+def get_worker_python() -> str:
+    """获取运行 mitmproxy worker 的最佳 Python 解释器。
+    在打包模式下返回 sys.executable；
+    在源码模式下优先返回项目同级的 venv312 解释器，避免 macOS Homebrew Python
+    或外部 Python 启动子进程时因丢失虚拟环境路径导致找不到 mitmproxy 模块。
+    """
+    if getattr(sys, 'frozen', False):
+        return sys.executable
+    project_root = Path(__file__).resolve().parent.parent
+    if sys.platform == "win32":
+        venv_py = project_root / "venv312" / "Scripts" / "python.exe"
+    else:
+        venv_py = project_root / "venv312" / "bin" / "python"
+    if venv_py.exists():
+        return str(venv_py)
+    if sys.platform == "win32":
+        prefix_py = Path(sys.prefix) / "Scripts" / "python.exe"
+    else:
+        prefix_py = Path(sys.prefix) / "bin" / "python"
+    if prefix_py.exists():
+        return str(prefix_py)
+    return sys.executable
+
+
 # ── Proxy Service Manager (代理服务单例管理器) ─────────────────────
 
 class ProxyManager:
@@ -2287,16 +2329,17 @@ class ProxyManager:
                       f"已启用链式上游转发 (Upstream Chaining)，实现 VPN 与同步助手无缝并存！")
 
             # 3. 以完全隔离的独立子进程启动 mitmproxy worker
+            worker_py = get_worker_python()
             if getattr(sys, 'frozen', False):
                 cmd = [
-                    sys.executable,
+                    worker_py,
                     "--proxy-worker",
                     "--port", str(self.port),
                     "--confdir", str(confdir),
                 ]
             else:
                 cmd = [
-                    sys.executable,
+                    worker_py,
                     "-m", "backend.proxy_worker",
                     "--port", str(self.port),
                     "--confdir", str(confdir),

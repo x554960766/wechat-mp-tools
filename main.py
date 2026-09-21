@@ -296,6 +296,14 @@ if __name__ == '__main__':
             while True:
                 time.sleep(1)
 
+        # ── Windows 端 pythonnet 运行环境自适应 ──
+        if sys.platform == 'win32' and getattr(sys, 'frozen', False):
+            internal_dir = getattr(sys, '_MEIPASS', os.path.join(os.path.dirname(sys.executable), '_internal'))
+            import glob
+            pydlls = glob.glob(os.path.join(internal_dir, 'python3*.dll'))
+            if pydlls and 'PYTHONNET_PYDLL' not in os.environ:
+                os.environ['PYTHONNET_PYDLL'] = pydlls[0]
+
         # 延迟导入 webview，防止初始化干扰
         import webview
 
@@ -315,26 +323,39 @@ if __name__ == '__main__':
 
         # 启动 pywebview GUI 循环（阻塞主线程）
         # debug=False 确保在生成发布版本时完全静默无控制台
-        webview.start(debug=False)
+        try:
+            webview.start(debug=False)
+        except Exception as e:
+            write_startup_error(e)
+            if sys.platform == 'win32':
+                import ctypes
+                import webbrowser
+                choice = ctypes.windll.user32.MessageBoxW(
+                    0,
+                    f'桌面原生窗口启动异常：\n{str(e)}\n\n'
+                    f'核心服务（http://127.0.0.1:{port}/）已正常在后台启动！\n\n'
+                    f'是否立即切换为【浏览器网页模式】打开并继续使用？\n'
+                    f'（选择“是”将直接在浏览器中打开使用）',
+                    '窗口启动异常 - 自动降级',
+                    0x04 | 0x30  # MB_YESNO | MB_ICONWARNING
+                )
+                if choice == 6:  # IDYES
+                    webbrowser.open(f'http://127.0.0.1:{port}/')
+                    while True:
+                        time.sleep(1)
+                else:
+                    os._exit(1)
+            else:
+                raise
     except Exception as e:
         write_startup_error(e)
-        try:
-            if sys.platform == 'win32' and 'browser_fallback_mode' in locals() and browser_fallback_mode:
-                import ctypes
-                ctypes.windll.user32.MessageBoxW(
-                    0,
-                    f'应用启动失败：\n{str(e)}\n\n日志文件：{log_file()}',
-                    '启动失败',
-                    0x10 # MB_OK | MB_ICONERROR
-                )
-            else:
-                import webview
-                webview.create_window(
-                    title='启动失败',
-                    html=f'<h2>应用启动失败</h2><p>{str(e)}</p><p>日志文件：{log_file()}</p>',
-                    width=640,
-                    height=320
-                )
-                webview.start()
-        except Exception:
+        if sys.platform == 'win32':
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(
+                0,
+                f'应用启动失败：\n{str(e)}\n\n日志文件：{log_file()}',
+                '启动失败',
+                0x10  # MB_OK | MB_ICONERROR
+            )
+        else:
             raise

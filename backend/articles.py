@@ -372,6 +372,18 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
 
         total_cnt = data.get("total_count", len(articles))
         can_continue = data.get("can_msg_continue", 1) if isinstance(data, dict) else (1 if len(articles) > 0 else 0)
+
+        # 响应护栏：微信返回 ret=0 但文章列表与 msg_count 均为 0（未下发 general_msg_list）。
+        # 表明当前凭证仅为文章详情页/监控请求凭证，未获得列表会话作用域，或主页会话已失效
+        if begin == 0 and not articles and not msg_list_str and data.get("msg_count", 0) == 0 and not data.get("home_page_list"):
+            account_pool.report(account_id, ret=-3, error="凭证缺少列表会话权限(仅文章页会话或返回空列表)")
+            _enqueue_biz_refresh(fakeid, account_name or keyword, "空文章列表/非列表会话")
+            hint = ""
+            if not biz_cred.get("getmsg_ready"):
+                hint = "（当前捕获的为文章页临时凭证，缺少列表会话权限）"
+            last_exc = PermissionError(f"当前公众号【{account_name or fakeid}】未获取到文章列表{hint}：请在电脑微信中打开该公众号主页，点击『全部消息』以建立列表阅读会话！")
+            continue
+
         return articles, total_cnt, can_continue
 
     if isinstance(last_exc, PermissionError):
