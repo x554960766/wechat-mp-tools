@@ -131,19 +131,28 @@ def ensure_douyin_dirs():
     DOUYIN_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ── 工具函数 ──────────────────────────────────────────────
+from backend.douyin_mstoken import get_real_ms_token
 
-def clean_filename(filename: str) -> str:
-    """清理文件名，移除不支持的字符"""
-    filename = re.sub(r'[\\/:*?"<>|\n\r\t]', "", filename)
-    filename = filename.strip().replace(" ", "_")
-    return filename[:80] if filename else "untitled"
+# Windows 禁用字符与控制字符; POSIX 只禁 / 与 NUL
+_ILLEGAL_FILENAME_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_EDGE_STRIP_CHARS = ". "
+
+
+def clean_filename(filename: str, max_length: int = 80) -> str:
+    """清理文件名：只处理底层真正不能落盘的非法字符与控制字符，保留 #话题、连续空格等合法内容"""
+    if not filename:
+        return "untitled"
+    filename = filename.replace("\n", " ").replace("\r", " ").replace("\t", " ")
+    filename = _ILLEGAL_FILENAME_CHARS_RE.sub("_", filename)
+    filename = filename.strip(_EDGE_STRIP_CHARS)
+    if len(filename) > max_length:
+        filename = filename[:max_length].rstrip(_EDGE_STRIP_CHARS)
+    return filename if filename else "untitled"
 
 
 def generate_ms_token(size: int = 107) -> str:
-    """生成随机 msToken"""
-    chars = string.ascii_letters + string.digits
-    return ''.join(random.choice(chars) for _ in range(size))
+    """生成有效 msToken（优先请求真实 Token 并自动降级）"""
+    return get_real_ms_token(USER_AGENT)
 
 
 def generate_verify_fp() -> str:
@@ -1168,25 +1177,75 @@ class DouyinClient:
 
         return aweme_list, next_cursor, has_more
 
-    def get_user_mixes(self, sec_uid: str, cursor: int = 0, count: int = 20) -> tuple:
-        """获取用户的合集列表，返回 (mix_infos, next_cursor, has_more)"""
-        data = self.api_get("https://www.douyin.com/aweme/v1/web/mix/list/", {
+    def get_user_series(self, sec_uid: str, cursor: int = 0, count: int = 20) -> tuple:
+        """获取用户的短剧/系列合集列表 (series/list?read_new_mix=true)"""
+        params = {
             "sec_user_id": sec_uid,
             "cursor": str(cursor),
             "count": str(count),
-        }, skip_sign=False)
+            "read_new_mix": "true",
+            "req_from": "channel_pc_web",
+        }
+        try:
+            data = self.api_get("https://www.douyin.com/aweme/v1/web/series/list/", params, skip_sign=False)
+            series_infos = data.get("series_infos") or []
+            has_more = data.get("has_more", 0)
+            if isinstance(has_more, bool):
+                has_more = has_more
+            else:
+                has_more = int(has_more) == 1
+            next_cursor = data.get("cursor", 0)
+            # 整形成 mix_infos 结构以兼容下游
+            mix_like_items = []
+            for entry in series_infos:
+                if isinstance(entry, dict) and entry.get("series_id"):
+                    mix_like_items.append({
+                        "mix_id": str(entry.get("series_id") or ""),
+                        "mix_name": entry.get("series_name") or "",
+                        "statis": entry.get("stats") or {},
+                        "author": entry.get("author") or {},
+                        "cover_url": entry.get("cover_url"),
+                    })
+            return mix_like_items, next_cursor, has_more
+        except Exception as e:
+            _add_log(f"⚠️ 获取 series 合集列表分支异常: {e}")
+            return [], 0, False
 
-        if data.get("status_code") != 0:
-            msg = data.get("status_msg", "未知错误")
-            raise Exception(f"获取合集列表失败: {msg}")
+    def get_user_mixes(self, sec_uid: str, cursor: int = 0, count: int = 20) -> tuple:
+        """获取用户的合集列表，合并传统 mix/list 与新版 series/list 双来源，返回 (mix_infos, next_cursor, has_more)"""
+        mix_infos = []
+        next_cursor = 0
+        has_more = False
+        mix_error = None
 
-        mix_infos = data.get("mix_infos") or []
-        has_more = data.get("has_more", 0)
-        if isinstance(has_more, bool):
-            has_more = has_more
-        else:
-            has_more = int(has_more) == 1
-        next_cursor = data.get("cursor", 0)
+        # 1. 请求传统合集 mix/list
+        try:
+            data = self.api_get("https://www.douyin.com/aweme/v1/web/mix/list/", {
+                "sec_user_id": sec_uid,
+                "cursor": str(cursor),
+                "count": str(count),
+            }, skip_sign=False)
+            if data.get("status_code") == 0:
+                mix_infos = data.get("mix_infos") or []
+                hm = data.get("has_more", 0)
+                has_more = hm if isinstance(hm, bool) else int(hm) == 1
+                next_cursor = data.get("cursor", 0)
+        except Exception as e:
+            mix_error = e
+
+        # 2. 首页时尝试拉取短剧/系列合集 series/list (2026-09 最新结构，互不相交)
+        if cursor == 0:
+            series_items, _, _ = self.get_user_series(sec_uid, cursor=0, count=count)
+            if series_items:
+                existing_ids = {str(item.get("mix_id")) for item in mix_infos if item.get("mix_id")}
+                for s_item in series_items:
+                    if str(s_item.get("mix_id")) not in existing_ids:
+                        mix_infos.append(s_item)
+                        existing_ids.add(str(s_item.get("mix_id")))
+
+        # 如果两者都空且传统合集遇到明确错误，再抛出异常
+        if not mix_infos and mix_error is not None and cursor == 0:
+            raise mix_error
 
         return mix_infos, next_cursor, has_more
 
@@ -2336,6 +2395,7 @@ def _run_user_download_task(sec_uid: str, types: list, max_pages: int, target_di
                         return
                     _set_task_state(current_index=idx)
                     try:
+                        media_info = DouyinClient.parse_media_info(item)
                         _add_log(f"[{idx}/{len(all_items)}] 正在下载收藏: {media_info['title'][:30]}")
                         result = download_media(media_info, target_dir, custom_dir=collect_dir)
                         downloaded += 1
