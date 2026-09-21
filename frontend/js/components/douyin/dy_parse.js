@@ -174,7 +174,8 @@ const DyParsePage = {
                 </div>
 
                 <!-- 操作按钮容器 (默认隐藏，仅在检测完成链接后展示) -->
-                <div style="display: none; justify-content: flex-end; margin-top: var(--spacing-md);" id="dy-download-btn-wrapper">
+                <div style="display: none; justify-content: flex-end; margin-top: var(--spacing-md); gap: 10px; align-items: center;" id="dy-download-btn-wrapper">
+                    <button class="btn btn-secondary" onclick="DyParsePage.downloadComments()" id="dy-parse-comments-btn" style="display: none; align-items: center; gap: 6px;">💬 下载评论</button>
                     <button class="btn btn-primary" onclick="DyParsePage.startDownload()" id="dy-parse-btn">开始下载</button>
                 </div>
             </div>
@@ -446,11 +447,19 @@ const DyParsePage = {
             // 检测完成后显示下载/录制按钮容器
             if (btnWrapper) btnWrapper.style.display = 'flex';
 
+            const commentsBtn = document.getElementById('dy-parse-comments-btn');
+            if (commentsBtn) {
+                const canComments = (data.type === 'video' || data.type === 'note' || Boolean(data.aweme_id));
+                commentsBtn.style.display = canComments ? 'inline-flex' : 'none';
+            }
+
         } catch (err) {
             Toast.show(err.message, 'error');
             this.detectedData = null;
             const btnWrapper = document.getElementById('dy-download-btn-wrapper');
             if (btnWrapper) btnWrapper.style.display = 'none';
+            const commentsBtn = document.getElementById('dy-parse-comments-btn');
+            if (commentsBtn) commentsBtn.style.display = 'none';
         } finally {
             detectBtn.disabled = false;
             detectBtn.textContent = '检测链接';
@@ -811,6 +820,46 @@ const DyParsePage = {
                 this.updateDownloadBtnLabel(false, false);
             } else {
                 this.updateDownloadBtnLabel(true, this.selectedType === 'live');
+            }
+        }
+    },
+
+    async downloadComments() {
+        if (!this.detectedData) return;
+        const awemeId = this.detectedData.aweme_id;
+        const title = this.detectedData.title || this.detectedData.message || `aweme_${awemeId}`;
+        if (!awemeId) {
+            Toast.show('未识别到有效的作品 ID', 'error');
+            return;
+        }
+
+        const commentsBtn = document.getElementById('dy-parse-comments-btn');
+        if (commentsBtn) {
+            commentsBtn.disabled = true;
+            commentsBtn.textContent = '⏳ 抓取评论中...';
+        }
+
+        try {
+            Toast.show('正在抓取并导出作品评论...', 'info');
+            const res = await fetch('/api/douyin/comments/download', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    aweme_id: awemeId,
+                    title: title,
+                    max_comments: 0,
+                    include_replies: true
+                })
+            });
+            const data = await res.json();
+            if (data.error) throw new Error(data.error);
+            Toast.show(`✅ 评论导出成功！共保存 ${data.count} 条评论至 ${data.file_path}`, 'success');
+        } catch (err) {
+            Toast.show(`导出评论失败: ${err.message}`, 'error');
+        } finally {
+            if (commentsBtn) {
+                commentsBtn.disabled = false;
+                commentsBtn.textContent = '💬 下载评论';
             }
         }
     },

@@ -16,6 +16,17 @@ const DySearchPage = {
                 </div>
             </div>
 
+            <!-- ⭐ 收藏作者快捷访问面板 -->
+            <div id="dy-fav-authors-box" class="card" style="margin-bottom: var(--spacing-lg); display: none;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                    <div style="font-weight: 600; font-size: 0.95rem; color: var(--text-primary); display: flex; align-items: center; gap: 6px;">
+                        <span>⭐</span> <span>我的收藏作者</span>
+                    </div>
+                    <span id="dy-fav-authors-count" style="font-size: 0.8rem; color: var(--text-muted);">已收藏 0 位</span>
+                </div>
+                <div id="dy-fav-authors-list" style="display: flex; gap: 12px; overflow-x: auto; padding-bottom: 4px; flex-wrap: wrap;"></div>
+            </div>
+
             <div id="dy-search-results" class="card-grid" style="display: none;"></div>
             
             <div id="dy-search-empty" class="empty-state">
@@ -26,7 +37,9 @@ const DySearchPage = {
         `;
     },
     async init() {
-        document.getElementById('dy-search-input').focus();
+        const input = document.getElementById('dy-search-input');
+        if (input) input.focus();
+        this.renderFavoriteAuthors();
     },
     async doSearch() {
         const keyword = document.getElementById('dy-search-input').value.trim();
@@ -134,5 +147,51 @@ const DySearchPage = {
             `;
             container.appendChild(card);
         });
+    },
+
+    getFavoriteAuthors() {
+        try {
+            return JSON.parse(localStorage.getItem('dy_favorite_authors') || '[]');
+        } catch (e) {
+            return [];
+        }
+    },
+
+    renderFavoriteAuthors() {
+        const box = document.getElementById('dy-fav-authors-box');
+        const listEl = document.getElementById('dy-fav-authors-list');
+        const countEl = document.getElementById('dy-fav-authors-count');
+        if (!box || !listEl) return;
+
+        const list = this.getFavoriteAuthors();
+        if (list.length === 0) {
+            box.style.display = 'none';
+            return;
+        }
+
+        box.style.display = 'block';
+        if (countEl) countEl.textContent = `已收藏 ${list.length} 位`;
+
+        listEl.innerHTML = list.map(author => {
+            const avatar = author.avatar || 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2244%22 height=%2244%22%3E%3Ccircle fill=%22%23444%22 cx=%2222%22 cy=%2222%22 r=%2222%22/%3E%3C/svg%3E';
+            const name = author.nickname || '未知作者';
+            const secUid = author.sec_uid || '';
+            return `
+                <div class="fav-author-chip" onclick="window.location.hash='#dy_user?sec_uid=${encodeURIComponent(secUid)}'" style="position: relative; display: flex; align-items: center; gap: 10px; padding: 6px 14px 6px 8px; background: var(--bg-input); border-radius: 30px; border: 1px solid var(--border-color); cursor: pointer; transition: all 0.2s;" onmouseenter="this.style.borderColor='var(--primary)'; this.style.transform='translateY(-2px)';" onmouseleave="this.style.borderColor='var(--border-color)'; this.style.transform='';">
+                    <img src="${avatar}" style="width: 32px; height: 32px; border-radius: 50%; object-fit: cover; background: #222;">
+                    <div style="font-size: 0.88rem; font-weight: 500; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-primary);">${name}</div>
+                    <span onclick="event.stopPropagation(); DySearchPage.removeFavoriteAuthor('${secUid}')" title="取消收藏" style="color: var(--text-muted); font-size: 1.1rem; line-height: 1; padding: 0 2px; margin-left: 2px; cursor: pointer;" onmouseenter="this.style.color='#ef4444'" onmouseleave="this.style.color='var(--text-muted)'">×</span>
+                </div>
+            `;
+        }).join('');
+    },
+
+    removeFavoriteAuthor(secUid) {
+        const list = this.getFavoriteAuthors().filter(item => item.sec_uid !== secUid);
+        try {
+            localStorage.setItem('dy_favorite_authors', JSON.stringify(list));
+        } catch (e) {}
+        this.renderFavoriteAuthors();
+        Toast.show('已移除该收藏作者', 'info');
     }
 };

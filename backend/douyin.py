@@ -2738,8 +2738,8 @@ def _run_batch_items_download_task(items: list, target_dir: Path, source_name: s
             time.sleep(delay)
 
     _add_log(f"🎉 批量下载任务结束! 成功: {downloaded}，失败: {failed}")
-    if source_name:
-        add_history_item(source_name, "批量", target_dir / source_name, downloaded)
+    if source_name and len(items) > 1 and downloaded > 0:
+        add_history_item(f"{source_name} (批量下载)", "批量", target_dir / source_name, 0)
     _set_task_state(status="completed")
 
 
