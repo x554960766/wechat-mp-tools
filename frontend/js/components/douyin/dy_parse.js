@@ -837,40 +837,45 @@ const DyParsePage = {
             return;
         }
 
-        const commentsBtn = document.getElementById('dy-parse-comments-btn');
-        if (commentsBtn) {
-            commentsBtn.disabled = true;
-            commentsBtn.innerHTML = '<span>抓取评论中...</span>';
-        }
+        DyCommentDialog.open({
+            title: title,
+            onConfirm: async ({ max_comments, include_replies }) => {
+                const commentsBtn = document.getElementById('dy-parse-comments-btn');
+                if (commentsBtn) {
+                    commentsBtn.disabled = true;
+                    commentsBtn.innerHTML = '<span>抓取评论中...</span>';
+                }
 
-        try {
-            Toast.show('正在抓取并导出作品评论...', 'info');
-            const res = await fetch('/api/douyin/comments/download', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    aweme_id: awemeId,
-                    title: title,
-                    nickname: nickname,
-                    source_name: nickname,
-                    max_comments: 0,
-                    include_replies: true
-                })
-            });
-            const data = await res.json();
-            if (data.error) throw new Error(data.error);
-            Toast.show(`✅ 评论导出成功！共保存 ${data.count} 条评论至 ${data.file_path}`, 'success');
-        } catch (err) {
-            Toast.show(`导出评论失败: ${err.message}`, 'error');
-        } finally {
-            if (commentsBtn) {
-                commentsBtn.disabled = false;
-                commentsBtn.innerHTML = `
-                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-                    <span>下载评论</span>
-                `;
+                try {
+                    Toast.show('正在抓取并导出作品评论...', 'info');
+                    const res = await fetch('/api/douyin/comments/download', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({
+                            aweme_id: awemeId,
+                            title: title,
+                            nickname: nickname,
+                            source_name: nickname,
+                            max_comments: max_comments,
+                            include_replies: include_replies
+                        })
+                    });
+                    const data = await res.json();
+                    if (data.error) throw new Error(data.error);
+                    Toast.show(`✅ 评论导出成功！共保存 ${data.count} 条评论至 ${data.file_path}`, 'success');
+                } catch (err) {
+                    Toast.show(`导出评论失败: ${err.message}`, 'error');
+                } finally {
+                    if (commentsBtn) {
+                        commentsBtn.disabled = false;
+                        commentsBtn.innerHTML = `
+                            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                            <span>下载评论</span>
+                        `;
+                    }
+                }
             }
-        }
+        });
     },
 
     escapeHtml(str) {

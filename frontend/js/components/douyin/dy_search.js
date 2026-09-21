@@ -19,20 +19,6 @@ const DySearchPage = {
                 </div>
             </div>
 
-            <!-- ⭐ 收藏作者快捷访问面板 -->
-            <div id="dy-fav-authors-box" class="card" style="margin-bottom: var(--spacing-lg); display: none;">
-                <div class="card-header" style="margin-bottom: var(--spacing-md); padding-bottom: var(--spacing-sm); border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center;">
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <h3 class="card-title" style="display: flex; align-items: center; gap: 8px; font-size: 1rem; color: var(--text-primary); margin: 0;">
-                            <span style="color: #f59e0b; font-size: 1.15rem;">★</span> 我的收藏作者
-                        </h3>
-                        <span id="dy-fav-authors-count" class="badge" style="background: rgba(102, 126, 234, 0.18); color: #8ea5ff; border: 1px solid rgba(102, 126, 234, 0.35); font-size: 0.75rem; padding: 2px 10px; border-radius: 20px; font-weight: 600;">已收藏 0 位</span>
-                    </div>
-                    <span style="font-size: 0.8rem; color: var(--text-secondary);">点击直达作者主页</span>
-                </div>
-                <div id="dy-fav-authors-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 12px;"></div>
-            </div>
-
             <div id="dy-search-results" class="card-grid" style="display: none;"></div>
             
             <div id="dy-search-empty" class="empty-state">
@@ -50,19 +36,15 @@ const DySearchPage = {
         if (!this._favListenerAdded) {
             this._favListenerAdded = true;
             window.addEventListener('dy-fav-changed', (e) => {
-                this.renderFavoriteAuthors();
                 if (e.detail && e.detail.secUid) {
                     const isFav = this.isFavoriteAuthor(e.detail.secUid);
                     this.updateCardFavButton(e.detail.secUid, isFav);
                 }
             });
         }
-
-        this.renderFavoriteAuthors();
     },
 
     onShow() {
-        this.renderFavoriteAuthors();
         // 刷新当前所有已渲染卡片的收藏状态
         Object.keys(this.cachedUsers).forEach(secUid => {
             this.updateCardFavButton(secUid, this.isFavoriteAuthor(secUid));
@@ -230,7 +212,6 @@ const DySearchPage = {
         } catch (e) {}
 
         this.updateCardFavButton(secUid, isFav);
-        this.renderFavoriteAuthors();
         window.dispatchEvent(new CustomEvent('dy-fav-changed', { detail: { secUid, isFav } }));
     },
 
@@ -248,49 +229,5 @@ const DySearchPage = {
             btn.style.borderColor = '';
             btn.style.background = '';
         }
-    },
-
-    renderFavoriteAuthors() {
-        const box = document.getElementById('dy-fav-authors-box');
-        const listEl = document.getElementById('dy-fav-authors-list');
-        const countEl = document.getElementById('dy-fav-authors-count');
-        if (!box || !listEl) return;
-
-        const list = this.getFavoriteAuthors();
-        if (list.length === 0) {
-            box.style.display = 'none';
-            return;
-        }
-
-        box.style.display = 'block';
-        if (countEl) countEl.textContent = `已收藏 ${list.length} 位`;
-
-        listEl.innerHTML = list.map(author => {
-            const avatar = author.avatar || 'data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2244%22 height=%2244%22%3E%3Ccircle fill=%22%23444%22 cx=%2222%22 cy=%2222%22 r=%2222%22/%3E%3C/svg%3E';
-            const name = author.nickname || '未知作者';
-            const secUid = author.sec_uid || '';
-            const uniqueId = author.unique_id || '';
-            return `
-                <div class="fav-author-item" onclick="window.location.hash='#dy_user?sec_uid=${encodeURIComponent(secUid)}'" style="display: flex; align-items: center; gap: 12px; padding: 10px 14px; background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: var(--radius-md); cursor: pointer; transition: all 0.2s; position: relative;" onmouseenter="this.style.background='rgba(102, 126, 234, 0.15)'; this.style.borderColor='var(--primary)'; this.style.transform='translateY(-2px)';" onmouseleave="this.style.background='rgba(255, 255, 255, 0.05)'; this.style.borderColor='rgba(255, 255, 255, 0.1)'; this.style.transform='';">
-                    <img src="${avatar}" style="width: 38px; height: 38px; border-radius: 50%; object-fit: cover; border: 2px solid var(--primary-light); background: var(--bg-secondary); flex-shrink: 0;">
-                    <div style="flex: 1; min-width: 0;">
-                        <div style="font-size: 0.92rem; font-weight: 600; color: #ffffff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${name}</div>
-                        <div style="font-size: 0.78rem; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px;">${uniqueId ? '抖音号: ' + uniqueId : '点击查看作品'}</div>
-                    </div>
-                    <button onclick="event.stopPropagation(); DySearchPage.removeFavoriteAuthor('${secUid}')" title="取消收藏" style="width: 22px; height: 22px; border-radius: 50%; border: none; background: rgba(255, 255, 255, 0.1); color: var(--text-primary); display: flex; align-items: center; justify-content: center; font-size: 13px; cursor: pointer; flex-shrink: 0; transition: all 0.2s; padding: 0;" onmouseenter="this.style.background='rgba(245, 87, 108, 0.3)'; this.style.color='#f5576c';" onmouseleave="this.style.background='rgba(255, 255, 255, 0.1)'; this.style.color='var(--text-primary)';">✕</button>
-                </div>
-            `;
-        }).join('');
-    },
-
-    removeFavoriteAuthor(secUid) {
-        const list = this.getFavoriteAuthors().filter(item => item.sec_uid !== secUid);
-        try {
-            localStorage.setItem('dy_favorite_authors', JSON.stringify(list));
-        } catch (e) {}
-        this.renderFavoriteAuthors();
-        this.updateCardFavButton(secUid, false);
-        window.dispatchEvent(new CustomEvent('dy-fav-changed', { detail: { secUid, isFav: false } }));
-        Toast.show('已移除该收藏作者', 'info');
     }
 };
