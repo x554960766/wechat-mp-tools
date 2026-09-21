@@ -162,18 +162,18 @@ def generate_verify_fp() -> str:
     return f"verify_0{random_str}"
 
 
-def add_history_item(title: str, item_type: str, file_path: str, size_bytes: int):
+def add_history_item(title: str, item_type: str, file_path: str, size_bytes: int, source: str = ""):
     """保存下载记录到历史记录文件"""
-    # 提取来源（下载目录下的第一级子目录名）
-    source = ""
+    # 提取来源（优先使用传入的 source，否则从下载目录下的第一级子目录名提取）
     path_str = str(file_path)
-    marker = "douyin_downloads/"
-    idx = path_str.find(marker)
-    if idx >= 0:
-        rest = path_str[idx + len(marker):]
-        parts = rest.split("/")
-        if parts:
-            source = parts[0]
+    if not source:
+        marker = "douyin_downloads/"
+        idx = path_str.find(marker)
+        if idx >= 0:
+            rest = path_str[idx + len(marker):]
+            parts = rest.split("/")
+            if parts:
+                source = parts[0]
 
     history = load_json(HISTORY_FILE, [])
     history.insert(0, {
@@ -3385,7 +3385,17 @@ def get_progress():
 def get_history():
     """获取抖音下载历史记录"""
     history = load_json(HISTORY_FILE, [])
-    return jsonify(history)
+    # 自动过滤并清理 0.00 MB 或无效的虚假批量记录
+    valid_history = []
+    cleaned = False
+    for item in history:
+        if item.get("type") == "批量" and (item.get("size") in ["0.00 MB", "0.00 B", "0 MB", "0 B", "未知"] or not item.get("path") or not Path(item.get("path", "")).exists()):
+            cleaned = True
+            continue
+        valid_history.append(item)
+    if cleaned:
+        save_json(HISTORY_FILE, valid_history)
+    return jsonify(valid_history)
 
 
 @douyin_bp.route("/history", methods=["DELETE"])
@@ -3404,6 +3414,19 @@ def clear_history():
             except Exception as e:
                 _add_log(f"⚠️ 清理文件 {item.name} 失败: {e}")
     return jsonify({"message": "历史记录和已下载的文件已清空"})
+
+
+@douyin_bp.route("/history/delete-item", methods=["POST"])
+def delete_history_item():
+    """从下载历史中删除单条记录"""
+    data = request.get_json() or {}
+    idx = data.get("index")
+    history = load_json(HISTORY_FILE, [])
+    if isinstance(idx, int) and 0 <= idx < len(history):
+        removed = history.pop(idx)
+        save_json(HISTORY_FILE, history)
+        return jsonify({"message": "记录已删除", "item": removed})
+    return jsonify({"error": "记录索引无效"}), 400
 
 
 @douyin_bp.route("/open-folder", methods=["POST"])
@@ -3797,30 +3820,57 @@ def api_comments():
 
 @douyin_bp.route("/comments/download", methods=["POST"])
 def api_download_comments():
-    """下载并导出作品的全部评论为 JSON 文件"""
+    """下载并导出作品的全部评论为 JSON 文件（与视频保存在同一作者目录下）"""
     data = request.get_json() or {}
     aweme_id = str(data.get("aweme_id", "")).strip()
     if not aweme_id:
         return jsonify({"error": "aweme_id 不能为空"}), 400
 
     title = data.get("title", f"aweme_{aweme_id}")
+    nickname = str(data.get("nickname", "")).strip()
+    source_name = str(data.get("source_name", "")).strip()
     max_comments = int(data.get("max_comments", 0))
     include_replies = bool(data.get("include_replies", False))
     save_dir_str = data.get("save_dir", "").strip()
 
     try:
         client = DouyinClient()
+        if not nickname and not source_name:
+            try:
+                detail = client.get_aweme_detail(aweme_id)
+                if detail and detail.get("author"):
+                    nickname = detail["author"].get("nickname", "")
+            except Exception:
+                pass
+
         comments = client.get_all_comments(aweme_id, max_comments=max_comments, include_replies=include_replies)
 
-        # 确定保存目录
+        # 确定保存目录：与视频保存在同一作者目录下
         if save_dir_str:
             target_dir = Path(save_dir_str)
+        elif source_name:
+            target_dir = DOUYIN_DIR / clean_filename(source_name)
+        elif nickname:
+            target_dir = DOUYIN_DIR / clean_filename(nickname)
         else:
-            target_dir = DOUYIN_DIR / "comments"
+            # 尝试在已有下载目录中寻找此 aweme_id 的视频文件所在目录
+            found_dir = None
+            if DOUYIN_DIR.exists():
+                for sub in DOUYIN_DIR.iterdir():
+                    if sub.is_dir() and sub.name != "comments":
+                        for f in sub.iterdir():
+                            if aweme_id in f.name:
+                                found_dir = sub
+                                break
+                    if found_dir:
+                        break
+            target_dir = found_dir if found_dir else (DOUYIN_DIR / clean_filename(title))
+
         target_dir.mkdir(parents=True, exist_ok=True)
 
         clean_stem = clean_filename(title)
-        file_path = target_dir / f"{clean_stem}_comments.json"
+        title_with_id = f"{aweme_id}_{clean_stem}"
+        file_path = target_dir / f"{title_with_id}_comments.json"
 
         output_payload = {
             "aweme_id": aweme_id,
@@ -3835,7 +3885,8 @@ def api_download_comments():
             json.dump(output_payload, f, ensure_ascii=False, indent=2)
 
         _add_log(f"✅ 评论抓取完成！共抓取 {len(comments)} 条评论，已保存至: {file_path.name}")
-        add_history_item(f"{title} (评论)", "评论", file_path, file_path.stat().st_size)
+        record_source = source_name or nickname or (target_dir.name if target_dir != DOUYIN_DIR else "单条解析")
+        add_history_item(f"{title} (评论)", "评论", file_path, file_path.stat().st_size, source=record_source)
 
         return jsonify({
             "message": "评论导出成功",

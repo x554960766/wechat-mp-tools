@@ -175,7 +175,10 @@ const DyParsePage = {
 
                 <!-- 操作按钮容器 (默认隐藏，仅在检测完成链接后展示) -->
                 <div style="display: none; justify-content: flex-end; margin-top: var(--spacing-md); gap: 10px; align-items: center;" id="dy-download-btn-wrapper">
-                    <button class="btn btn-secondary" onclick="DyParsePage.downloadComments()" id="dy-parse-comments-btn" style="display: none; align-items: center; gap: 6px;">💬 下载评论</button>
+                    <button class="btn btn-sm" onclick="DyParsePage.downloadComments()" id="dy-parse-comments-btn" style="display: none; align-items: center; gap: 6px; padding: 0 16px; height: 38px; font-weight: 600; background: rgba(102, 126, 234, 0.15); color: #8ea5ff; border: 1px solid rgba(102, 126, 234, 0.4); border-radius: var(--radius-md); transition: all 0.2s;" onmouseenter="this.style.background='rgba(102, 126, 234, 0.25)';" onmouseleave="this.style.background='rgba(102, 126, 234, 0.15)';">
+                        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                        <span>下载评论</span>
+                    </button>
                     <button class="btn btn-primary" onclick="DyParsePage.startDownload()" id="dy-parse-btn">开始下载</button>
                 </div>
             </div>
@@ -828,6 +831,7 @@ const DyParsePage = {
         if (!this.detectedData) return;
         const awemeId = this.detectedData.aweme_id;
         const title = this.detectedData.title || this.detectedData.message || `aweme_${awemeId}`;
+        const nickname = this.detectedData.author || this.detectedData.nickname || '';
         if (!awemeId) {
             Toast.show('未识别到有效的作品 ID', 'error');
             return;
@@ -836,7 +840,7 @@ const DyParsePage = {
         const commentsBtn = document.getElementById('dy-parse-comments-btn');
         if (commentsBtn) {
             commentsBtn.disabled = true;
-            commentsBtn.textContent = '⏳ 抓取评论中...';
+            commentsBtn.innerHTML = '<span>抓取评论中...</span>';
         }
 
         try {
@@ -847,6 +851,8 @@ const DyParsePage = {
                 body: JSON.stringify({
                     aweme_id: awemeId,
                     title: title,
+                    nickname: nickname,
+                    source_name: nickname,
                     max_comments: 0,
                     include_replies: true
                 })
@@ -859,7 +865,10 @@ const DyParsePage = {
         } finally {
             if (commentsBtn) {
                 commentsBtn.disabled = false;
-                commentsBtn.textContent = '💬 下载评论';
+                commentsBtn.innerHTML = `
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    <span>下载评论</span>
+                `;
             }
         }
     },

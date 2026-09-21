@@ -174,6 +174,7 @@ const DyDownloadsPage = {
         if (typeSet.has('直播')) labels.push('直播');
         if (typeSet.has('图文')) labels.push('图文');
         if (typeSet.has('音乐')) labels.push('音乐');
+        if (typeSet.has('评论')) labels.push('评论');
         if (typeSet.has('批量')) labels.push('批量');
         if (typeSet.has('合集')) labels.push('合集');
         return labels.length > 0 ? labels.join(' · ') : '未知';
@@ -337,15 +338,18 @@ const DyDownloadsPage = {
                         <tbody>
                             ${group.items.map((item, idx) => {
                                 const itemIndex = this.history.indexOf(item);
+                                const isComment = item.type === '评论';
                                 const typeStyle = item.type === '视频' 
                                     ? 'background: rgba(254, 44, 85, 0.1); color: var(--primary); padding: 3px 7px; border-radius: 4px; font-size: 0.75rem; font-weight: 500;'
                                     : item.type === '图文'
                                     ? 'background: rgba(76, 175, 80, 0.1); color: #4caf50; padding: 3px 7px; border-radius: 4px; font-size: 0.75rem; font-weight: 500;'
                                     : item.type === '音乐'
                                     ? 'background: rgba(33, 150, 243, 0.1); color: #2196f3; padding: 3px 7px; border-radius: 4px; font-size: 0.75rem; font-weight: 500;'
+                                    : isComment
+                                    ? 'background: rgba(102, 126, 234, 0.15); color: #8ea5ff; padding: 3px 7px; border-radius: 4px; font-size: 0.75rem; font-weight: 500;'
                                     : 'background: rgba(255, 152, 0, 0.1); color: #ff9800; padding: 3px 7px; border-radius: 4px; font-size: 0.75rem; font-weight: 500;';
 
-                                const isVideo = item.type !== '图文' && (item.type === '视频' || item.type === '短视频' || item.type === '直播' || item.type === '直播回放' || item.type === '合集' || (item.path && /\.(mp4|mov|flv|mkv|avi|webm|ts)$/i.test(item.path)));
+                                const isVideo = item.type !== '图文' && item.type !== '评论' && (item.type === '视频' || item.type === '短视频' || item.type === '直播' || item.type === '直播回放' || item.type === '合集' || (item.path && /\.(mp4|mov|flv|mkv|avi|webm|ts)$/i.test(item.path)));
 
                                 return `
                                     <tr style="border-bottom: 1px solid var(--border-color); vertical-align: middle; transition: background 0.2s;" onmouseenter="this.style.background='var(--bg-glass-hover)'" onmouseleave="this.style.background='transparent'">
@@ -363,16 +367,19 @@ const DyDownloadsPage = {
                                         </td>
                                         <td style="padding: 10px var(--spacing-md); text-align: right; white-space: nowrap;">
                                             <button class="btn btn-secondary btn-sm" onclick="DyDownloadsPage.openFile('${itemIndex}')" style="padding: 3px 8px; font-size: 0.8rem; margin-right: 4px;">
-                                                播放/打开
+                                                ${isComment ? '查看评论' : (isVideo ? '播放' : '打开')}
                                             </button>
-                                            <button class="btn btn-secondary btn-sm" onclick="DyDownloadsPage.openParent('${itemIndex}')" style="padding: 3px 8px; font-size: 0.8rem; margin-right: 4px;">
+                                            <button class="btn btn-secondary btn-sm" onclick="DyDownloadsPage.openParent('${itemIndex}')" style="padding: 3px 8px; font-size: 0.8rem; margin-right: 4px;" title="打开文件所在目录">
                                                 📂
                                             </button>
                                             ${isVideo ? `
-                                            <button class="btn btn-secondary btn-sm" onclick="DyDownloadsPage.importToTranscode('${itemIndex}')" style="padding: 3px 8px; font-size: 0.8rem; background: var(--gradient-primary); color: white;">
+                                            <button class="btn btn-secondary btn-sm" onclick="DyDownloadsPage.importToTranscode('${itemIndex}')" style="padding: 3px 8px; font-size: 0.8rem; background: var(--gradient-primary); color: white; margin-right: 4px;">
                                                 导入转码
                                             </button>
                                             ` : ''}
+                                            <button class="btn btn-secondary btn-sm" onclick="DyDownloadsPage.deleteItem('${itemIndex}')" title="删除此记录" style="padding: 3px 6px; font-size: 0.78rem; color: var(--text-muted);" onmouseenter="this.style.color='#f5576c'" onmouseleave="this.style.color='var(--text-muted)'">
+                                                ✕
+                                            </button>
                                         </td>
                                     </tr>
                                 `;
@@ -482,6 +489,29 @@ const DyDownloadsPage = {
         } catch (err) {
             Toast.show(err.message, 'error');
         }
+    },
+
+    async deleteItem(index) {
+        const item = this.history[index];
+        if (!item) return;
+        Modal.confirm(
+            '删除单条记录',
+            `确定要从下载历史中删除「${this.escapeHtml(item.title)}」的记录吗？（注意：不会删除您本地已下载的文件）`,
+            async () => {
+                try {
+                    await fetch('/api/douyin/history/delete-item', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({ index: Number(index) })
+                    });
+                    this.history.splice(index, 1);
+                    this.renderHistory();
+                    Toast.show('记录已删除', 'success');
+                } catch (err) {
+                    Toast.show('删除失败: ' + err.message, 'error');
+                }
+            }
+        );
     },
 
     async clearHistory() {

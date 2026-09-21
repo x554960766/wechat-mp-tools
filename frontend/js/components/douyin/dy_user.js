@@ -408,9 +408,15 @@ const DyUserPage = {
                         <span>❤️ ${likes}</span>
                         <span>💬 ${comments}</span>
                     </div>
-                    <div style="display: flex; gap: 8px;">
-                        <button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); DyUserPage.downloadVideo('${awemeId}')" style="flex: 1;">${isReplay ? '下载回放' : '下载视频'}</button>
-                        <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); DyUserPage.downloadComments('${awemeId}')" title="下载并导出该视频全部评论" style="padding: 0 10px; font-size: 0.8rem; white-space: nowrap;">💬 评论</button>
+                    <div style="display: flex; gap: 8px; margin-top: 8px;">
+                        <button class="btn btn-primary btn-sm" onclick="event.stopPropagation(); DyUserPage.downloadVideo('${awemeId}')" style="flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 6px;">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                            <span>${isReplay ? '下载回放' : '下载视频'}</span>
+                        </button>
+                        <button class="btn btn-sm" onclick="event.stopPropagation(); DyUserPage.downloadComments('${awemeId}')" title="下载并导出该视频全部评论" style="padding: 0 12px; height: 32px; font-size: 0.82rem; font-weight: 600; white-space: nowrap; display: inline-flex; align-items: center; gap: 5px; background: rgba(102, 126, 234, 0.15); color: #8ea5ff; border: 1px solid rgba(102, 126, 234, 0.4); border-radius: var(--radius-md); transition: all 0.2s;" onmouseenter="this.style.background='rgba(102, 126, 234, 0.28)'; this.style.borderColor='rgba(102, 126, 234, 0.7)';" onmouseleave="this.style.background='rgba(102, 126, 234, 0.15)'; this.style.borderColor='rgba(102, 126, 234, 0.4)';">
+                            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                            <span>下载评论</span>
+                        </button>
                     </div>
                 </div>
             </div>
@@ -725,6 +731,8 @@ const DyUserPage = {
     async downloadComments(awemeId) {
         const videoObj = this.videos.find(v => v.aweme_id === awemeId);
         const title = videoObj ? (videoObj.desc || videoObj.item_title || `aweme_${awemeId}`) : `aweme_${awemeId}`;
+        const sourceName = this.user ? `${this.user.nickname}的作品` : '';
+        const nickname = this.user ? this.user.nickname : '';
         try {
             Toast.show('正在抓取并导出评论...', 'info');
             const res = await fetch('/api/douyin/comments/download', {
@@ -733,13 +741,15 @@ const DyUserPage = {
                 body: JSON.stringify({
                     aweme_id: awemeId,
                     title: title,
+                    nickname: nickname,
+                    source_name: sourceName,
                     max_comments: 0,
                     include_replies: true
                 })
             });
             const data = await res.json();
             if (data.error) throw new Error(data.error);
-            Toast.show(`✅ 成功抓取 ${data.count} 条评论并导出 JSON！`, 'success');
+            Toast.show(`✅ 成功抓取 ${data.count} 条评论并保存在作者目录下！`, 'success');
         } catch (err) {
             Toast.show(`导出评论失败: ${err.message}`, 'error');
         }
