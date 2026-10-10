@@ -1,71 +1,96 @@
 #!/usr/bin/env python3
 """
-微信公众平台账号凭证配置工具
-用于保存/更新 mp.weixin.qq.com 后台登录态 Cookie 与 Token
-保存路径：脚本所在目录 / data / wechat_mp_config.json 及 data / account_pool.json
+微信读书账号扫码登录与凭证配置工具
+生成微信读书 App 官方授权二维码并在授权后换取长效 Token 保存至账号池
+保存路径：data / account_pool.json
 """
 
-import json
+import sys
 import time
+import json
 from pathlib import Path
 
 SCRIPT_DIR  = Path(__file__).resolve().parent
-DATA_DIR    = SCRIPT_DIR / "data"
-CONFIG_FILE = DATA_DIR / "wechat_mp_config.json"
-POOL_FILE   = DATA_DIR / "account_pool.json"
+sys.path.insert(0, str(SCRIPT_DIR))
+
+from backend.auth import get_qr_data, exchange_weread_token
+from backend.account_pool import account_pool
 
 
 def login():
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
     print("=" * 60)
-    print(" 🚀 微信公众平台凭证配置 (mp.weixin.qq.com)")
+    print(" 🚀 微信读书官方授权扫码登录")
     print("=" * 60)
-    print("说明：本工具使用微信公众平台官方后台 API 检索文章列表。")
-    print("请在浏览器登录 mp.weixin.qq.com，在地址栏复制 token，并在开发者工具中复制 Cookie 字符串。")
-    print()
+    print("正在请求微信读书官方登录二维码...")
 
-    token = input("1. 请输入公众平台 Token (如 123456789): ").strip()
-    cookie_str = input("2. 请输入公众平台 Cookie 字符串: ").strip()
+    try:
+        qr_info = get_qr_data()
+        uuid_val = qr_info.get("uuid")
+        if not uuid_val:
+            print("❌ 获取二维码失败，未能生成 uuid")
+            return False
 
-    if not token or not cookie_str:
-        print("❌ Token 或 Cookie 不能为空！设置失败。")
+        qr_url = f"https://open.weixin.qq.com/connect/qrcode/{uuid_val}"
+        print(f"\n请在浏览器打开以下链接扫码，或使用微信扫码：")
+        print(f"👉 {qr_url}\n")
+
+        # 尝试使用 qrcode 打印终端二维码
+        try:
+            import qrcode
+            qr = qrcode.QRCode(border=1)
+            qr.add_data(qr_url)
+            qr.make(fit=True)
+            qr.print_ascii(invert=True)
+        except Exception:
+            pass
+
+        print("正在等待微信确认授权 (有效时间 5 分钟)...")
+        import urllib.request
+        import ssl
+        ctx = ssl._create_unverified_context()
+        poll_url = f"https://long.open.weixin.qq.com/connect/l/qrconnect?f=json&uuid={uuid_val}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+        }
+
+        start = time.time()
+        while time.time() - start < 300:
+            try:
+                req = urllib.request.Request(poll_url, headers=headers)
+                with urllib.request.urlopen(req, context=ctx, timeout=28) as resp:
+                    res = json.loads(resp.read().decode('utf-8'))
+                    errcode = res.get('wx_errcode') if 'wx_errcode' in res else res.get('errcode')
+                    if errcode == 405:
+                        wx_code = res.get('wx_code')
+                        print("✅ 用户已授权，正在换取微信读书长效 Token...")
+                        info = exchange_weread_token(wx_code)
+                        user = info.get("user", {})
+                        acc = account_pool.add_or_update({
+                            "vid": info.get("vid"),
+                            "accessToken": info.get("accessToken"),
+                            "refreshToken": info.get("refreshToken"),
+                            "skey": info.get("skey"),
+                            "deviceId": info.get("deviceId"),
+                            "nickname": user.get("name", "微信读书账号"),
+                            "avatar": user.get("avatar", ""),
+                        })
+                        print(f"🎉 登录成功！用户：{acc.get('nickname')} (VID: {acc.get('vid')})")
+                        print("已保存至账号池。")
+                        return True
+                    elif errcode == 404:
+                        print("📱 已扫码，请在手机上点击确认...")
+                    elif errcode in (402, 403):
+                        print("❌ 二维码已过期，请重新运行脚本。")
+                        return False
+            except Exception:
+                time.sleep(1)
+
+        print("❌ 扫码超时。")
         return False
 
-    config = {
-        "token": token,
-        "cookie_str": cookie_str,
-        "save_time": time.time(),
-    }
-    CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    # 同步写入账号池
-    accounts = []
-    if POOL_FILE.exists():
-        try:
-            accounts = json.loads(POOL_FILE.read_text(encoding="utf-8"))
-        except Exception:
-            accounts = []
-
-    acc_id = f"acc_{int(time.time())}"
-    new_acc = {
-        "id": acc_id,
-        "token": token,
-        "cookie_str": cookie_str,
-        "nickname": "公众号官方账号",
-        "save_time": time.time(),
-        "status": "active",
-        "failures": 0,
-        "risk_hits": 0,
-        "last_used": time.time(),
-    }
-    accounts.insert(0, new_acc)
-    POOL_FILE.write_text(json.dumps(accounts, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    print()
-    print("✅ 微信公众平台凭证已成功保存！")
-    print(f"   - 配置文件: {CONFIG_FILE}")
-    print(f"   - 账号池  : {POOL_FILE}")
-    return True
+    except Exception as e:
+        print(f"❌ 登录异常: {e}")
+        return False
 
 
 if __name__ == "__main__":

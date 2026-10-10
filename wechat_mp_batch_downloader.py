@@ -26,13 +26,12 @@ from scrapling.fetchers import DynamicFetcher
 # ============================================================
 #  ⚡ 配置区
 # ============================================================
-TARGET_ACCOUNTS  = ["潇湘晨报"]   # 公众号名称列表
+TARGET_ACCOUNTS  = ["人民日报"]   # 公众号名称列表
 MAX_ARTICLES    = 20             # 每个号最多下载篇数（0=不限制）
 PAGE_SIZE       = 10             # 每次拉取篇数（最大20）
 MAX_RETRIES     = 3              # 单篇最大重试次数
 # ============================================================
 
-BASE_URL    = "https://mp.weixin.qq.com"
 SCRIPT_DIR  = Path(__file__).resolve().parent
 DATA_DIR    = SCRIPT_DIR / "data"
 OUTPUT_DIR  = DATA_DIR / "articles_full"
@@ -41,90 +40,72 @@ HEADERS     = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                   "AppleWebKit/537.36 (KHTML, like Gecko) "
                   "Chrome/120.0.0.0 Safari/537.36",
-    "Referer":    f"{BASE_URL}/cgi-bin/home?t=home/index&lang=zh_CN",
+    "Referer":    "https://mp.weixin.qq.com/",
 }
 
 
 # ============================================================
-#  Part 1：登录凭证 & 文章列表获取
+#  Part 1：登录凭证 & 文章列表获取（基于微信读书账号池与协议）
 # ============================================================
-
-def load_credentials():
-    cfg = json.loads(CONFIG_FILE.read_bytes().decode("utf-8-sig", errors="replace"))
-    return cfg["token"], cfg["cookie_str"]
-
-
-TOKEN, COOKIE = load_credentials()
-
-SESSION = requests.Session()
-SESSION.headers.update({**HEADERS, "Cookie": COOKIE})
-
-
-def check_resp(resp, label=""):
-    if resp.status_code != 200:
-        raise RuntimeError(f"[{label}] HTTP {resp.status_code}")
-    data = resp.json()
-    ret  = data.get("base_resp", {}).get("ret", 0)
-    if ret != 0:
-        err = data.get("base_resp", {}).get("err_msg", "")
-        if ret == 200003:
-            raise SystemExit(f"[{label}] cookie/token 已失效！请重新运行 wechat_mp_login.py")
-        raise RuntimeError(f"[{label}] ret={ret}: {err}")
-    return data
+from backend.account_pool import account_pool
+from backend.accounts import search_accounts
+from backend.articles import _fetch_articles_page
 
 
 def search_account(keyword: str) -> dict | None:
-    resp  = SESSION.get(
-        f"{BASE_URL}/cgi-bin/searchbiz",
-        params={"action": "search_biz", "token": TOKEN, "lang": "zh_CN",
-                "f": "json", "ajax": "1", "query": keyword, "begin": "0", "count": "5"},
-        timeout=25,
-    )
-    lst = check_resp(resp, "search").get("list", [])
+    res = search_accounts(keyword)
+    lst = res.get("list", [])
     return lst[0] if lst else None
 
 
-def get_article_list(fakeid: str, begin: int, count: int = PAGE_SIZE) -> dict:
-    resp = SESSION.get(
-        f"{BASE_URL}/cgi-bin/appmsg",
-        params={"action": "list_ex", "token": TOKEN, "lang": "zh_CN",
-                "f": "json", "ajax": "1", "type": "9", "query": "",
-                "fakeid": fakeid, "begin": str(begin), "count": str(count)},
-        timeout=25,
-    )
-    return check_resp(resp, f"list({begin})")
-
-
 def fetch_account_articles(fakeid: str, name: str) -> list[dict]:
-    articles, begin, total = [], 0, None
+    articles = []
+    begin = 0
+    total = None
+    print(f"  📡 正在通过微信读书接口获取 [{name}] 的文章列表...")
+
     while True:
-        data     = get_article_list(fakeid, begin)
-        batch    = data.get("app_msg_list", [])
+        count = PAGE_SIZE
+        if MAX_ARTICLES and len(articles) + count > MAX_ARTICLES:
+            count = MAX_ARTICLES - len(articles)
+
+        batch, total_cnt, can_continue = _fetch_articles_page(fakeid=fakeid, begin=begin, count=count)
         if total is None:
-            total = data.get("app_msg_cnt", 0)
+            total = total_cnt
             print(f"  📊 共 {total} 篇", end="  ")
+
         if not batch:
             break
+
         articles.extend(batch)
         fetched = len(articles)
-        cap     = min(fetched, MAX_ARTICLES) if MAX_ARTICLES else fetched
+        cap = min(fetched, MAX_ARTICLES) if MAX_ARTICLES else fetched
         print(f"⏳{cap}/{total}", end="\r")
+
         if MAX_ARTICLES and fetched >= MAX_ARTICLES:
-            articles = articles[:MAX_ARTICLES];  print(f"  ⚡ 上限 {MAX_ARTICLES} 篇");  break
-        if fetched >= total:  break
-        begin += len(batch);  time.sleep(0.8)
+            articles = articles[:MAX_ARTICLES]
+            print(f"  ⚡ 上限 {MAX_ARTICLES} 篇")
+            break
+
+        if len(batch) < count or (total and fetched >= total):
+            break
+
+        begin += len(batch)
+        time.sleep(0.5)
+
     print(f"  ✅ 获取 {len(articles)} 篇     ")
-    # ── 按发布时间正序（最早的排前面）────────────────────
+
     def parse_dt(a: dict) -> float:
-        s = a.get("datetime", "") or ""
+        s = a.get("update_time", 0) or a.get("datetime", 0) or 0
         try:
-            # 微信返回的是 Unix 时间戳（秒），但有时是毫秒
             v = int(s)
             return v if v > 1e12 else v * 1000
         except (ValueError, TypeError):
             return 0.0
+
     articles.sort(key=parse_dt)
     return articles
+
 
 
 # ============================================================

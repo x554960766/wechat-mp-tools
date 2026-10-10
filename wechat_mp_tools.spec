@@ -76,6 +76,8 @@ hiddenimports = [
     'backend.transcode',
     'backend.account_pool',
     'backend.account_pool_api',
+    'backend.weread_signer',
+    'backend.weread_browser',
     'backend.bilibili',
     'backend.bilibili_login',
     'backend.bilibili_sign',

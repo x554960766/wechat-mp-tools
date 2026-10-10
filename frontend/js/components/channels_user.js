@@ -664,19 +664,15 @@ const ChannelsUserPage = {
         });
 
         document.getElementById('qs-raw')?.addEventListener('click', () => {
-            Modal.close();
             this.submitSingleDownload(video, rawUrl);
         });
         document.getElementById('qs-h265')?.addEventListener('click', () => {
-            Modal.close();
             this.submitSingleDownload(video, h265Url);
         });
         document.getElementById('qs-h264')?.addEventListener('click', () => {
-            Modal.close();
             this.submitSingleDownload(video, h264Url);
         });
         document.getElementById('qs-default')?.addEventListener('click', () => {
-            Modal.close();
             this.submitSingleDownload(video, defaultUrl);
         });
     },
@@ -729,18 +725,14 @@ const ChannelsUserPage = {
     },
 
     getRawVideoUrl(url) {
+        if (!url) return "";
         try {
-            const u = new URL(decodeURIComponent(url));
-            const filekey = u.searchParams.get("encfilekey");
-            const token = u.searchParams.get("token");
-            if (filekey && token) {
-                const newUrl = new URL(u.origin + u.pathname);
-                newUrl.searchParams.set("encfilekey", filekey);
-                newUrl.searchParams.set("token", token);
-                return newUrl.toString();
-            }
-        } catch (e) {}
-        return url;
+            const u = new URL(url);
+            u.searchParams.delete("X-snsvideoflag");
+            return u.toString();
+        } catch (e) {
+            return url.replace(/([?&])X-snsvideoflag=[^&]*(&|$)/, (m, p1, p2) => p1 === '?' && p2 ? '?' : '');
+        }
     },
 
     formatDate(timestamp) {

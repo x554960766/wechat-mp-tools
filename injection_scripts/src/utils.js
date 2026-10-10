@@ -796,15 +796,14 @@ var WXU = (() => {
           if (spec) {
             feed.url = feed.url + "&X-snsvideoflag=" + spec;
           } else {
-            // 该下载原始视频逻辑参考自 https://github.com/putyy/res-downloader/blob/master/core/resource.go#L142
-            var u = new URL(decodeURIComponent(feed.url));
-            var filekey = u.searchParams.get("encfilekey");
-            var token = u.searchParams.get("token");
-            if (filekey && token) {
-              var new_url = new URL(u.origin + u.pathname);
-              new_url.searchParams.set("encfilekey", filekey);
-              new_url.searchParams.set("token", token);
-              feed.url = new_url.toString();
+            try {
+              var u = new URL(feed.url);
+              u.searchParams.delete("X-snsvideoflag");
+              feed.url = u.toString();
+            } catch (e) {
+              feed.url = feed.url.replace(/([?&])X-snsvideoflag=[^&]*(&|$)/, function(m, p1, p2) {
+                return p1 === '?' && p2 ? '?' : '';
+              });
             }
           }
         }
@@ -1237,14 +1236,14 @@ async function __wx_channels_download4(feed, opt) {
   if (opt.spec) {
     feed.url = feed.url + "&X-snsvideoflag=" + opt.spec;
   } else {
-    var u = new URL(decodeURIComponent(feed.url));
-    var filekey = u.searchParams.get("encfilekey");
-    var token = u.searchParams.get("token");
-    if (filekey && token) {
-      var new_url = new URL(u.origin + u.pathname);
-      new_url.searchParams.set("encfilekey", filekey);
-      new_url.searchParams.set("token", token);
-      feed.url = new_url.toString();
+    try {
+      var u = new URL(feed.url);
+      u.searchParams.delete("X-snsvideoflag");
+      feed.url = u.toString();
+    } catch (e) {
+      feed.url = feed.url.replace(/([?&])X-snsvideoflag=[^&]*(&|$)/, function(m, p1, p2) {
+        return p1 === '?' && p2 ? '?' : '';
+      });
     }
   }
   if (WXU.config.downloadPauseWhenDownload) {

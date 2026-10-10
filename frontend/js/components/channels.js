@@ -328,6 +328,7 @@ const ChannelsPage = {
         const rawUrl = this.getRawVideoUrl(defaultUrl || h265Url || h264Url);
         const description = fi.description || "";
         const createtime = fi.createtime || "";
+        const decodeKey = fi.decodeKey || null;
 
         Modal.open({
             title: '📥 选择下载画质',
@@ -350,28 +351,24 @@ const ChannelsPage = {
         });
 
         document.getElementById('q-raw')?.addEventListener('click', () => {
-            Modal.close();
-            this.startDownloadFlow(rawUrl, description, createtime);
+            this.startDownloadFlow(rawUrl, description, createtime, decodeKey);
         });
         document.getElementById('q-h265')?.addEventListener('click', () => {
-            Modal.close();
-            this.startDownloadFlow(h265Url, description, createtime);
+            this.startDownloadFlow(h265Url, description, createtime, decodeKey);
         });
         document.getElementById('q-h264')?.addEventListener('click', () => {
-            Modal.close();
-            this.startDownloadFlow(h264Url, description, createtime);
+            this.startDownloadFlow(h264Url, description, createtime, decodeKey);
         });
         document.getElementById('q-default')?.addEventListener('click', () => {
-            Modal.close();
-            this.startDownloadFlow(defaultUrl, description, createtime);
+            this.startDownloadFlow(defaultUrl, description, createtime, decodeKey);
         });
     },
 
-    startDownloadFlow(url, description, createtime) {
+    startDownloadFlow(url, description, createtime, decodeKey = null) {
         const successPanel = document.getElementById('download-success-panel');
         if (successPanel) successPanel.style.display = 'none';
 
-        App.downloadChannelsVideo(url, description, createtime, null, (res) => {
+        App.downloadChannelsVideo(url, description, createtime, decodeKey, (res) => {
             if (successPanel) {
                 document.getElementById('saved-filename').textContent = res.filename;
                 document.getElementById('saved-path').textContent = res.path;
@@ -413,18 +410,14 @@ const ChannelsPage = {
     },
 
     getRawVideoUrl(url) {
+        if (!url) return "";
         try {
-            const u = new URL(decodeURIComponent(url));
-            const filekey = u.searchParams.get("encfilekey");
-            const token = u.searchParams.get("token");
-            if (filekey && token) {
-                const newUrl = new URL(u.origin + u.pathname);
-                newUrl.searchParams.set("encfilekey", filekey);
-                newUrl.searchParams.set("token", token);
-                return newUrl.toString();
-            }
-        } catch (e) {}
-        return url;
+            const u = new URL(url);
+            u.searchParams.delete("X-snsvideoflag");
+            return u.toString();
+        } catch (e) {
+            return url.replace(/([?&])X-snsvideoflag=[^&]*(&|$)/, (m, p1, p2) => p1 === '?' && p2 ? '?' : '');
+        }
     },
 
     sanitizeFilename(desc, createtime) {

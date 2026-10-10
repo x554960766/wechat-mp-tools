@@ -1381,18 +1381,17 @@ body {
 .modal-overlay {
     position: fixed;
     inset: 0;
-    background: rgba(0, 0, 0, 0.6);
-    backdrop-filter: blur(4px);
-    -webkit-backdrop-filter: blur(4px);
+    background: rgba(0, 0, 0, 0.65);
     z-index: 1000;
     display: none;
     align-items: center;
     justify-content: center;
-    animation: fadeIn 0.2s ease;
+    transform: translateZ(0);
 }
 
 .modal-overlay.active {
     display: flex;
+    animation: fadeIn 0.15s ease;
 }
 
 .modal-dialog {
@@ -1405,7 +1404,9 @@ body {
     max-height: 85vh;
     overflow-y: auto;
     box-shadow: var(--shadow-lg);
-    animation: scaleIn 0.25s ease;
+    transform: translateZ(0);
+    will-change: transform;
+    animation: scaleIn 0.2s ease;
 }
 
 .modal-header {

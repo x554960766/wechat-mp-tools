@@ -401,13 +401,21 @@ class DouyinClient:
 
     def get_user_detail(self, sec_uid: str) -> dict:
         """获取用户详情"""
-        self.session.headers["Referer"] = "https://www.douyin.com/"
+        ref_url = f"https://www.douyin.com/user/{sec_uid}"
+        self.session.headers["Referer"] = ref_url
         params = {
             "sec_user_id": sec_uid,
             "personal_center_strategy": "1",
             "source": "channel_pc_web"
         }
-        return self.api_get("https://www.douyin.com/aweme/v1/web/user/profile/other/", params, skip_sign=True)
+        try:
+            return self.api_get("https://www.douyin.com/aweme/v1/web/user/profile/other/", params, skip_sign=True)
+        except Exception as e:
+            err_str = str(e)
+            if "403" in err_str or "Argus" in err_str or "Uifid" in err_str or "Forbidden" in err_str:
+                _add_log("⚠️ 抖音用户详情直连受风控拦截，自动切换至浏览器会话安全通道获取...")
+                return self._fetch_via_browser("/aweme/v1/web/user/profile/other/", method="GET", params=params, referer=ref_url)
+            raise
 
     def get_recommended_feed(self, count: int = 10, cursor: int = 0) -> dict:
         """获取推荐视频流"""
@@ -608,9 +616,19 @@ class DouyinClient:
 
                 # 构建请求参数
                 fetch_url = endpoint
+                fetch_params = {}
+                if "/aweme/" in endpoint:
+                    fetch_params = {
+                        "device_platform": "webapp",
+                        "aid": "6383",
+                        "channel": "channel_pc_web",
+                    }
                 if params:
+                    fetch_params.update(params)
+
+                if fetch_params:
                     import urllib.parse
-                    qs = urllib.parse.urlencode(params)
+                    qs = urllib.parse.urlencode(fetch_params)
                     fetch_url = f"{endpoint}?{qs}" if "?" not in endpoint else f"{endpoint}&{qs}"
 
                 body_str = None
@@ -622,6 +640,7 @@ class DouyinClient:
                 for _ in range(3):
                     try:
                         res = page.evaluate("""async ({url, method, bodyStr}) => {
+                            let lastErr = '';
                             for (let i = 0; i < 6; i++) {
                                 try {
                                     const opts = {
@@ -638,10 +657,13 @@ class DouyinClient:
                                     if (text.startsWith('{')) {
                                         return JSON.parse(text);
                                     }
-                                } catch (e) {}
+                                    lastErr = text.slice(0, 150);
+                                } catch (e) {
+                                    lastErr = e.message;
+                                }
                                 await new Promise(r => setTimeout(r, 600));
                             }
-                            return { status_code: -1, error: 'SecSDK initialization timeout' };
+                            return { status_code: -1, error: lastErr || 'SecSDK initialization timeout' };
                         }""", {"url": fetch_url, "method": method, "bodyStr": body_str})
                         break
                     except Exception as eval_err:
@@ -650,13 +672,14 @@ class DouyinClient:
                             continue
                         raise eval_err
 
-                # 自动将浏览器更新产生的最新 Cookie 写回设置
+                # 自动将浏览器更新产生的最新 Cookie 写回设置及会话
                 try:
                     updated_cookies = context.cookies()
                     if updated_cookies:
                         new_ck = "; ".join([f"{c['name']}={c['value']}" for c in updated_cookies])
                         settings["douyin_cookie"] = new_ck
                         save_settings(settings)
+                        self.session.headers["Cookie"] = new_ck
                 except Exception:
                     pass
 
@@ -1157,14 +1180,25 @@ class DouyinClient:
 
     def get_mix_videos(self, mix_id: str, cursor: int = 0, count: int = 20) -> tuple:
         """获取合集作品列表，返回 (aweme_list, next_cursor, has_more)"""
-        data = self.api_get(API_MIX_AWEME, {
+        params = {
             "mix_id": mix_id,
             "cursor": str(cursor),
             "count": str(count),
-        }, skip_sign=False)
+        }
+        ref_url = f"https://www.douyin.com/collection/{mix_id}"
+        self.session.headers["Referer"] = ref_url
+        try:
+            data = self.api_get(API_MIX_AWEME, params, skip_sign=False)
+        except Exception as e:
+            err_str = str(e)
+            if "403" in err_str or "Argus" in err_str or "Uifid" in err_str or "Forbidden" in err_str:
+                _add_log(f"⚠️ 抖音合集作品列表直连受风控拦截，自动切换至浏览器会话安全通道获取 (mix_id={mix_id}, cursor={cursor})...")
+                data = self._fetch_via_browser("/aweme/v1/web/mix/aweme/", method="GET", params=params, referer=ref_url)
+            else:
+                raise
 
         if data.get("status_code") != 0:
-            msg = data.get("status_msg", "未知错误")
+            msg = data.get("status_msg", data.get("error", "未知错误"))
             raise Exception(f"获取合集作品列表失败: {msg}")
 
         aweme_list = data.get("aweme_list") or []
@@ -1186,8 +1220,17 @@ class DouyinClient:
             "read_new_mix": "true",
             "req_from": "channel_pc_web",
         }
+        ref_url = f"https://www.douyin.com/user/{sec_uid}"
+        self.session.headers["Referer"] = ref_url
         try:
-            data = self.api_get("https://www.douyin.com/aweme/v1/web/series/list/", params, skip_sign=False)
+            try:
+                data = self.api_get("https://www.douyin.com/aweme/v1/web/series/list/", params, skip_sign=False)
+            except Exception as e:
+                err_str = str(e)
+                if "403" in err_str or "Argus" in err_str or "Uifid" in err_str or "Forbidden" in err_str:
+                    data = self._fetch_via_browser("/aweme/v1/web/series/list/", method="GET", params=params, referer=ref_url)
+                else:
+                    raise
             series_infos = data.get("series_infos") or []
             has_more = data.get("has_more", 0)
             if isinstance(has_more, bool):
@@ -1219,12 +1262,23 @@ class DouyinClient:
         mix_error = None
 
         # 1. 请求传统合集 mix/list
+        params = {
+            "sec_user_id": sec_uid,
+            "cursor": str(cursor),
+            "count": str(count),
+        }
+        ref_url = f"https://www.douyin.com/user/{sec_uid}"
+        self.session.headers["Referer"] = ref_url
         try:
-            data = self.api_get("https://www.douyin.com/aweme/v1/web/mix/list/", {
-                "sec_user_id": sec_uid,
-                "cursor": str(cursor),
-                "count": str(count),
-            }, skip_sign=False)
+            try:
+                data = self.api_get("https://www.douyin.com/aweme/v1/web/mix/list/", params, skip_sign=False)
+            except Exception as e:
+                err_str = str(e)
+                if "403" in err_str or "Argus" in err_str or "Uifid" in err_str or "Forbidden" in err_str:
+                    _add_log(f"⚠️ 抖音合集列表直连受风控拦截，自动切换至浏览器会话安全通道获取 (cursor={cursor})...")
+                    data = self._fetch_via_browser("/aweme/v1/web/mix/list/", method="GET", params=params, referer=ref_url)
+                else:
+                    raise
             if data.get("status_code") == 0:
                 mix_infos = data.get("mix_infos") or []
                 hm = data.get("has_more", 0)
@@ -1276,7 +1330,7 @@ class DouyinClient:
 
     def get_user_videos(self, sec_uid: str, max_cursor: int = 0, count: int = 18) -> tuple:
         """获取用户发布的作品列表，返回 (aweme_list, next_cursor, has_more)"""
-        data = self.api_get(API_USER_POST, {
+        params = {
             "publish_video_strategy_type": "2",
             "sec_user_id": sec_uid,
             "max_cursor": str(max_cursor),
@@ -1286,10 +1340,21 @@ class DouyinClient:
             "time_list_query": "0",
             "whale_cut_token": "",
             "count": str(count),
-        }, skip_sign=True)
+        }
+        ref_url = f"https://www.douyin.com/user/{sec_uid}"
+        self.session.headers["Referer"] = ref_url
+        try:
+            data = self.api_get(API_USER_POST, params, skip_sign=True)
+        except Exception as e:
+            err_str = str(e)
+            if "403" in err_str or "Argus" in err_str or "Uifid" in err_str or "Forbidden" in err_str:
+                _add_log(f"⚠️ 抖音用户作品列表直连受风控拦截，自动切换至浏览器会话安全通道获取 (cursor={max_cursor})...")
+                data = self._fetch_via_browser("/aweme/v1/web/aweme/post/", method="GET", params=params, referer=ref_url)
+            else:
+                raise
 
         if data.get("status_code") != 0:
-            msg = data.get("status_msg", "未知错误")
+            msg = data.get("status_msg", data.get("error", "未知错误"))
             raise Exception(f"获取用户作品列表失败: {msg}")
 
         aweme_list = data.get("aweme_list") or []
@@ -1304,7 +1369,7 @@ class DouyinClient:
 
     def get_user_stories(self, sec_uid: str, max_cursor: int = 0, count: int = 18) -> tuple:
         """获取用户日常列表，返回 (aweme_list, next_cursor, has_more)"""
-        data = self.api_get(API_USER_POST, {
+        params = {
             "publish_video_strategy_type": "1",
             "sec_user_id": sec_uid,
             "max_cursor": str(max_cursor),
@@ -1314,10 +1379,21 @@ class DouyinClient:
             "time_list_query": "0",
             "whale_cut_token": "",
             "count": str(count),
-        }, skip_sign=True)
+        }
+        ref_url = f"https://www.douyin.com/user/{sec_uid}"
+        self.session.headers["Referer"] = ref_url
+        try:
+            data = self.api_get(API_USER_POST, params, skip_sign=True)
+        except Exception as e:
+            err_str = str(e)
+            if "403" in err_str or "Argus" in err_str or "Uifid" in err_str or "Forbidden" in err_str:
+                _add_log(f"⚠️ 抖音用户日常列表直连受风控拦截，自动切换至浏览器会话安全通道获取 (cursor={max_cursor})...")
+                data = self._fetch_via_browser("/aweme/v1/web/aweme/post/", method="GET", params=params, referer=ref_url)
+            else:
+                raise
 
         if data.get("status_code") != 0:
-            msg = data.get("status_msg", "未知错误")
+            msg = data.get("status_msg", data.get("error", "未知错误"))
             raise Exception(f"获取用户日常列表失败: {msg}")
 
         aweme_list = data.get("aweme_list") or []
@@ -1332,7 +1408,7 @@ class DouyinClient:
 
     def get_user_replays(self, sec_uid: str, max_cursor: int = 0, count: int = 18) -> tuple:
         """获取博主直播回放列表，返回 (aweme_list, next_cursor, has_more)"""
-        data = self.api_get(API_USER_POST, {
+        params = {
             "publish_video_strategy_type": "2",
             "sec_user_id": sec_uid,
             "max_cursor": str(max_cursor),
@@ -1342,10 +1418,21 @@ class DouyinClient:
             "time_list_query": "0",
             "whale_cut_token": "",
             "count": str(count),
-        }, skip_sign=True)
+        }
+        ref_url = f"https://www.douyin.com/user/{sec_uid}"
+        self.session.headers["Referer"] = ref_url
+        try:
+            data = self.api_get(API_USER_POST, params, skip_sign=True)
+        except Exception as e:
+            err_str = str(e)
+            if "403" in err_str or "Argus" in err_str or "Uifid" in err_str or "Forbidden" in err_str:
+                _add_log(f"⚠️ 抖音博主直播回放列表直连受风控拦截，自动切换至浏览器会话安全通道获取 (cursor={max_cursor})...")
+                data = self._fetch_via_browser("/aweme/v1/web/aweme/post/", method="GET", params=params, referer=ref_url)
+            else:
+                raise
 
         if data.get("status_code") != 0:
-            msg = data.get("status_msg", "未知错误")
+            msg = data.get("status_msg", data.get("error", "未知错误"))
             raise Exception(f"获取用户回放列表失败: {msg}")
 
         all_aweme = data.get("aweme_list") or []

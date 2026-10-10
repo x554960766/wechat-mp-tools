@@ -222,8 +222,6 @@ const App = {
         let taskId = null;
         let isDownloading = true;
 
-        Toast.info('已开始视频下载任务，请稍候...');
-
         Modal.open({
             title: '📥 正在下载视频到本地',
             preventClose: true,
@@ -293,7 +291,17 @@ const App = {
                     const pp = document.getElementById('single-download-progress-percent');
                     if (pb) pb.style.width = `${pct}%`;
                     if (pp) pp.textContent = `${pct}%`;
-                    if (pt) pt.textContent = `已下载 ${pct}%`;
+                    
+                    let detailText = `已下载 ${pct}%`;
+                    if (res.downloaded && res.total) {
+                        detailText = `${res.downloaded} / ${res.total}`;
+                        if (res.speed) {
+                            detailText += ` · ${res.speed}`;
+                        }
+                    } else if (res.speed) {
+                        detailText = `已下载 ${pct}% · ${res.speed}`;
+                    }
+                    if (pt) pt.textContent = detailText;
                 } else if (res.status === 'success') {
                     clearInterval(pollInterval);
                     isDownloading = false;
@@ -316,7 +324,7 @@ const App = {
             } catch (err) {
                 console.error("Polling error:", err);
             }
-        }, 1000);
+        }, 400);
     },
 
     async checkForUpdates() {

@@ -224,9 +224,9 @@ def local_parse_with_yuanbao(share_url: str, cookie: str) -> dict:
         pass
         
     data = res1.get("data")
-    if not data or not data.get("playable_url"):
-        err_msg = res1.get("msg") or res1.get("error") or "未知错误，可能是您的元宝 Cookie 已失效，请在设置中更新"
-        raise RuntimeError(f"腾讯元宝解析失败: {err_msg}")
+    if res1.get("code") != 0 or not data or not data.get("playable_url"):
+        err_msg = res1.get("msg") or res1.get("error") or "元宝登录 Cookie 可能已失效，请重新登录获取"
+        raise RuntimeError(f"腾讯元宝接口返回异常: {err_msg}")
         
     playable_url = data.get("playable_url")
     
@@ -494,6 +494,7 @@ def fetch_video_profile():
     yuanbao_cookie = settings.get("yuanbao_cookie", "").strip()
     custom_worker = settings.get("custom_channels_worker", "").strip()
 
+    local_err = None
     # ================= 模式 1: 100% 软件内部本地解析（如用户配置了元宝 Cookie） =================
     if yuanbao_cookie:
         try:
@@ -501,6 +502,7 @@ def fetch_video_profile():
             save_parsed_video_to_db(result)
             return jsonify(result)
         except Exception as e:
+            local_err = str(e)
             # 本地解析失败时，可优雅回退到云端代理模式
             import traceback
             from backend.config import DATA_DIR
@@ -579,7 +581,9 @@ def fetch_video_profile():
             except Exception:
                 continue
 
-    return jsonify({"error": "解析服务暂时不可用（本地解析鉴权失效且云端中继不可达），请检查配置或开启代理后重试"}), 502
+    if local_err:
+        return jsonify({"error": f"解析失败：{local_err}。云端备用通道亦无法连通，请在设置中更新元宝 Cookie 凭证或检查网络代理设置"}), 502
+    return jsonify({"error": "解析服务暂时不可用（本地未配置元宝凭证且云端中继不可达），请在设置中配置腾讯元宝凭证或开启代理后重试"}), 502
 
 
 @channels_bp.route("/download", methods=["POST"])
@@ -616,11 +620,15 @@ def download_video():
                 counter += 1
             filename = filepath.name
 
-        # 后端流式下载
-        resp = requests.get(
+        # 后端流式下载（国内腾讯 CDN 直连，避免走代理减速）
+        session = requests.Session()
+        session.trust_env = False
+        resp = session.get(
             video_url,
             headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept-Encoding": "identity",
+                "Connection": "keep-alive"
             },
             stream=True,
             timeout=60
@@ -628,7 +636,7 @@ def download_video():
         resp.raise_for_status()
         
         with open(filepath, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
+            for chunk in resp.iter_content(chunk_size=131072):
                 if chunk:
                     f.write(chunk)
 
@@ -1044,10 +1052,15 @@ def _do_async_download_video(task_id, video_url, description, createtime, decryp
                 task["status"] = "cancelled"
                 return
 
-        resp = requests.get(
+        # 后端流式下载（国内腾讯 CDN 直连，避免走代理减速）
+        session = requests.Session()
+        session.trust_env = False
+        resp = session.get(
             video_url,
             headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept-Encoding": "identity",
+                "Connection": "keep-alive"
             },
             stream=True,
             timeout=60
@@ -1056,9 +1069,24 @@ def _do_async_download_video(task_id, video_url, description, createtime, decryp
         
         total_size = int(resp.headers.get("content-length", 0))
         downloaded_bytes = 0
+        start_time = time.time()
+        last_speed_time = start_time
+        last_speed_bytes = 0
+        speed_str = ""
+
+        def format_bytes(b):
+            if b >= 1024 * 1024 * 1024:
+                return f"{b / (1024*1024*1024):.1f} GB"
+            if b >= 1024 * 1024:
+                return f"{b / (1024*1024):.1f} MB"
+            if b >= 1024:
+                return f"{b / 1024:.1f} KB"
+            return f"{b} B"
+
+        total_str = format_bytes(total_size) if total_size > 0 else ""
         
         with open(filepath, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=8192):
+            for chunk in resp.iter_content(chunk_size=131072):
                 with _download_tasks_lock:
                     task = _download_tasks.get(task_id)
                     if not task or task["cancel_event"].is_set():
@@ -1073,12 +1101,22 @@ def _do_async_download_video(task_id, video_url, description, createtime, decryp
                 if chunk:
                     f.write(chunk)
                     downloaded_bytes += len(chunk)
-                    if total_size > 0:
-                        progress_val = int(downloaded_bytes / total_size * 100)
-                        progress_val = min(99, max(0, progress_val))
-                        with _download_tasks_lock:
-                            if task_id in _download_tasks:
-                                _download_tasks[task_id]["progress"] = progress_val
+                    now = time.time()
+                    if now - last_speed_time >= 0.5:
+                        spd = (downloaded_bytes - last_speed_bytes) / (now - last_speed_time)
+                        speed_str = f"{format_bytes(spd)}/s"
+                        last_speed_time = now
+                        last_speed_bytes = downloaded_bytes
+
+                    progress_val = int(downloaded_bytes / total_size * 100) if total_size > 0 else 0
+                    progress_val = min(99, max(0, progress_val))
+
+                    with _download_tasks_lock:
+                        if task_id in _download_tasks:
+                            _download_tasks[task_id]["progress"] = progress_val
+                            _download_tasks[task_id]["downloaded"] = format_bytes(downloaded_bytes)
+                            _download_tasks[task_id]["total"] = total_str
+                            _download_tasks[task_id]["speed"] = speed_str
 
         if decrypt_key:
             try:
@@ -1168,6 +1206,9 @@ def get_async_download_status(task_id):
         return jsonify({
             "status": task["status"],
             "progress": task["progress"],
+            "downloaded": task.get("downloaded", ""),
+            "total": task.get("total", ""),
+            "speed": task.get("speed", ""),
             "error": task["error"],
             "result": task["result"]
         })

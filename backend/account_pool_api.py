@@ -51,9 +51,16 @@ def verify_single_account(account_id):
     return jsonify(res)
 
 
+@account_pool_bp.route("/<account_id>/refresh", methods=["POST"])
+def refresh_single_account(account_id):
+    """纯 Python 毫秒级刷新账号 Token"""
+    res = account_pool.browser_refresh_account(account_id)
+    return jsonify(res)
+
+
 @account_pool_bp.route("/<account_id>/browser-refresh", methods=["POST"])
 def browser_refresh_single_account(account_id):
-    """使用账号专属 Profile 启动无头浏览器执行深度保活刷新"""
+    """向后兼容接口：执行 Token 静默刷新"""
     res = account_pool.browser_refresh_account(account_id)
     return jsonify(res)
 
