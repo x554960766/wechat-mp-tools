@@ -171,6 +171,21 @@ def _background_poll_login(uuid_val: str, device_profile: dict):
                         "avatar": user.get("avatar", ""),
                     })
 
+                    # 立即模拟真机在线同步会话 (shelf/sync 与 mp/list)，完成新设备在线态激活
+                    try:
+                        from backend.weread_signer import activate_terminal_session
+                        auth_h = {
+                            "accessToken": login_info.get("accessToken"),
+                            "vid": str(vid),
+                            "basekey": login_info.get("accessToken"),
+                            "deviceId": login_info.get("deviceId"),
+                            "User-Agent": login_info.get("userAgent", APP_HEADERS['User-Agent']),
+                            "Cookie": f"wr_vid={vid}; wr_skey={login_info.get('skey')}"
+                        }
+                        activate_terminal_session(auth_h, session=s)
+                    except Exception as ex:
+                        logger.debug("登录后激活终端会话异常: %s", ex)
+
                     logger.info("微信扫码登录入库成功: %s (VID: %s, 绑定设备: %s)", saved_acc.get("nickname"), vid, saved_acc.get("deviceName"))
                     _set_login_state("success", f"登录成功！欢迎，{user.get('name', '微信读书用户')}（已绑定专属设备：{saved_acc.get('deviceName')}）", 100)
                     return

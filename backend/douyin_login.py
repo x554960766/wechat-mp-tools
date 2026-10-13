@@ -265,9 +265,14 @@ def _do_login():
                 time.sleep(2)
                 
             if login_success:
-                _set_login_state("scanning", "登录成功，正在提取 Cookie...", 90)
+                _set_login_state("scanning", "登录成功，正在初始化个人会话安全凭证...", 90)
+                try:
+                    page.goto("https://www.douyin.com/user/self?showTab=favorite_collection", wait_until="domcontentloaded", timeout=15000)
+                    time.sleep(2)  # 等待 secsdk 初始化与 UIFID 生成
+                except Exception:
+                    pass
                 
-                # 提取 Cookie
+                # 提取完整 Cookie
                 cookies = context.cookies()
                 cookie_str = "; ".join([f"{c['name']}={c['value']}" for c in cookies])
                 
@@ -280,7 +285,7 @@ def _do_login():
             else:
                 _set_login_state("failed", "登录超时，未检测到有效登录状态", 0)
 
-            time.sleep(2) # 缓冲
+            time.sleep(1) # 缓冲
             browser.close()
             _active_browser = None
 

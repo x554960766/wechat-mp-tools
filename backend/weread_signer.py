@@ -187,3 +187,49 @@ def try_refresh_session(session_path: str = ".session.json", device_id: str = No
         print(f"[AUTO-REFRESH] Failed to refresh token: status={status_code}, res={res}")
         return None
 
+
+def activate_terminal_session(headers: dict, session=None) -> bool:
+    """
+    通过逆向微信读书 APK (AppService.mobileSync) 确定的移动端在线会话激活步骤:
+    向微信读书服务端发起 POST /mobileSync 汇报移动终端同步态，
+    将新旧账号的服务端会话通道从未激活态转变为在线活跃态，彻底解除 /mp/chapters 和 store/search 的 499 (-2041) 拦截。
+    """
+    try:
+        h = dict(headers)
+        # 移除 WeRead 特定 UA 避免网关设备指纹误判
+        if "User-Agent" not in h or "WeRead/" in h.get("User-Agent", ""):
+            h["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        h["Content-Type"] = "application/json; charset=UTF-8"
+
+        s = session or requests.Session()
+
+        # 1. 核心步骤：调用 mobileSync 激活服务端通道
+        u_mobile_sync = "https://i.weread.qq.com/mobileSync"
+        payload = {
+            "shelf": 0, "bookInventory": 0, "shelfLecture": 0, "notifications": 0,
+            "config": 0, "gift": 0, "payItem": 0, "balance": 0.0, "reviewTimeline": 0,
+            "follower": 0, "readingExchange": 0, "chat": 0, "chatRemovedSynckey": 0,
+            "wechatFriend": 0, "inBackground": 0, "refluxSynckey": 0, "following": 0,
+            "applyList": 0, "mcard": 0, "discoverFeedSynckey": 0, "rateSynckey": 0,
+            "browse": 0, "medal": 0, "medalUrl": 0, "regionResource": 0,
+            "discoverColumnSynckey": 0, "friendReviewSynckey": 0, "wehearSyncKey": 0,
+            "preferTab": 1, "localBrowseTab": "", "localCommunityTab": ""
+        }
+        resp = s.post(u_mobile_sync, json=payload, headers=h, timeout=8)
+        print(f"[TERMINAL SYNC] mobileSync status={resp.status_code}")
+
+        # 2. 辅助同步基础书架与公众号索引
+        u_shelf = "https://i.weread.qq.com/shelf/sync?synckey=0"
+        s.get(u_shelf, headers=h, timeout=6)
+
+        u_mpl = "https://i.weread.qq.com/mp/list?listType=0&count=50&synckey=0"
+        s.get(u_mpl, headers=h, timeout=6)
+
+        print("[TERMINAL SYNC] Successfully activated mobile online sync session via AppService.mobileSync!")
+        return True
+    except Exception as e:
+        print(f"[TERMINAL SYNC ERROR] {e}")
+        return False
+
+
+

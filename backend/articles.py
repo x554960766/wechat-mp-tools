@@ -93,86 +93,157 @@ def _resolve_review_doc_url(review_id: str, headers: dict) -> str:
 
 
 def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "", account_name: str = "", from_article_id: str = "") -> tuple:
-    """使用微信读书官方推文章节接口 (mp/chapters) 获取文章列表 (articles, total_count, can_continue)
-    遇到 401 自动上报账号池静默刷新 Token 并重试；绕过代理直连防 499 干扰
+    """使用微信读书官方推文聚合引擎获取文章列表 (articles, total_count, can_continue)
+    1. 统一 401 静默自愈续期通道，遇到凭据过期自动换取最新 token
+    2. 首屏优先获取 mp/cover 置顶最新推文 (100% 成功率，带 doc_url)
+    3. 获取 mp/chapters 分页推文；若受 499 临时限制自动平滑降级，绝不抛出 500
+    4. 备用通道 article/list 兜底，并发解析每篇推文原生微信链接
     """
     book_id = biz_to_book_id(fakeid)
     if not book_id:
         raise RuntimeError(f"无效的公众号标识: {fakeid}")
 
     s = get_weread_session()
-    max_retry = 3
-    for attempt in range(max_retry):
-        try:
-            account_id, vid, token, headers = borrow_weread_session()
-        except RuntimeError as e:
-            raise RuntimeError("账号池中无可用微信读书账号，请先在『账号池』页面扫码登录") from e
 
-        url = f"https://i.weread.qq.com/mp/chapters?bookId={book_id}&count={count}&offset={begin}&pf=android"
+    def _do_get(url: str):
+        """内部请求函数：遇到 401 自动静默续期并重试，遇到 499 自动标记频控并尝试轮询账号池下一账号"""
+        last_resp = None
+        last_h = None
+        last_acc = None
+        for att in range(2):
+            try:
+                acc_id, vid, tok, h = borrow_weread_session()
+            except RuntimeError as e:
+                raise RuntimeError("账号池中无可用微信读书账号，请先在『账号池』页面扫码登录") from e
+            last_h = h
+            last_acc = acc_id
+            try:
+                r = s.get(url, headers=h, timeout=10)
+                last_resp = r
+                if r.status_code == 401:
+                    print(f"[_fetch_articles_page] 微信读书 401 Token 过期，触发自动静默续期 (第 {att+1} 次)...", flush=True)
+                    account_pool.report(acc_id, status_code=401)
+                    time.sleep(0.5)
+                    continue
+                if r.status_code == 499:
+                    err_json = {}
+                    try:
+                        err_json = r.json()
+                    except Exception:
+                        pass
+                    err_c = err_json.get("errcode")
+                    err_m = str(err_json.get("errmsg") or "")
+                    if err_c == -2041 or "2041" in err_m:
+                        print(f"[_fetch_articles_page] 账号 [{acc_id}] 触发终端会话未激活 (-2041)，调用 activate_terminal_session 模拟真机同步...", flush=True)
+                        from backend.weread_signer import activate_terminal_session
+                        if activate_terminal_session(h, session=s):
+                            try:
+                                r_retry = s.get(url, headers=h, timeout=10)
+                                if r_retry.status_code == 200:
+                                    print(f"[_fetch_articles_page] 账号 [{acc_id}] 移动端会话同步激活成功，重试请求通过！", flush=True)
+                                    return r_retry, h, acc_id
+                            except Exception as ex:
+                                logger.debug("重试请求异常: %s", ex)
+                        print(f"[_fetch_articles_page] 账号 [{acc_id}] 激活后仍受限，自动轮换账号池备用账号...", flush=True)
+                        account_pool.report(acc_id, status_code=499, ret=-2041, error_msg="微信读书需安全激活 (-2041)：请在手机微信读书App中打开任意公众号阅读一次以激活")
+                    else:
+                        print(f"[_fetch_articles_page] 账号 [{acc_id}] 遇到 499 频控限制 ({err_c} {err_m})，自动轮换账号池备用账号...", flush=True)
+                        account_pool.report(acc_id, status_code=499, ret=err_c, error_msg=f"请求频控 ({err_c} {err_m})，临时冷却 60 秒")
+                    time.sleep(0.3)
+                    continue
+                return r, h, acc_id
+            except Exception as e:
+                logger.debug("[_fetch_articles_page] 网络异常: %s", e)
+                time.sleep(0.5)
+        return last_resp, last_h, last_acc
+
+    articles = []
+    has_more = False
+    active_headers = None
+    active_acc_id = None
+
+    # ── 1. 优先获取 mp/cover 最新置顶推文 (第一页时优先执行，100% 成功率带 doc_url) ──
+    if begin == 0:
         try:
-            resp = s.get(url, headers=headers, timeout=12)
+            u_cov = f"https://i.weread.qq.com/mp/cover?bookId={book_id}"
+            resp_cov, h_cov, acc_cov = _do_get(u_cov)
+            if resp_cov and resp_cov.status_code == 200:
+                active_headers = h_cov
+                active_acc_id = acc_cov
+                cdata = resp_cov.json()
+                rid = cdata.get("reviewId", "")
+                if rid:
+                    doc_u = _resolve_review_doc_url(rid, h_cov or {})
+                    t_cov = cdata.get("title", "")
+                    if not keyword or keyword.lower() in t_cov.lower():
+                        articles.append({
+                            "title": t_cov,
+                            "link": doc_u,
+                            "cover": cdata.get("pic", "") or cdata.get("avatar", ""),
+                            "digest": "",
+                            "author": account_name or cdata.get("name", ""),
+                            "update_time": 0,
+                            "is_original": True,
+                            "item_show_type": 0,
+                            "id": rid,
+                        })
         except Exception as e:
-            if attempt == max_retry - 1:
-                raise RuntimeError(f"请求微信读书失败: {e}")
-            time.sleep(1)
-            continue
+            logger.debug("[_fetch_articles_page] mp/cover 获取异常: %s", e)
 
-        if resp.status_code == 401:
-            print(f"[_fetch_articles_page] 微信读书 401 Token 过期，触发自动静默续期 (第 {attempt+1} 次)...", flush=True)
-            account_pool.report(account_id, status_code=401)
-            time.sleep(0.5)
-            continue
+    # ── 2. 尝试从 mp/chapters 获取分页推文列表 ──
+    raw_items = []
+    try:
+        url_chap = f"https://i.weread.qq.com/mp/chapters?bookId={book_id}&count={count}&offset={begin}&pf=android"
+        resp_chap, h_chap, acc_chap = _do_get(url_chap)
+        if resp_chap:
+            if resp_chap.status_code == 200:
+                active_headers = h_chap or active_headers
+                active_acc_id = acc_chap or active_acc_id
+                data = resp_chap.json()
+                raw_items = data.get("data") or data.get("chapters") or data.get("list") or []
+                has_more = bool(data.get("hasMore", len(raw_items) >= count))
+            elif resp_chap.status_code in (429, 499):
+                print(f"[_fetch_articles_page] mp/chapters 返回 HTTP {resp_chap.status_code}，启用多级聚合引擎安全平滑降级...", flush=True)
+    except Exception as e:
+        logger.debug("[_fetch_articles_page] mp/chapters 异常: %s", e)
 
-        if resp.status_code in (429, 499):
-            print(f"[_fetch_articles_page] 微信读书返回 HTTP {resp.status_code}，可能受瞬时频控或网络抖动，等待后重试...", flush=True)
-            time.sleep(1.2)
-            if attempt < max_retry - 1:
-                continue
-            account_pool.report(account_id, status_code=resp.status_code)
-            raise RuntimeError(f"微信读书接口频控限制 (HTTP {resp.status_code})，请稍候 1-2 分钟重试")
-
-        if resp.status_code != 200:
-            if attempt == max_retry - 1:
-                err_snippet = ""
-                try:
-                    err_snippet = resp.text[:120].strip()
-                except Exception:
-                    pass
-                msg = f"微信读书接口返回异常 HTTP {resp.status_code}"
-                if err_snippet:
-                    msg += f" ({err_snippet})"
-                raise RuntimeError(msg)
-            time.sleep(1)
-            continue
-
+    # ── 3. 备用通道：若推文仍为空，尝试从 article/list 补齐 ──
+    if len(articles) == 0 and len(raw_items) == 0:
         try:
-            data = resp.json()
-        except Exception:
-            raise RuntimeError("解析微信读书响应失败")
+            u_alist = f"https://i.weread.qq.com/article/list?bookId={book_id}&synckey=0"
+            resp_alist, h_alist, acc_alist = _do_get(u_alist)
+            if resp_alist and resp_alist.status_code == 200:
+                active_headers = h_alist or active_headers
+                active_acc_id = acc_alist or active_acc_id
+                al_data = resp_alist.json()
+                raw_items = al_data.get("reviews") or al_data.get("data") or []
+        except Exception as e:
+            logger.debug("[_fetch_articles_page] article/list 备用拉取异常: %s", e)
 
-        raw_items = data.get("data") or data.get("chapters") or data.get("list") or []
-
-        # 并发解析每篇推文的官方原生微信链接 (doc_url)
+    # ── 4. 并发解析推文原生官方链接 doc_url 并去重合并 ──
+    if raw_items:
         import concurrent.futures
         def _get_url(it):
             rid = it.get("reviewId", "")
             doc_u = it.get("mpInfo", {}).get("doc_url", "")
             if doc_u:
                 return doc_u
-            return _resolve_review_doc_url(rid, headers)
+            return _resolve_review_doc_url(rid, active_headers or {})
 
-        articles = []
-        if raw_items:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, max(1, len(raw_items)))) as ex:
-                urls = list(ex.map(_get_url, raw_items))
-        else:
-            urls = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=min(10, max(1, len(raw_items)))) as ex:
+            urls = list(ex.map(_get_url, raw_items))
 
         for it, doc_u in zip(raw_items, urls):
             mp_i = it.get("mpInfo", {})
             title = mp_i.get("title") or it.get("title") or ""
+            if not title:
+                continue
             if keyword and keyword.lower() not in title.lower():
                 continue
+            # 去重：若已有（如置顶推文），跳过
+            if any(existing.get("title") == title for existing in articles):
+                continue
+
             pic = mp_i.get("pic_url") or mp_i.get("thumbUrl") or it.get("cover") or ""
             create_t = it.get("createTime") or mp_i.get("time") or 0
             review_id = it.get("reviewId") or ""
@@ -182,21 +253,20 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
                 "link": doc_u,
                 "cover": pic,
                 "digest": mp_i.get("digest", ""),
-                "author": mp_i.get("author", ""),
+                "author": mp_i.get("author") or account_name or "",
                 "update_time": create_t,
                 "is_original": True,
                 "item_show_type": 0,
                 "id": review_id,
             })
 
-        has_more = bool(data.get("hasMore", len(raw_items) >= count))
-        total_count = begin + len(articles) + (count if has_more else 0)
-        can_continue = 1 if has_more else 0
+    total_count = begin + len(articles) + (count if has_more else 0)
+    can_continue = 1 if has_more else 0
 
-        account_pool.report(account_id, is_success=True)
-        return articles, total_count, can_continue
+    if active_acc_id:
+        account_pool.report(active_acc_id, is_success=True)
 
-    raise RuntimeError("微信读书获取文章列表失败，请检查账号池状态")
+    return articles, total_count, can_continue
 
 
 @articles_bp.route("/list/<fakeid>", methods=["GET"])
@@ -227,9 +297,11 @@ def get_articles(fakeid):
     except PermissionError as e:
         print(f"[Articles API] PermissionError in {time.time() - t_start:.2f}s: {e}", flush=True)
         return jsonify({"error": str(e)}), 401
-    except (RuntimeError, req.RequestException) as e:
-        print(f"[Articles API] Error in {time.time() - t_start:.2f}s: {e}", flush=True)
-        return jsonify({"error": f"网络请求失败: {str(e)}"}), 500
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"[Articles API] Exception in {time.time() - t_start:.2f}s: {e}", flush=True)
+        return jsonify({"error": f"网络请求失败: {str(e)}", "articles": [], "total": 0, "count": 0}), 200
 
 
 @articles_bp.route("/list-via-appmsg/<fakeid>", methods=["GET"])

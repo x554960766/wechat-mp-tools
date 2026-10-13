@@ -75,6 +75,49 @@ const Modal = {
         });
     },
 
+    prompt(title, message, defaultValue = '', onConfirm, options = {}) {
+        this._onConfirm = onConfirm;
+        const isWhite = options.theme === 'white' || document.body.classList.contains('dy-theme');
+        const inputId = 'modal-prompt-input-' + Date.now();
+        this.open({
+            title,
+            content: `
+                <p style="color: ${isWhite ? '#475569' : 'var(--text-secondary)'}; margin-bottom: 12px;">${message}</p>
+                <input type="text" id="${inputId}" class="form-input" style="width: 100%; box-sizing: border-box;" value="${(defaultValue || '').replace(/"/g, '&quot;')}" placeholder="${options.placeholder || '请输入...'}" />
+            `,
+            footer: `
+                <button class="btn btn-secondary" onclick="Modal.close()">取消</button>
+                <button class="btn btn-primary" onclick="Modal._handlePromptConfirm('${inputId}')">确定</button>
+            `,
+            theme: isWhite ? 'white' : (options.theme || ''),
+            onOpen: () => {
+                setTimeout(() => {
+                    const input = document.getElementById(inputId);
+                    if (input) {
+                        input.focus();
+                        input.select();
+                        input.addEventListener('keydown', (e) => {
+                            if (e.key === 'Enter') {
+                                Modal._handlePromptConfirm(inputId);
+                            }
+                        });
+                    }
+                }, 100);
+            }
+        });
+    },
+
+    _handlePromptConfirm(inputId) {
+        const input = document.getElementById(inputId);
+        const val = input ? input.value : '';
+        this.close();
+        const onConfirm = this._onConfirm;
+        this._onConfirm = null;
+        if (onConfirm) {
+            onConfirm(val);
+        }
+    },
+
     handleConfirm() {
         this.close();
         const onConfirm = this._onConfirm;
@@ -84,3 +127,4 @@ const Modal = {
         }
     },
 };
+

@@ -175,17 +175,31 @@ def search_accounts():
     # ── 模式 2：名称关键字搜索 (微信读书官方 scope=2 检索) ──
     try:
         encoded_kw = urllib.parse.quote(keyword)
-        # 优先使用 scope=2 官方公众号专属库检索
         url_mp = f"https://i.weread.qq.com/store/search?keyword={encoded_kw}&scope=2&v=2&count=20"
-        resp = s.get(url_mp, headers=headers, timeout=10)
-
-        # 401 自动上报与静默刷新重试
-        if resp.status_code == 401:
-            account_pool.report(acc_id, status_code=401)
-            acc_id, vid, token, headers = borrow_weread_session()
+        
+        # 智能重试循环 (支持 401 自动续期与 499 自动激活/轮换)
+        resp = None
+        for attempt in range(3):
             resp = s.get(url_mp, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                break
+            elif resp.status_code == 401:
+                account_pool.report(acc_id, status_code=401)
+                acc_id, vid, token, headers = borrow_weread_session()
+            elif resp.status_code == 499:
+                err_text = resp.text
+                if "-2041" in err_text:
+                    from backend.weread_signer import activate_terminal_session
+                    activate_terminal_session(headers, session=s)
+                elif "-2014" in err_text:
+                    account_pool.report(acc_id, status_code=499, error_msg="频控 -2014")
+                    acc_id, vid, token, headers = borrow_weread_session()
+                else:
+                    break
+            else:
+                break
 
-        if resp.status_code == 200:
+        if resp and resp.status_code == 200:
             books = resp.json().get("books", [])
             for b in books:
                 b_info = b.get("bookInfo", {})
@@ -212,7 +226,8 @@ def search_accounts():
                 for b in resp_gen.json().get("books", []):
                     b_info = b.get("bookInfo", {})
                     b_id = b_info.get("bookId", "")
-                    if b_id.startswith("MP_") and b_id not in seen_ids:
+                    is_mp = b_id.startswith("MP_") or b_info.get("type") == 3 or b_info.get("author") == "公众号"
+                    if is_mp and b_id not in seen_ids:
                         seen_ids.add(b_id)
                         fid = book_id_to_biz(b_id) or b_id
                         results.append({
@@ -314,29 +329,100 @@ def update_account(fakeid):
 
 @accounts_bp.route("/user-mps", methods=["GET"])
 def get_user_subscribed_mps():
-    """获取当前登录微信读书用户已关注的公众号列表"""
+    """获取当前登录微信读书用户已关注/书架中的公众号列表 (同步 weread_web 多源聚合与 shelf/sync)"""
     try:
         acc_id, vid, token, headers = borrow_weread_session()
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 401
 
-    try:
-        s = get_weread_session()
-        url = "https://i.weread.qq.com/mp/list?listType=0&count=50"
-        resp = s.get(url, headers=headers, timeout=10)
-        if resp.status_code == 401:
-            account_pool.report(acc_id, status_code=401)
-            acc_id, vid, token, headers = borrow_weread_session()
-            resp = s.get(url, headers=headers, timeout=10)
+    s = get_weread_session()
+    mps = []
+    seen_ids = set()
 
-        mps = []
-        if resp.status_code == 200:
-            for it in resp.json().get("lists", []):
-                # mp item
-                pass
-        return jsonify({"mps": mps})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    def _safe_get(u):
+        nonlocal acc_id, headers
+        try:
+            r = s.get(u, headers=headers, timeout=8)
+            if r.status_code == 401:
+                account_pool.report(acc_id, status_code=401)
+                acc_id, vid, token, headers = borrow_weread_session()
+                r = s.get(u, headers=headers, timeout=8)
+            elif r.status_code == 499 and "-2041" in r.text:
+                from backend.weread_signer import activate_terminal_session
+                activate_terminal_session(headers, session=s)
+                r = s.get(u, headers=headers, timeout=8)
+            return r if r.status_code == 200 else None
+        except Exception as ex:
+            logger.debug("[user-mps] 请求 %s 异常: %s", u, ex)
+            return None
+
+    # 1. 微信读书官方 /mp/list (listType=0, 1) 必须带 synckey=0
+    for lt in (0, 1):
+        r = _safe_get(f"https://i.weread.qq.com/mp/list?listType={lt}&count=50&synckey=0")
+        if r:
+            items = r.json().get("lists", []) or r.json().get("items", []) or []
+            for it in items:
+                b_info = it.get("bookInfo", it)
+                bid = b_info.get("bookId") or it.get("bookId") or ""
+                if not bid or bid in seen_ids:
+                    continue
+                seen_ids.add(bid)
+                title = it.get("account") or b_info.get("title") or it.get("title") or ""
+                cover = it.get("mpavatar") or it.get("thumbUrl") or b_info.get("cover") or ""
+                intro = it.get("title", "")
+                fid = book_id_to_biz(bid) or bid
+                mps.append({
+                    "fakeid": fid,
+                    "bookId": bid,
+                    "nickname": title,
+                    "alias": fid,
+                    "round_head_img": cover,
+                    "signature": f"最新：{intro}" if intro and intro != title else "",
+                    "service_type": 1,
+                })
+
+    # 2. 从官方书架接口 /shelf/sync?synckey=0 补充已加入书架的公众号
+    r_shelf = _safe_get("https://i.weread.qq.com/shelf/sync?synckey=0")
+    if r_shelf:
+        for b in r_shelf.json().get("books", []):
+            bid = b.get("bookId", "")
+            if (bid.startswith("MP_") or "MP_WXS" in bid) and bid not in seen_ids:
+                seen_ids.add(bid)
+                title = b.get("title", "")
+                cover = b.get("cover", "")
+                intro = b.get("intro", "")
+                fid = book_id_to_biz(bid) or bid
+                mps.append({
+                    "fakeid": fid,
+                    "bookId": bid,
+                    "nickname": title,
+                    "alias": fid,
+                    "round_head_img": cover,
+                    "signature": intro,
+                    "service_type": 1,
+                })
+
+    # 3. /subscription/books 补充
+    r_sub = _safe_get("https://i.weread.qq.com/subscription/books?count=50")
+    if r_sub:
+        for b in r_sub.json().get("books", []) or r_sub.json().get("data", []):
+            b_info = b.get("bookInfo", b)
+            bid = b_info.get("bookId", "")
+            title = b_info.get("title", "")
+            if bid and (bid.startswith("MP_") or "MP_WXS" in bid) and bid not in seen_ids:
+                seen_ids.add(bid)
+                fid = book_id_to_biz(bid) or bid
+                mps.append({
+                    "fakeid": fid,
+                    "bookId": bid,
+                    "nickname": title,
+                    "alias": fid,
+                    "round_head_img": b_info.get("cover", ""),
+                    "signature": b_info.get("intro", ""),
+                    "service_type": 1,
+                })
+
+    return jsonify({"mps": mps, "total": len(mps)})
 
 
 # ── RSS 订阅路由保持向后兼容 ──────────────────────────

@@ -349,3 +349,86 @@ def sign_params(params: dict, user_agent: str, is_reply: bool = False) -> str:
     if is_reply:
         return sign_reply(params_str, user_agent)
     return sign_detail(params_str, user_agent)
+
+
+# ============================================================================
+# x-secsdk-web-signature 签名算法 (Argus Security WebSign 纯算实现)
+# ============================================================================
+
+WEBSIGN_CONST = "A96D855A08C0A9707F8BEF0D9A527E4E"
+_ENCODE_SAFE = "!*'()"
+_SIG_KEY = "x-secsdk-web-signature"
+_TS_KEY = "timestamp"
+
+
+def _encode_component(value) -> str:
+    """等价于 JS 的 encodeURIComponent"""
+    return urllib.parse.quote(str(value), safe=_ENCODE_SAFE, encoding="utf-8")
+
+
+def canonical_query(query: str) -> str:
+    """按 SDK 规则规范化 query 字符串（顺序不变，value 重编码，key 只解码）"""
+    parts = []
+    for pair in query.split("&"):
+        if not pair:
+            continue
+        if "=" in pair:
+            key, value = pair.split("=", 1)
+        else:
+            key, value = pair, ""
+        key = urllib.parse.unquote_plus(key, encoding="utf-8", errors="replace")
+        value = urllib.parse.unquote_plus(value, encoding="utf-8", errors="replace")
+        parts.append("%s=%s" % (key, _encode_component(value)))
+    return "&".join(parts)
+
+
+def sign_secsdk(url: str, ts: int = None, uifid: str = None):
+    """
+    计算 x-secsdk-web-signature
+    明文结构: {uifid}_{timestamp}_{WEBSIGN_CONST}_{canonical_query}
+    """
+    import hashlib
+
+    if ts is None:
+        ts = int(time.time())
+    ts = int(ts)
+
+    base, _, raw_query = url.partition("?")
+    kept = []
+    for pair in raw_query.split("&"):
+        if not pair:
+            continue
+        name = pair.split("=", 1)[0]
+        if name in (_TS_KEY, _SIG_KEY):
+            continue
+        kept.append(pair)
+    canon = canonical_query("&".join(kept))
+
+    # query 里没有 uifid 时，SDK 会从 UIFID cookie 取值追加到末尾
+    names = [p.split("=", 1)[0] for p in canon.split("&") if p]
+    if "uifid" not in names and uifid:
+        canon = ("%s&uifid=%s" % (canon, _encode_component(uifid))
+                 if canon else "uifid=%s" % _encode_component(uifid))
+
+    signed_query = ("%s&%s=%d" % (canon, _TS_KEY, ts)) if canon \
+        else "%s=%d" % (_TS_KEY, ts)
+
+    uifid_value = ""
+    for pair in signed_query.split("&"):
+        if pair.startswith("uifid="):
+            uifid_value = urllib.parse.unquote_plus(pair[6:], encoding="utf-8", errors="replace")
+            break
+    if not uifid_value and uifid:
+        uifid_value = uifid
+
+    plain = "%s_%d_%s_%s" % (uifid_value, ts, WEBSIGN_CONST, signed_query)
+    signature = hashlib.md5(plain.encode("utf-8")).hexdigest()
+    return ts, signature, signed_query
+
+
+def sign_secsdk_url(url: str, ts: int = None, uifid: str = None) -> str:
+    """返回带 x-secsdk-web-signature 签名的完整可请求 URL"""
+    base, _, _ = url.partition("?")
+    ts, signature, signed_query = sign_secsdk(url, ts=ts, uifid=uifid)
+    return "%s?%s&%s=%s" % (base, signed_query, _SIG_KEY, signature)
+

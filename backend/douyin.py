@@ -27,7 +27,7 @@ from backend.config import (
     DATA_DIR, get_settings, get_proxy_config, get_proxy_url,
     get_proxies_dict, report_proxy_status, load_json, save_json
 )
-from backend.douyin_sign import sign_detail, sign_params
+from backend.douyin_sign import sign_detail, sign_params, sign_secsdk_url
 
 douyin_bp = Blueprint("douyin", __name__, url_prefix="/api/douyin")
 
@@ -238,6 +238,15 @@ class DouyinClient:
             _add_log(f"⚠️ 自动获取抖音匿名身份凭证失败: {e}")
             return False
 
+    def get_uifid(self) -> str:
+        """从 Cookie 或会话中提取有效 UIFID"""
+        ck_str = self.session.headers.get("Cookie", "")
+        for p in ck_str.split(";"):
+            p = p.strip()
+            if p.startswith("UIFID=") and not p.startswith("UIFID_TEMP="):
+                return p.split("UIFID=", 1)[1].strip()
+        return self.session.cookies.get("UIFID") or ""
+
     def _get_common_headers(self) -> dict:
         """通用请求头"""
         return {
@@ -314,11 +323,22 @@ class DouyinClient:
         return all_params
 
     def api_get(self, url: str, params: dict, skip_sign: bool = False, timeout: int = 15) -> dict:
-        """发起签名后的 GET 请求，返回 JSON（带风控拦截自愈重试）"""
+        """发起签名后的 GET 请求，返回 JSON（带 x-secsdk 签名与风控自愈重试）"""
+        uifid = self.get_uifid()
+        if uifid and "uifid" not in self.session.headers:
+            self.session.headers["uifid"] = uifid
+
         for attempt in range(2):
             all_params = self._enrich_and_sign(params, skip_sign)
             try:
-                resp = self.session.get(url, params=all_params, timeout=timeout)
+                if uifid:
+                    qs = urllib.parse.urlencode(all_params)
+                    full_req_url = f"{url}?{qs}" if qs else url
+                    full_req_url = sign_secsdk_url(full_req_url, uifid=uifid)
+                    resp = self.session.get(full_req_url, timeout=timeout)
+                else:
+                    resp = self.session.get(url, params=all_params, timeout=timeout)
+
                 if resp.status_code == 403 or "Argus" in resp.text or "Uifid" in resp.text:
                     if attempt == 0:
                         _add_log("⚠️ 抖音请求受 Argus/风控拦截，自动刷新匿名凭证重试...")
@@ -346,14 +366,31 @@ class DouyinClient:
                 raise Exception(f"API 请求失败: {url} — {str(e)}")
 
     def api_post(self, url: str, params: dict, data: dict = None, skip_sign: bool = False, timeout: int = 15) -> dict:
-        """发起签名后的 POST 请求，返回 JSON（带风控拦截自愈重试）"""
+        """发起签名后的 POST 请求，返回 JSON（带 x-secsdk 签名与风控自愈重试）"""
+        uifid = self.get_uifid()
+        if uifid and "uifid" not in self.session.headers:
+            self.session.headers["uifid"] = uifid
+
         for attempt in range(2):
             all_params = self._enrich_and_sign(params, skip_sign)
             try:
                 if data is not None:
-                    resp = self.session.post(url, params=all_params, data=data, timeout=timeout)
+                    if uifid:
+                        qs = urllib.parse.urlencode(all_params)
+                        full_req_url = f"{url}?{qs}" if qs else url
+                        full_req_url = sign_secsdk_url(full_req_url, uifid=uifid)
+                        resp = self.session.post(full_req_url, data=data, timeout=timeout)
+                    else:
+                        resp = self.session.post(url, params=all_params, data=data, timeout=timeout)
                 else:
-                    resp = self.session.post(url, data=all_params, timeout=timeout)
+                    if uifid:
+                        qs = urllib.parse.urlencode(all_params)
+                        full_req_url = f"{url}?{qs}" if qs else url
+                        full_req_url = sign_secsdk_url(full_req_url, uifid=uifid)
+                        resp = self.session.post(full_req_url, timeout=timeout)
+                    else:
+                        resp = self.session.post(url, data=all_params, timeout=timeout)
+
                 if resp.status_code == 403 or "Argus" in resp.text or "Uifid" in resp.text:
                     if attempt == 0:
                         _add_log("⚠️ 抖音请求受 Argus/风控拦截，自动刷新匿名凭证重试...")
@@ -859,9 +896,126 @@ class DouyinClient:
 
     # ── 单条作品详情 API ──────────────────────────────────
 
-    def get_video_detail(self, aweme_id: str) -> dict:
-        """获取单条作品详情，自动双接口兜底"""
-        # 1. detail 接口带 a_bogus 签名请求（最稳定，匿名 ttwid 即可返回）
+    @staticmethod
+    def extract_aweme_from_html(html: str, aweme_id: str = "") -> dict:
+        """从抖音网页 HTML (SSR/RSC) 中提取单条作品详情字典"""
+        if not html:
+            return {}
+
+        # 1. 优先尝试从 self.__pace_f.push (Next.js React Server Components) 提取
+        for m in re.finditer(r"self\.__pace_f\.push\(\[1,\s*\"(.*?)\"\s*\]\)", html, re.DOTALL):
+            chunk = m.group(1)
+            if "detail" in chunk and ("awemeId" in chunk or "aweme_id" in chunk or (aweme_id and aweme_id in chunk)):
+                try:
+                    unescaped = json.loads("\"" + chunk + "\"")
+                    colon = unescaped.find(":")
+                    candidate_str = unescaped[colon + 1:] if colon != -1 else unescaped
+                    first_bracket = -1
+                    for idx, ch in enumerate(candidate_str):
+                        if ch in ("[", "{"):
+                            first_bracket = idx
+                            break
+                    if first_bracket != -1:
+                        raw_json = candidate_str[first_bracket:].rstrip("\n\r ")
+                        obj = None
+                        try:
+                            obj = json.loads(raw_json)
+                        except Exception:
+                            for end_idx in range(len(raw_json), max(0, len(raw_json) - 60), -1):
+                                try:
+                                    obj = json.loads(raw_json[:end_idx])
+                                    break
+                                except Exception:
+                                    pass
+
+                        if obj:
+                            def find_aweme(node):
+                                if isinstance(node, dict):
+                                    if "aweme" in node and isinstance(node["aweme"], dict) and "detail" in node["aweme"]:
+                                        return node["aweme"]["detail"]
+                                    if "detail" in node and isinstance(node["detail"], dict):
+                                        if "awemeId" in node["detail"] or "aweme_id" in node["detail"] or "images" in node["detail"] or "video" in node["detail"]:
+                                            return node["detail"]
+                                    if "aweme_detail" in node and isinstance(node["aweme_detail"], dict):
+                                        return node["aweme_detail"]
+                                    for v in node.values():
+                                        res = find_aweme(v)
+                                        if res: return res
+                                elif isinstance(node, list):
+                                    for item in node:
+                                        res = find_aweme(item)
+                                        if res: return res
+                                return None
+
+                            target_detail = find_aweme(obj)
+                            if target_detail and (target_detail.get("awemeId") or target_detail.get("aweme_id")):
+                                return target_detail
+                except Exception:
+                    pass
+
+        # 2. 尝试从 RENDER_DATA 提取
+        render_match = re.search(r"<script id=\"RENDER_DATA\"[^>]*>(.*?)</script>", html, re.DOTALL)
+        if render_match:
+            try:
+                raw_data = render_match.group(1).strip()
+                decoded = urllib.parse.unquote(raw_data)
+                data = json.loads(decoded)
+
+                def find_in_render(node):
+                    if isinstance(node, dict):
+                        if "aweme_detail" in node and isinstance(node["aweme_detail"], dict):
+                            return node["aweme_detail"]
+                        if "detail" in node and isinstance(node["detail"], dict):
+                            if "awemeId" in node["detail"] or "aweme_id" in node["detail"] or "video" in node["detail"]:
+                                return node["detail"]
+                        for v in node.values():
+                            res = find_in_render(v)
+                            if res: return res
+                    elif isinstance(node, list):
+                        for item in node:
+                            res = find_in_render(item)
+                            if res: return res
+                    return None
+
+                target_detail = find_in_render(data)
+                if target_detail:
+                    return target_detail
+            except Exception:
+                pass
+
+        # 3. 尝试从 window._ROUTER_DATA 提取
+        router_match = re.search(r"window\._ROUTER_DATA\s*=\s*(.*?)</script>", html, re.DOTALL)
+        if router_match:
+            try:
+                data = json.loads(router_match.group(1).rstrip("; \n\r"))
+
+                def find_in_router(node):
+                    if isinstance(node, dict):
+                        if "aweme_detail" in node and isinstance(node["aweme_detail"], dict):
+                            return node["aweme_detail"]
+                        if "item_list" in node and isinstance(node["item_list"], list):
+                            if node["item_list"]:
+                                return node["item_list"][0]
+                        for v in node.values():
+                            res = find_in_router(v)
+                            if res: return res
+                    elif isinstance(node, list):
+                        for item in node:
+                            res = find_in_router(item)
+                            if res: return res
+                    return None
+
+                target_detail = find_in_router(data)
+                if target_detail:
+                    return target_detail
+            except Exception:
+                pass
+
+        return {}
+
+    def get_video_detail(self, aweme_id: str, share_url: str = "") -> dict:
+        """获取单条作品详情（多通道高可靠解析：API + x-secsdk -> 网页SSR/RSC直出 -> 无头浏览器网页渲染）"""
+        # 1. 优先调用带 x-secsdk-web-signature / uifid 的 API 接口（极速直接返回）
         try:
             data = self.api_get(API_VIDEO_DETAIL, {
                 "aweme_id": aweme_id,
@@ -872,18 +1026,32 @@ class DouyinClient:
         except Exception:
             pass
 
-        # 2. detail 接口不带签名尝试
-        try:
-            data = self.api_get(API_VIDEO_DETAIL, {
-                "aweme_id": aweme_id,
-            }, skip_sign=True)
+        # 2. 网页直出 SSR / RSC 解析通道（无需无头浏览器，秒级提取）
+        urls_to_try = []
+        if share_url and ("note/" in share_url or "video/" in share_url):
+            urls_to_try.append(share_url)
+        urls_to_try.extend([
+            f"https://www.douyin.com/note/{aweme_id}",
+            f"https://www.douyin.com/video/{aweme_id}",
+        ])
 
-            if data.get("status_code") == 0 and data.get("aweme_detail"):
-                return data["aweme_detail"]
-        except Exception:
-            pass
+        page_headers = {
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": "https://www.douyin.com/",
+        }
 
-        # 3. multi detail 带签名兜底
+        for p_url in urls_to_try:
+            try:
+                resp = self.session.get(p_url, headers=page_headers, allow_redirects=True, timeout=10)
+                if resp.status_code == 200 and len(resp.text) > 5000:
+                    d = DouyinClient.extract_aweme_from_html(resp.text, aweme_id)
+                    if d:
+                        return d
+            except Exception:
+                pass
+
+        # 3. multi detail API 兜底
         try:
             data = self.api_get(API_MULTI_DETAIL, {
                 "aweme_ids": f"[{aweme_id}]",
@@ -894,41 +1062,65 @@ class DouyinClient:
                 details = data.get("aweme_details", [])
                 if details:
                     for d in details:
-                        if d.get("aweme_id") == aweme_id:
+                        if d.get("aweme_id") == aweme_id or d.get("awemeId") == aweme_id:
                             return d
                     return details[0]
         except Exception:
             pass
 
-        # 4. multi detail 不带签名兜底
+        # 4. 终极兜底：通过后台无头浏览器渲染页面并提取完整数据
         try:
-            data = self.api_get(API_MULTI_DETAIL, {
-                "aweme_ids": f"[{aweme_id}]",
-                "request_source": "200",
-            }, skip_sign=True)
+            _add_log(f"⚠️ 正在通过无头浏览器安全渲染通道获取作品 {aweme_id} 详情...")
+            from playwright.sync_api import sync_playwright
+            from backend.runtime import launch_chromium
 
-            if data.get("status_code") == 0:
-                details = data.get("aweme_details", [])
-                if details:
-                    for d in details:
-                        if d.get("aweme_id") == aweme_id:
-                            return d
-                    return details[0]
-        except Exception:
-            pass
+            settings = get_settings()
+            cookie_str = settings.get("douyin_cookie", "").strip()
+            cookie_objs = []
+            for item in cookie_str.split(";"):
+                item = item.strip()
+                if "=" in item:
+                    k, _, v = item.partition("=")
+                    if k.strip() and v.strip():
+                        cookie_objs.append({
+                            "name": k.strip(),
+                            "value": v.strip(),
+                            "domain": ".douyin.com",
+                            "path": "/"
+                        })
 
-        # 5. 终极兜底：无头浏览器上下文安全获取
-        try:
-            _add_log(f"⚠️ 详情接口受控，切换无头浏览器安全通道获取作品 {aweme_id} 详情...")
-            data = self._fetch_via_browser(
-                f"/aweme/v1/web/aweme/detail/?aweme_id={aweme_id}&aid=6383&device_platform=webapp",
-                method="GET",
-                referer=f"https://www.douyin.com/video/{aweme_id}"
-            )
-            if data.get("status_code") == 0 and data.get("aweme_detail"):
-                return data["aweme_detail"]
-        except Exception:
-            pass
+            browser_urls = urls_to_try or [f"https://www.douyin.com/video/{aweme_id}"]
+            with sync_playwright() as p:
+                browser = launch_chromium(p.chromium, headless=True, args=["--disable-blink-features=AutomationControlled"])
+                try:
+                    context = browser.new_context(user_agent=USER_AGENT)
+                    if cookie_objs:
+                        context.add_cookies(cookie_objs)
+                    page = context.new_page()
+
+                    for b_url in browser_urls:
+                        try:
+                            page.goto(b_url, wait_until="domcontentloaded", timeout=12000)
+                            page_html = page.content()
+                            d = DouyinClient.extract_aweme_from_html(page_html, aweme_id)
+                            if d:
+                                # 自动回写更新 Cookie
+                                try:
+                                    new_cookies = context.cookies()
+                                    if new_cookies:
+                                        new_ck = "; ".join([f"{c['name']}={c['value']}" for c in new_cookies])
+                                        settings["douyin_cookie"] = new_ck
+                                        save_settings(settings)
+                                        self.session.headers["Cookie"] = new_ck
+                                except Exception:
+                                    pass
+                                return d
+                        except Exception:
+                            pass
+                finally:
+                    browser.close()
+        except Exception as be:
+            _add_log(f"⚠️ 无头浏览器渲染解析异常: {be}")
 
         raise Exception(f"无法获取作品 {aweme_id} 的详情，可能需要有效的 Cookie 或作品已删除")
 
@@ -1545,77 +1737,105 @@ class DouyinClient:
     def parse_media_info(detail: dict) -> dict:
         """
         从 aweme_detail 中提取下载所需的资源信息
-        返回: {type, title, urls, aweme_id, nickname, cover}
+        同时兼容 API 字段 (snake_case) 与网页 SSR/RSC 字段 (camelCase)
+        返回: {type, title, urls, live_photo_urls, aweme_id, nickname, cover, music_url}
         """
-        aweme_id = detail.get("aweme_id", "unknown")
-        desc = detail.get("desc") or detail.get("item_title") or detail.get("preview_title") or ""
+        aweme_id = detail.get("aweme_id") or detail.get("awemeId") or "unknown"
+        desc = detail.get("desc") or detail.get("item_title") or detail.get("itemTitle") or detail.get("preview_title") or ""
         title = clean_filename(desc) if desc else f"抖音作品_{aweme_id}"
 
+        author = detail.get("author") or detail.get("authorInfo") or {}
         author_nickname = ""
-        if "author" in detail and isinstance(detail["author"], dict):
-            author_nickname = detail["author"].get("nickname", "")
+        if isinstance(author, dict):
+            author_nickname = author.get("nickname", "")
         nickname = clean_filename(author_nickname.strip()) if author_nickname else ""
         if not nickname or nickname == "untitled":
             nickname = "未知用户"
 
         # 判断类型：images 存在且非空 → 图文；否则 → 视频
-        images = detail.get("images")
+        images = detail.get("images") or detail.get("imagesList") or detail.get("imgList")
         if not images:
-            image_post_info = detail.get("image_post_info")
+            image_post_info = detail.get("image_post_info") or detail.get("imagePostInfo")
             if isinstance(image_post_info, dict):
-                images = image_post_info.get("images")
+                images = image_post_info.get("images") or image_post_info.get("imagesList")
 
-        is_replay = bool(detail.get("is_live_replay") or detail.get("aweme_type") == 101)
+        is_replay = bool(detail.get("is_live_replay") or detail.get("aweme_type") == 101 or detail.get("awemeType") == 101)
 
         # 提取封面
         cover = ""
-        video = detail.get("video", {})
+        video = detail.get("video") or {}
         if isinstance(video, dict):
-            for ck in ["origin_cover", "cover", "dynamic_cover"]:
+            for ck in ["origin_cover", "originCover", "cover", "dynamic_cover", "dynamicCover"]:
                 c_dict = video.get(ck)
                 if isinstance(c_dict, dict):
-                    c_urls = c_dict.get("url_list") or []
+                    c_urls = c_dict.get("url_list") or c_dict.get("urlList") or []
                     if c_urls:
                         cover = c_urls[0]
                         break
+                elif isinstance(c_dict, str) and c_dict.startswith("http"):
+                    cover = c_dict
+                    break
+            if not cover:
+                cover_list = video.get("coverUrlList") or video.get("cover_url_list") or []
+                if cover_list:
+                    cover = cover_list[0]
+                elif isinstance(video.get("cover"), str) and video["cover"].startswith("http"):
+                    cover = video["cover"]
+
         if not cover and images and isinstance(images, list) and len(images) > 0:
             first_img = images[0]
             if isinstance(first_img, dict):
-                c_urls = first_img.get("url_list") or []
+                c_urls = first_img.get("url_list") or first_img.get("urlList") or first_img.get("download_url_list") or first_img.get("downloadUrlList") or []
                 if c_urls:
                     cover = c_urls[0]
         if not cover and "cover" in detail and isinstance(detail["cover"], dict):
-            c_urls = detail["cover"].get("url_list") or []
+            c_urls = detail["cover"].get("url_list") or detail["cover"].get("urlList") or []
             if c_urls:
                 cover = c_urls[0]
 
         if images and isinstance(images, list) and len(images) > 0:
             # 图文类型
             urls = []
+            live_photo_urls = []
             for img in images:
-                url_list = img.get("url_list") or []
+                url_list = img.get("url_list") or img.get("urlList") or img.get("download_url_list") or img.get("downloadUrlList") or []
                 if not url_list and "display_image" in img:
                     display_image = img.get("display_image")
                     if isinstance(display_image, dict):
-                        url_list = display_image.get("url_list") or []
+                        url_list = display_image.get("url_list") or display_image.get("urlList") or []
                 if not url_list and "owner_watermark_image" in img:
                     watermark_image = img.get("owner_watermark_image")
                     if isinstance(watermark_image, dict):
-                        url_list = watermark_image.get("url_list") or []
+                        url_list = watermark_image.get("url_list") or watermark_image.get("urlList") or []
 
                 if url_list:
                     # 取最后一个（通常是最高清）
                     urls.append(url_list[-1] if len(url_list) > 1 else url_list[0])
 
+                # 实况照片 (Live Photo) 视频流检测
+                live_vid = ""
+                if "video" in img and isinstance(img["video"], dict):
+                    v = img["video"]
+                    play_addr = v.get("play_addr") or v.get("playAddr")
+                    if isinstance(play_addr, list) and play_addr:
+                        live_vid = play_addr[0].get("src") or play_addr[0].get("url") or ""
+                    elif isinstance(play_addr, dict):
+                        p_urls = play_addr.get("url_list") or play_addr.get("urlList") or []
+                        if p_urls:
+                            live_vid = p_urls[0]
+                live_photo_urls.append(live_vid)
+
             # 提取背景音乐 URL
             music_url = ""
             music = detail.get("music")
             if music and isinstance(music, dict):
-                play_url = music.get("play_url")
+                play_url = music.get("play_url") or music.get("playUrl")
                 if play_url and isinstance(play_url, dict):
-                    music_urls = play_url.get("url_list") or []
+                    music_urls = play_url.get("url_list") or play_url.get("urlList") or []
                     if music_urls:
                         music_url = music_urls[0]
+                elif isinstance(play_url, str) and play_url.startswith("http"):
+                    music_url = play_url
 
             return {
                 "type": "image",
@@ -1623,6 +1843,7 @@ class DouyinClient:
                 "title": title,
                 "cover": cover,
                 "urls": urls,
+                "live_photo_urls": live_photo_urls,
                 "aweme_id": aweme_id,
                 "nickname": nickname,
                 "music_url": music_url,
@@ -1631,48 +1852,59 @@ class DouyinClient:
             # 视频类型 — 从多个地址源中选择最佳无水印版本
             url_candidates = []
 
-            # 1. bit_rate 中的最佳质量
-            bit_rates = video.get("bit_rate", [])
+            # 1. bit_rate / bitRateList 中的最佳质量
+            bit_rates = video.get("bit_rate") or video.get("bitRateList") or []
             if bit_rates:
-                # 按 data_size 降序选择最大质量
-                sorted_rates = sorted(bit_rates, key=lambda x: x.get("data_size", 0), reverse=True)
+                sorted_rates = sorted(bit_rates, key=lambda x: (x.get("data_size") or x.get("dataSize") or x.get("bit_rate") or 0), reverse=True)
                 for br in sorted_rates:
-                    play_addr = br.get("play_addr", {})
-                    url_list = play_addr.get("url_list", [])
-                    for u in url_list:
-                        if u and "watermark=1" not in u.lower() and "playwm" not in u.lower():
-                            url_candidates.append(u)
-                            break
+                    play_addr = br.get("play_addr") or br.get("playAddr")
+                    if isinstance(play_addr, list):
+                        for item in play_addr:
+                            s = item.get("src") or item.get("url")
+                            if s and "watermark=1" not in s.lower():
+                                url_candidates.append(s)
+                                break
+                    elif isinstance(play_addr, dict):
+                        url_list = play_addr.get("url_list") or play_addr.get("urlList") or []
+                        for u in url_list:
+                            if u and "watermark=1" not in u.lower() and "playwm" not in u.lower():
+                                url_candidates.append(u)
+                                break
 
-            # 2. play_addr_h264 (H264 版本, 通常无水印)
-            h264 = video.get("play_addr_h264", {})
+            # 2. play_addr_h264
+            h264 = video.get("play_addr_h264") or video.get("playAddrH264") or {}
             if isinstance(h264, dict):
-                for u in (h264.get("url_list") or []):
+                for u in (h264.get("url_list") or h264.get("urlList") or []):
                     if u and "watermark=1" not in u.lower() and "playwm" not in u.lower():
                         url_candidates.append(u)
                         break
 
             # 3. play_addr (主播放地址)
-            play_addr = video.get("play_addr", {})
-            if isinstance(play_addr, dict):
-                for u in (play_addr.get("url_list") or []):
+            play_addr = video.get("play_addr") or video.get("playAddr")
+            if isinstance(play_addr, list):
+                for item in play_addr:
+                    s = item.get("src") or item.get("url")
+                    if s:
+                        url_candidates.append(s)
+            elif isinstance(play_addr, dict):
+                for u in (play_addr.get("url_list") or play_addr.get("urlList") or []):
                     if u:
                         clean = u.replace("watermark=1", "watermark=0").replace("playwm", "play")
                         url_candidates.append(clean)
                         break
 
-            # 4. download_addr (下载地址，可能有水印)
-            download_addr = video.get("download_addr", {})
+            # 4. download_addr
+            download_addr = video.get("download_addr") or video.get("downloadAddr")
             if isinstance(download_addr, dict):
-                for u in (download_addr.get("url_list") or []):
+                for u in (download_addr.get("url_list") or download_addr.get("urlList") or []):
                     if u:
                         url_candidates.append(u)
                         break
 
-            # 5. play_addr_lowbr (低码率备用)
-            lowbr = video.get("play_addr_lowbr", {})
+            # 5. play_addr_lowbr
+            lowbr = video.get("play_addr_lowbr")
             if isinstance(lowbr, dict):
-                for u in (lowbr.get("url_list") or []):
+                for u in (lowbr.get("url_list") or lowbr.get("urlList") or []):
                     if u:
                         url_candidates.append(u)
                         break
@@ -1828,6 +2060,20 @@ def download_media(media_info: dict, target_dir: Path, custom_dir: Path = None) 
             save_file = folder_path / f"{idx}.jpeg"
             img_bytes = download_file(img_url, save_file)
             total_bytes += img_bytes
+
+        # 下载实况照片 (Live Photo) 对应的动态短视频
+        live_photo_urls = media_info.get("live_photo_urls") or []
+        for idx, live_url in enumerate(live_photo_urls, 1):
+            if live_url:
+                try:
+                    live_file = folder_path / f"{idx}_live.mp4"
+                    _add_log(f"🎬 发现第 {idx} 张为实况照片，正在下载动态视频...")
+                    live_bytes = download_file(live_url, live_file)
+                    total_bytes += live_bytes
+                    _add_log(f"✅ 第 {idx} 张实况动态视频下载完成 ({live_bytes / (1024 * 1024):.2f} MB)")
+                except Exception as le:
+                    _add_log(f"⚠️ 第 {idx} 张实况动图下载跳过: {le}")
+
         _add_log(f"✅ 图集全部下载完成! 总大小: {total_bytes / (1024 * 1024):.2f} MB")
 
         # 下载图文背景音乐 (BGM)
@@ -2987,7 +3233,7 @@ def download_single():
         _add_log(f"提取到作品 ID: {aweme_id}")
 
         # 3. 调用 API 获取详情
-        detail = client.get_video_detail(aweme_id)
+        detail = client.get_video_detail(aweme_id, share_url=final_url)
         _add_log("成功获取作品详情")
 
         # 4. 解析资源信息
@@ -3236,7 +3482,7 @@ def detect_url():
             nickname = "未知作者"
             cover = ""
             try:
-                detail = client.get_video_detail(aweme_id)
+                detail = client.get_video_detail(aweme_id, share_url=final_url)
                 media_info = DouyinClient.parse_media_info(detail)
                 title = media_info.get("title", "")
                 item_type = media_info.get("type", "video")

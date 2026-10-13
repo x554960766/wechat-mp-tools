@@ -168,6 +168,16 @@ class AccountPool:
                         break
 
             if not active:
+                # 若所有活跃账号均处于临时冷却中，取冷却剩余时间最短的账号兜底保活，避免阻断 mp/cover 等保底通道
+                cooldown_accs = [a for a in accounts if a.get("status") == "cooldown"]
+                if cooldown_accs:
+                    cooldown_accs.sort(key=lambda a: a.get("cooldown_until", 0))
+                    selected = cooldown_accs[0]
+                    selected["last_used"] = now
+                    changed = True
+                    if changed:
+                        self._save(accounts)
+                    return dict(selected)
                 if changed:
                     self._save(accounts)
                 return None
@@ -226,11 +236,29 @@ class AccountPool:
                     self._save(accounts)
                     return
 
+            # 处理 499 -2041 会话未激活：自动发起 mobileSync 激活会话
+            if ret == -2041 or (status_code == 499 and "2041" in str(error_msg or "")):
+                try:
+                    from backend.weread_signer import activate_terminal_session
+                    h = {
+                        "Cookie": acc.get("cookie_str", f"wr_vid={acc.get('vid')}; wr_skey={acc.get('skey')}"),
+                        "vid": str(acc.get("vid")),
+                        "skey": str(acc.get("skey")),
+                        "accessToken": str(acc.get("accessToken")),
+                    }
+                    if activate_terminal_session(h):
+                        logger.info("账号 [%s] 触发 -2041，已自动执行 mobileSync 激活服务端通道", acc.get("nickname"))
+                        acc["last_error"] = None
+                        self._save(accounts)
+                        return
+                except Exception as ex:
+                    logger.debug("自动激活异常: %s", ex)
+
             # 处理频控或风控 (如 429 或限流或 499 临时抖动)
-            if status_code in (429, 403, 499) or ret in (200013, -2013):
+            if status_code in (429, 403, 499) or ret in (200013, -2013, -2041):
                 acc["status"] = "cooldown"
-                acc["cooldown_until"] = now + 60.0  # 临时冷却 60 秒后自动恢复
-                acc["last_error"] = error_msg or f"请求频控或连接异常 (HTTP {status_code})，临时冷却 60 秒"
+                acc["cooldown_until"] = now + 120.0  # 临时冷却 120 秒后自动恢复
+                acc["last_error"] = error_msg or f"请求频控或连接异常 (HTTP {status_code})，临时冷却"
                 self._save(accounts)
                 return
 
@@ -303,6 +331,21 @@ class AccountPool:
                     logger.info("已将刷新后的 token 同步写入 weread_web/.session.json")
             except Exception as e:
                 logger.debug("同步 weread_web/.session.json 失败: %s", e)
+
+            # 换票成功后立即激活移动端会话 (shelf/sync 与 mp/list)，解除 -2041 拦截
+            try:
+                from backend.weread_signer import activate_terminal_session
+                auth_h = {
+                    "accessToken": new_token,
+                    "vid": str(vid),
+                    "basekey": new_token,
+                    "deviceId": did,
+                    "User-Agent": acc.get("userAgent", "WeRead/7.5.0 (Android; 33; arm64-v8a)"),
+                    "Cookie": acc.get("cookie_str", f"wr_vid={vid}; wr_skey={new_token}")
+                }
+                activate_terminal_session(auth_h)
+            except Exception as e:
+                logger.debug("激活终端会话异常: %s", e)
 
             return True
         else:
@@ -598,7 +641,7 @@ def borrow_weread_session() -> tuple[str, str, str, dict]:
     vid = str(acc.get("vid", ""))
     token = acc.get("accessToken") or acc.get("token", "")
     skey = acc.get("skey") or token
-    ua = "WeRead/7.5.0 (Android; 33; arm64-v8a)"
+    ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     headers = {
         "User-Agent": ua,
         "Content-Type": "application/json; charset=UTF-8",
