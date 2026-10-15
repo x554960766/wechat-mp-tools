@@ -8,7 +8,7 @@
 
 > [!TIP]
 > **开箱即用，无需配置本地 Python 开发环境！**
-> 本项目已通过 GitHub Actions 自动构建 Windows 与 macOS 双平台客户端。请直接前往 [👉 GitHub Releases 下载最新版本 (v2.2.0)](https://github.com/x554960766/wechatAutoRSSTool/releases)。
+> 本项目已通过 GitHub Actions 自动构建 Windows 与 macOS 双平台客户端。请直接前往 [👉 GitHub Releases 下载最新版本 (v2.2.1)](https://github.com/x554960766/wechatAutoRSSTool/releases)。
 
 ### 客户端选择指南
 
@@ -107,6 +107,13 @@ python3 app.py    # 浏览器模式（访问 http://localhost:5200）
 ---
 
 ## 📝 更新日志 (Changelog)
+
+### v2.2.1 (2026-10-15)
+- **📡 修复微信公众号 RSS 自动采集与调度异常**：
+  - 彻底修复开启公众号 RSS 自动订阅时因后端方法签名未对齐导致的 HTTP 500 报错（`AttributeError`）；
+  - 完善公众号订阅状态获取（`/rss-subscriptions`）、上传审计日志（`/rss-upload-log`）及强制上传（`/rss-force-upload`）数据闭环；
+  - 为 `RssScheduler` 增加公众号名称自动反查回退与别名兼容接口，大幅提升自动化容错能力；
+  - 补齐 PC 微信客户端凭证主动同步路由（`/sync-pc-wechat` 与 `/sync-batch-pc-wechat`）。
 
 ### v2.2.0 (2026-10-12)
 - **📱 微信公众号核心抓取引擎重构与频控攻坚（重大更新）**：

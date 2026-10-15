@@ -84,10 +84,30 @@ class RssScheduler:
                 return sub
         return None
 
-    def subscribe(self, fakeid: str, nickname: str, interval_minutes: int = 60) -> dict:
+    def subscribe(self, fakeid: str, nickname: str = "", interval_minutes: int = 60) -> dict:
         with self._lock:
             interval_minutes = self._normalize_interval_minutes(interval_minutes)
             subs = self.get_subscriptions()
+
+            # 若未传入 nickname，尝试从现有订阅或已收藏列表中恢复
+            if not nickname:
+                for s in subs:
+                    if s.get("fakeid") == fakeid and s.get("nickname"):
+                        nickname = s["nickname"]
+                        break
+                if not nickname:
+                    try:
+                        from backend.config import load_json, ACCOUNTS_FILE
+                        accounts = load_json(ACCOUNTS_FILE, [])
+                        for a in accounts:
+                            if a.get("fakeid") == fakeid or a.get("bookId") == fakeid:
+                                nickname = a.get("nickname", "")
+                                break
+                    except Exception:
+                        pass
+                if not nickname:
+                    nickname = fakeid
+
             for sub in subs:
                 if sub.get("fakeid") == fakeid:
                     old_interval = self._normalize_interval_minutes(sub.get("interval_minutes", 60))
@@ -129,6 +149,33 @@ class RssScheduler:
                 return False
             self._save_subscriptions(new_subs)
             return True
+
+    # ── 别名兼容方法 ───────────────────────────────────────
+
+    def add_subscription(self, fakeid: str, nickname: str = "", interval_minutes: int = 60) -> dict:
+        return self.subscribe(fakeid, nickname, interval_minutes)
+
+    def remove_subscription(self, fakeid: str) -> bool:
+        return self.unsubscribe(fakeid)
+
+    def list_subscriptions(self) -> dict:
+        from backend.config import load_json as _load_json, DOWNLOAD_HISTORY_FILE
+        subs = self.get_subscriptions()
+        history = _load_json(DOWNLOAD_HISTORY_FILE, [])
+        for sub in subs:
+            nick = sub.get("nickname", "")
+            sub["pending_upload_count"] = self.count_pending(history, nick)
+            sub["quarantined_count"] = self.count_quarantined(history, nick)
+        return {"subscriptions": subs}
+
+    def force_upload_account(self, fakeid: str) -> dict:
+        sub = self.get_subscription(fakeid)
+        if not sub:
+            return {"error": "未找到订阅", "success": False}
+        return self.force_upload_all(sub.get("nickname", ""))
+
+    def get_upload_logs(self, limit: int = 50, account: str | None = None) -> list:
+        return self.get_upload_log(limit=limit, account=account)
 
     # ── 文章存储 ──────────────────────────────────────────
 

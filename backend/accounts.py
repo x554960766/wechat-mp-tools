@@ -429,40 +429,134 @@ def get_user_subscribed_mps():
 
 @accounts_bp.route("/<fakeid>/rss-subscribe", methods=["POST"])
 def rss_subscribe(fakeid):
+    """开启 RSS 自动抓取订阅"""
     from backend.rss_scheduler import rss_scheduler
+
     data = request.get_json(silent=True) or {}
     interval = data.get("interval_minutes", 60)
-    sub = rss_scheduler.add_subscription(fakeid, interval_minutes=interval)
-    if not sub:
-        return jsonify({"error": "添加订阅失败，请确认公众号已收藏"}), 400
-    return jsonify({"message": "已启用 RSS 自动抓取", "subscription": sub})
+
+    # 从已收藏列表中查找公众号信息
+    accounts = _load_accounts()
+    target_book_id = biz_to_book_id(fakeid)
+    account = None
+    for acc in accounts:
+        if acc.get("fakeid") == fakeid or acc.get("bookId") == target_book_id:
+            account = acc
+            break
+
+    if not account:
+        return jsonify({"error": "请先收藏该公众号"}), 404
+
+    nickname = account.get("nickname", fakeid)
+    sub = rss_scheduler.subscribe(fakeid, nickname, interval)
+
+    immediate_fetch = rss_scheduler.is_in_fetch_window()
+    if immediate_fetch:
+        # 提交到线程池立即抓取，让 RSS 马上有内容
+        rss_scheduler.submit_fetch(sub)
+
+    message = f"已开启 RSS 订阅: {nickname}"
+    if not immediate_fetch:
+        message += "，当前不在采集时间段内，将在时间段内自动抓取"
+    return jsonify({"message": message, "subscription": sub, "immediate_fetch": immediate_fetch})
 
 
 @accounts_bp.route("/<fakeid>/rss-subscribe", methods=["DELETE"])
 def rss_unsubscribe(fakeid):
+    """关闭 RSS 自动抓取订阅"""
     from backend.rss_scheduler import rss_scheduler
-    ok = rss_scheduler.remove_subscription(fakeid)
-    if not ok:
-        return jsonify({"error": "未找到该订阅"}), 404
-    return jsonify({"message": "已停用 RSS 自动抓取"})
+
+    removed = rss_scheduler.unsubscribe(fakeid)
+    if not removed:
+        return jsonify({"error": "该公众号未订阅 RSS"}), 404
+
+    return jsonify({"message": "已取消 RSS 订阅"})
 
 
 @accounts_bp.route("/rss-subscriptions", methods=["GET"])
 def rss_subscriptions():
+    """获取所有 RSS 订阅状态（待上传/已隔离数实时从下载历史派生，保证单一事实来源）"""
     from backend.rss_scheduler import rss_scheduler
-    return jsonify(rss_scheduler.list_subscriptions())
+    from backend.config import load_json, DOWNLOAD_HISTORY_FILE
+
+    subs = rss_scheduler.get_subscriptions()
+    history = load_json(DOWNLOAD_HISTORY_FILE, [])
+    for sub in subs:
+        nickname = sub.get("nickname", "")
+        sub["pending_upload_count"] = rss_scheduler.count_pending(history, nickname)
+        sub["quarantined_count"] = rss_scheduler.count_quarantined(history, nickname)
+    return jsonify({"subscriptions": subs})
 
 
 @accounts_bp.route("/<fakeid>/rss-force-upload", methods=["POST"])
 def rss_force_upload(fakeid):
+    """强制上传该公众号所有待上传 + 历史未上传文章"""
     from backend.rss_scheduler import rss_scheduler
-    res = rss_scheduler.force_upload_account(fakeid)
-    return jsonify(res)
+
+    sub = rss_scheduler.get_subscription(fakeid)
+    if not sub or not sub.get("enabled"):
+        return jsonify({"error": "该公众号未开启 RSS 订阅"}), 404
+
+    nickname = sub.get("nickname", "")
+    result = rss_scheduler.force_upload_all(nickname)
+
+    # 同步更新订阅的上传状态
+    with rss_scheduler._lock:
+        subs = rss_scheduler.get_subscriptions()
+        for s in subs:
+            if s.get("fakeid") == fakeid:
+                if result.get("attempted"):
+                    s["last_upload_time"] = time.time()
+                    s["last_upload_count"] = result.get("count", 0)
+                s["last_upload_error"] = result.get("error")
+                s["pending_upload_count"] = result.get("pending_count", 0)
+                s["quarantined_count"] = result.get("quarantined", 0)
+                s["last_upload_attempted"] = result.get("attempted", False)
+                s["last_upload_disabled"] = result.get("disabled", False)
+                break
+        rss_scheduler._save_subscriptions(subs)
+
+    return jsonify(result)
 
 
 @accounts_bp.route("/rss-upload-log", methods=["GET"])
 def rss_upload_log():
+    """获取 RSS 上传审计日志（最近若干次上传记录）"""
     from backend.rss_scheduler import rss_scheduler
-    account = request.args.get("account")
-    limit = request.args.get("limit", 30, type=int)
-    return jsonify({"logs": rss_scheduler.get_upload_logs(account=account, limit=limit)})
+
+    limit = request.args.get("limit", default=30, type=int)
+    account = request.args.get("account") or None
+    log = rss_scheduler.get_upload_log(limit=limit, account=account)
+    return jsonify({"log": log, "logs": log})
+
+
+@accounts_bp.route("/sync-pc-wechat", methods=["POST"])
+def sync_pc_wechat():
+    """按需触发 PC 微信针对特定公众号的自动化同步（如搜索并点击该公众号文章）。"""
+    data = request.get_json(silent=True) or {}
+    keyword = (data.get("keyword") or "").strip() or "新京报"
+    try:
+        from scripts.auto_refresh_pc_wechat import trigger_pc_wechat_refresh
+        success = trigger_pc_wechat_refresh(keyword=keyword, force=True)
+        return jsonify({"success": success, "keyword": keyword})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@accounts_bp.route("/sync-batch-pc-wechat", methods=["POST"])
+def sync_batch_pc_wechat():
+    """全自动触发 UI 自动化一键为全部公众号建立主页授权会话"""
+    try:
+        import sys
+        if sys.platform == "darwin":
+            from scripts.auto_refresh_pc_wechat import run_batch_portal_flow_macos
+            success = run_batch_portal_flow_macos()
+        elif sys.platform == "win32":
+            from scripts.auto_refresh_pc_wechat import run_batch_portal_flow_windows
+            success = run_batch_portal_flow_windows()
+        else:
+            return jsonify({"error": f"不支持的操作系统: {sys.platform}"}), 400
+        return jsonify({"success": success})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
