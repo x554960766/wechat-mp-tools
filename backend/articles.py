@@ -3,6 +3,9 @@
 获取文章列表、搜索文章、管理下载任务
 """
 
+import os
+import sys
+import subprocess
 import json
 import time
 import re
@@ -36,21 +39,21 @@ def _get_session():
     return token, cookie_str
 
 
-def fetch_article_detail_content(url: str) -> str:
-    """抓取微信公众号文章网页并提取 HTML 正文（.rich_media_content），还原图片 data-src"""
+def fetch_article_detail_content(url: str, review_id: str = "") -> str:
+    """抓取微信公众号文章网页并提取 HTML 正文（.rich_media_content），还原图片 data-src
+    参考 we-mp-rss 优化：支持微信读书免风控正文接口、移动微信高仿请求与无头浏览器兜底
+    """
     import bs4
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    }
-    resp = req.get(url, headers=headers, timeout=20)
-    if resp.status_code != 200:
-        raise RuntimeError(f"HTTP {resp.status_code}")
+    from backend.downloader import fetch_wechat_article_html
 
-    soup = bs4.BeautifulSoup(resp.text, "html.parser")
-    content_node = soup.select_one(".rich_media_content") or soup.select_one("#js_content")
+    raw_html, _, error = fetch_wechat_article_html(url, review_id=review_id)
+    if not raw_html:
+        raise RuntimeError(error or "抓取文章内容失败")
+
+    soup = bs4.BeautifulSoup(raw_html, "html.parser")
+    content_node = soup.select_one(".rich_media_content") or soup.select_one("#js_content") or soup.select_one("#js_article")
     if not content_node:
-        return resp.text
+        return raw_html
 
     for img in content_node.find_all("img"):
         if img.get("data-src"):
@@ -65,9 +68,16 @@ _review_cache_lock = threading.Lock()
 
 
 def _resolve_review_doc_url(review_id: str, headers: dict) -> str:
-    """通过微信读书 review/single 接口解析原生微信推文链接 (doc_url)"""
+    """通过微信读书 review/single 接口解析原生微信推文链接 (优先解析为免风控短链)"""
     if not review_id:
         return ""
+    # 优先直接使用 review_id 包含的短链标识（如 MP_WXS_2940696320_yvrxT0XE-9ELBG4gQZhB4g -> yvrxT0XE-9ELBG4gQZhB4g）
+    # 短链在微信网关下直接返回文章内容，完全绕过长链接引发的风控验证码
+    if "_" in review_id:
+        sid = review_id.split("_")[-1]
+        if len(sid) >= 15:
+            return f"https://mp.weixin.qq.com/s/{sid}"
+
     with _review_cache_lock:
         if review_id in _review_url_cache:
             return _review_url_cache[review_id]
@@ -76,7 +86,12 @@ def _resolve_review_doc_url(review_id: str, headers: dict) -> str:
         s = get_weread_session()
         resp = s.get(url, headers=headers, timeout=6)
         if resp.status_code == 200:
-            doc_url = resp.json().get("review", {}).get("mpInfo", {}).get("doc_url", "")
+            mp_info = resp.json().get("review", {}).get("mpInfo", {})
+            orig_id = mp_info.get("originalId", "")
+            if orig_id and len(orig_id) >= 15:
+                doc_url = f"https://mp.weixin.qq.com/s/{orig_id}"
+            else:
+                doc_url = mp_info.get("doc_url", "")
             if doc_url:
                 with _review_cache_lock:
                     _review_url_cache[review_id] = doc_url
@@ -225,6 +240,10 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
         import concurrent.futures
         def _get_url(it):
             rid = it.get("reviewId", "")
+            if rid and "_" in rid:
+                sid = rid.split("_")[-1]
+                if len(sid) >= 15:
+                    return f"https://mp.weixin.qq.com/s/{sid}"
             doc_u = it.get("mpInfo", {}).get("doc_url", "")
             if doc_u:
                 return doc_u
@@ -436,17 +455,74 @@ def cancel_download(task_id):
 
 @articles_bp.route("/download-url", methods=["POST"])
 def download_by_url():
-    """通过 URL 下载单篇文章"""
+    """通过 URL 下载单篇/多篇文章 (带智能正则提取与批量标准短链转换)"""
     data = request.get_json() or {}
-    urls = data.get("urls", [])
-    if isinstance(urls, str):
-        urls = [u.strip() for u in urls.split("\n") if u.strip()]
+    raw_urls = data.get("urls", [])
+    if isinstance(raw_urls, str):
+        raw_urls = [u.strip() for u in raw_urls.split("\n") if u.strip()]
 
-    if not urls:
+    if not raw_urls:
         return jsonify({"error": "请输入文章 URL"}), 400
 
-    # 构造文章列表
-    articles = [{"title": f"article_{i+1}", "link": url} for i, url in enumerate(urls)]
+    import re
+    extracted_urls = []
+    for item in raw_urls:
+        if not item or not isinstance(item, str):
+            continue
+        # 兼容用户直接粘贴带有前后缀文本、标题或标点符号的微信推文链接
+        found = re.findall(r'https?://(?:mp\.weixin\.qq\.com/s[^\s\'"<>]+|mp\.weixin\.qq\.com/[^\s\'"<>]+)', item)
+        if found:
+            for u in found:
+                u = re.sub(r'[\)\]\>，。]+$', '', u)
+                if u not in extracted_urls:
+                    extracted_urls.append(u)
+        elif item.startswith("http://") or item.startswith("https://"):
+            u = item.strip()
+            if u not in extracted_urls:
+                extracted_urls.append(u)
+
+    if not extracted_urls:
+        return jsonify({"error": "未检测到有效的微信公众号文章链接"}), 400
+
+    # 批量将长链接预解析为免风控的标准短链与 reviewId
+    url_info_map = {}
+    long_urls_to_resolve = [u for u in extracted_urls if "__biz=" in u]
+    if long_urls_to_resolve:
+        try:
+            from backend.account_pool import borrow_weread_session, get_weread_session
+            acc_id, vid, tok, h = borrow_weread_session()
+            s = get_weread_session()
+            res = s.post("https://i.weread.qq.com/mp/getreviewid", json={"urls": long_urls_to_resolve}, headers=h, timeout=8).json()
+            for r_item in res.get("reviewIds", []):
+                orig_u = r_item.get("url", "")
+                rid = r_item.get("reviewId", "")
+                if rid and "_" in rid:
+                    sid = rid.split("_")[-1]
+                    if len(sid) >= 15:
+                        url_info_map[orig_u] = {
+                            "short_url": f"https://mp.weixin.qq.com/s/{sid}",
+                            "review_id": rid,
+                        }
+        except Exception as e:
+            logger.debug(f"[download_by_url] 批量预解析短链异常: {e}")
+
+    articles = []
+    for i, raw_u in enumerate(extracted_urls):
+        mapped = url_info_map.get(raw_u, {})
+        short_u = mapped.get("short_url")
+        rid = mapped.get("review_id", "")
+        if not rid and "/s/" in raw_u and "__biz=" not in raw_u:
+            sid_match = re.search(r'/s/([A-Za-z0-9_-]{15,})', raw_u)
+            if sid_match:
+                rid = f"MP_WXS_0_{sid_match.group(1)}"
+
+        articles.append({
+            "title": f"article_{i+1}",
+            "link": short_u or raw_u,
+            "id": rid,
+            "aid": rid,
+            "original_url": raw_u,
+        })
 
     task_id = f"url_{int(time.time())}"
 
@@ -459,6 +535,8 @@ def download_by_url():
             "current": "",
             "results": [],
             "start_time": time.time(),
+            "cancel_requested": False,
+            "stop_reason": "",
         }
 
     thread = threading.Thread(
@@ -468,7 +546,7 @@ def download_by_url():
     )
     thread.start()
 
-    return jsonify({"task_id": task_id, "message": f"已启动下载任务，共 {len(urls)} 篇"})
+    return jsonify({"task_id": task_id, "message": f"已启动下载任务，共 {len(articles)} 篇"})
 
 
 @articles_bp.route("/download-progress/<task_id>", methods=["GET"])
@@ -729,10 +807,11 @@ def _do_batch_download(task_id: str, articles: list, account_name: str):
             success = False
             error_msg = ""
             result = {}
+            review_id = article.get("id") or article.get("aid") or ""
 
             for attempt in range(1, max_retries + 1):
                 try:
-                    result = download_single_article(link, out_dir, title)
+                    result = download_single_article(link, out_dir, title, review_id=review_id)
                     if result.get("success"):
                         success = True
                         break
@@ -760,11 +839,12 @@ def _do_batch_download(task_id: str, articles: list, account_name: str):
                         "title": title, "success": False, "error": error_msg
                     })
 
+            real_account = result.get("author") or (account_name if account_name != "url_download" else "链接下载")
             # 记录到下载历史
             history.append({
                 "title": title,
-                "link": link,
-                "account": account_name,
+                "link": article.get("original_url") or link,
+                "account": real_account,
                 "success": success,
                 "time": time.time(),
                 "error": error_msg if not success else None,
@@ -777,7 +857,8 @@ def _do_batch_download(task_id: str, articles: list, account_name: str):
             })
 
             if i < len(articles) - 1:
-                time.sleep(delay)
+                import random
+                time.sleep(max(1.0, delay) + random.uniform(0.3, 1.2))
 
         # 保存历史
         save_json(DOWNLOAD_HISTORY_FILE, history)
@@ -793,6 +874,13 @@ def _do_batch_download(task_id: str, articles: list, account_name: str):
             task["end_time"] = time.time()
     except Exception as e:
         print(f"[_do_batch_download] 异常: {e}", flush=True)
+        save_json(DOWNLOAD_HISTORY_FILE, history)
+        with _download_lock:
+            task = _download_tasks.get(task_id, {})
+            task["status"] = "failed"
+            task["current"] = ""
+            task["stop_reason"] = str(e)
+            task["end_time"] = time.time()
 
 
 def _download_article_into_task(task_id: str, article: dict, account_name: str, history: list, index: int = 0):
@@ -806,6 +894,7 @@ def _download_article_into_task(task_id: str, article: dict, account_name: str, 
 
     link = article.get("link", "")
     title = article.get("title", f"article_{index + 1}")
+    review_id = article.get("id") or article.get("aid") or ""
 
     with _download_lock:
         _download_tasks[task_id]["current"] = title
@@ -823,7 +912,7 @@ def _download_article_into_task(task_id: str, article: dict, account_name: str, 
     result = {}
     for _ in range(max_retries):
         try:
-            result = download_single_article(link, out_dir, title)
+            result = download_single_article(link, out_dir, title, review_id=review_id)
             if result.get("success"):
                 success = True
                 break
@@ -994,7 +1083,10 @@ def open_folder():
         if sys.platform == "darwin":
             subprocess.run(["open", resolved_path])
         elif sys.platform == "win32":
-            os.startfile(resolved_path)
+            if hasattr(os, "startfile"):
+                os.startfile(resolved_path)
+            else:
+                subprocess.run(["explorer", resolved_path])
         else:
             subprocess.run(["xdg-open", resolved_path])
         return jsonify({"message": "文件夹已打开"})
@@ -1038,7 +1130,10 @@ def open_file():
         if sys.platform == "darwin":
             subprocess.run(["open", resolved_path])
         elif sys.platform == "win32":
-            os.startfile(resolved_path)
+            if hasattr(os, "startfile"):
+                os.startfile(resolved_path)
+            else:
+                subprocess.run(["explorer", resolved_path])
         else:
             subprocess.run(["xdg-open", resolved_path])
         return jsonify({"message": "已打开"})
@@ -1074,7 +1169,10 @@ def open_parent():
             if sys.platform == "darwin":
                 subprocess.run(["open", resolved_path])
             elif sys.platform == "win32":
-                os.startfile(resolved_path)
+                if hasattr(os, "startfile"):
+                    os.startfile(resolved_path)
+                else:
+                    subprocess.run(["explorer", resolved_path])
             else:
                 subprocess.run(["xdg-open", resolved_path])
         return jsonify({"message": "已打开"})

@@ -8,15 +8,19 @@
 
 > [!TIP]
 > **开箱即用，无需配置本地 Python 开发环境！**
-> 本项目已通过 GitHub Actions 自动构建 Windows 与 macOS 双平台客户端。请直接前往 [👉 GitHub Releases 下载最新版本 (v2.2.1)](https://github.com/x554960766/wechatAutoRSSTool/releases)。
+> 本项目已通过 GitHub Actions 自动构建 Windows 与 macOS 双平台客户端。请直接前往 [👉 GitHub Releases 下载最新版本 (v2.2.2)](https://github.com/x554960766/wechatAutoRSSTool/releases)。
 
-### 客户端选择指南
+### 📦 安装包版本说明（Full 完整版 vs Lite 精简版）
 
-| 系统平台 | 产物推荐 | 说明 |
+在 [GitHub Releases 发布页面](https://github.com/x554960766/wechatAutoRSSTool/releases) 中，每个系统平台均提供了 **Full（完整版）** 与 **Lite（精简版）** 两个打包安装包，二者业务功能完全一致，区别在于是否内置独立的浏览器内核：
+
+| 对比维度 | 🌟 Full (完整版) | ⚡ Lite (轻量精简版) |
 | :--- | :--- | :--- |
-| **macOS (Apple Silicon)** | `WeChat_MP_Tools_macOS_Lite.zip` | 适用于 M1/M2/M3/M4 芯片 Mac（原生 ARM64 极速运行） |
-| **macOS (Intel)** | `WeChat_MP_Tools_macOS_Lite.zip` | 适用于 Intel 芯片 Mac |
-| **Windows** | `WeChat_MP_Tools_Windows_Lite.zip` | 适用于 Win10 / Win11（内置自动检测与引导安装 WebView2） |
+| **压缩包体积** | 约 **200 MB ~ 240 MB** | 约 **40 MB ~ 60 MB**（体积小，极速下载） |
+| **内置浏览器** | **内置独立专用的 Chromium 浏览器核心** | **不内置浏览器内核**，安装包极为精炼 |
+| **外部运行依赖** | **零外部依赖**。电脑上无需安装任何浏览器即可开箱即用 | **依赖系统浏览器**（需要电脑已安装 Google Chrome 或 Microsoft Edge） |
+| **防风控与无头渲染** | 使用内置独立纯净浏览器沙盒，不受外部浏览器更新与配置干扰 | 运行时自动探测并接管调用本机已安装的 Chrome / Edge 浏览器 |
+| **推荐适用人群** | **强烈推荐大多数用户 / 电脑环境较干净的用户使用**，最省心稳定 | **电脑已装有 Chrome/Edge、追求小体积与快速下载的用户** |
 
 ---
 
@@ -107,6 +111,21 @@ python3 app.py    # 浏览器模式（访问 http://localhost:5200）
 ---
 
 ## 📝 更新日志 (Changelog)
+
+### v2.2.2 (2026-10-16)
+- **📱 微信公众号抓取底层升级与防风控验证码根治（核心重大优化）**：
+  - **破解微信长链接验证码拦截 (`wappoc_appmsgcaptcha`)**：深入分析微信安全网关针对带参数长链接（`__biz=...`）的匿名访问拦截机制，彻底攻克直接请求触发“环境异常，完成验证后即可继续访问”验证码的痛点；
+  - **自动免验证标准短链映射机制 (`/s/{short_id}`)**：新增推文标准短链无感转换通道，通过微信读书 `reviewId` 及接口秒级将长链接映射为官方白名单短链，直接返回 200 OK 并取得全量文章正文与多媒体资源；
+  - **三级防风控平滑抓取架构**：短链高速直通通道 + 移动端高仿真环境（真实 `XWEB / MMWEBSDK` + `X-Requested-With: com.tencent.mm`）+ 无头 Chromium 反爬补丁脚本兜底接管；
+  - **网址下载全面强化**：
+    - 支持智能正则提取推文 URL，完美兼容用户直接粘贴带有文本、标题与标点符号的微信分享内容；
+    - 支持多行长链接批量秒级预解析短链，全链路免验证码平滑下载；
+    - 自动提取推文真实作者与公众号名称（如“潇湘晨报”），下载历史不再显示笼统的 `url_download`；
+    - 批量下载增加拟人化随机抖动延迟（1.0s~2.2s），防止触发微信 IP 频控限制；
+    - 网址下载面板新增 **“⏹️ 停止下载”** 按钮，支持随时平滑中断未完成任务。
+- **🛠️ 跨平台与系统稳定性修复**：
+  - **修复 Windows 打开文件夹报错**：彻底修复 Windows 平台下点击“打开文件夹”提示 `name 'os' is not defined` 的问题，完善资源管理器 fallback 调起容灾；
+  - **修复批量下载线程异常**：修复特定变量作用域问题，保障多篇连续下载时后台线程的持续稳定性。
 
 ### v2.2.1 (2026-10-15)
 - **📡 修复微信公众号 RSS 自动采集与调度异常**：

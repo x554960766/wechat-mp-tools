@@ -46,9 +46,14 @@ const DownloadPage = {
                             <h3 class="card-title" style="color: #000000;">📥 下载进度</h3>
                             <span class="badge badge-info" id="url-download-badge">下载中</span>
                         </div>
-                        <button class="btn btn-primary btn-sm" onclick="DownloadPage.openFolder()" style="padding: 4px 10px; font-size: 0.85rem;">
-                            📂 打开下载目录
-                        </button>
+                        <div style="display: flex; align-items: center; gap: 8px;">
+                            <button class="btn btn-secondary btn-sm" id="btn-cancel-url-download" onclick="DownloadPage.cancelDownload()" style="padding: 4px 10px; font-size: 0.85rem; color: #dc2626; border-color: #fca5a5;">
+                                ⏹️ 停止下载
+                            </button>
+                            <button class="btn btn-primary btn-sm" onclick="DownloadPage.openFolder()" style="padding: 4px 10px; font-size: 0.85rem;">
+                                📂 打开下载目录
+                            </button>
+                        </div>
                     </div>
                     <div class="progress-bar" style="margin-top: 12px;">
                         <div class="progress-fill" id="url-progress-bar" style="width: 0%"></div>
@@ -83,18 +88,33 @@ const DownloadPage = {
             return;
         }
 
-        const urls = text.split('\n')
-            .map(u => u.trim())
-            .filter(u => u && u.startsWith('http'));
+        // 智能提取微信文章 URL（支持纯链接、多行链接、以及携带文字前缀后缀的分享内容）
+        const urlMatches = text.match(/https?:\/\/[^\s'"<>]+/g) || [];
+        let urls = urlMatches
+            .map(u => u.replace(/[)\]>，。]+$/, '').trim())
+            .filter(u => u.includes('mp.weixin.qq.com'));
 
         if (urls.length === 0) {
-            Toast.warning('未检测到有效的 URL');
+            urls = text.split('\n')
+                .map(u => u.trim())
+                .filter(u => u && (u.startsWith('http://') || u.startsWith('https://')));
+        }
+
+        if (urls.length === 0) {
+            Toast.warning('未检测到有效的微信公众号文章 URL');
             return;
         }
 
         const btn = document.getElementById('btn-url-download');
         btn.disabled = true;
         btn.textContent = '启动中...';
+
+        const cancelBtn = document.getElementById('btn-cancel-url-download');
+        if (cancelBtn) {
+            cancelBtn.style.display = 'inline-block';
+            cancelBtn.disabled = false;
+            cancelBtn.textContent = '⏹️ 停止下载';
+        }
 
         try {
             const data = await API.articles.downloadByUrl(urls);
@@ -111,6 +131,21 @@ const DownloadPage = {
         }
     },
 
+    async cancelDownload() {
+        if (!this.downloadTaskId) return;
+        try {
+            await API.articles.cancelDownload(this.downloadTaskId);
+            Toast.info('已请求停止下载');
+            const cancelBtn = document.getElementById('btn-cancel-url-download');
+            if (cancelBtn) {
+                cancelBtn.disabled = true;
+                cancelBtn.textContent = '正在停止...';
+            }
+        } catch (err) {
+            // shown by API
+        }
+    },
+
     startProgressPolling() {
         if (this._pollTimer) clearInterval(this._pollTimer);
 
@@ -119,7 +154,7 @@ const DownloadPage = {
                 const task = await API.articles.downloadStatus(this.downloadTaskId);
                 this.updateProgress(task);
 
-                if (task.status === 'completed' || task.status === 'failed') {
+                if (task.status === 'completed' || task.status === 'failed' || task.status === 'cancelled') {
                     clearInterval(this._pollTimer);
                     this._pollTimer = null;
                 }
@@ -143,13 +178,21 @@ const DownloadPage = {
         document.getElementById('url-download-total').textContent = total;
 
         const badge = document.getElementById('url-download-badge');
+        const cancelBtn = document.getElementById('btn-cancel-url-download');
+
         if (task.status === 'completed') {
             badge.className = 'badge badge-success';
             badge.textContent = '已完成';
+            if (cancelBtn) cancelBtn.style.display = 'none';
             Toast.success(`下载完成！成功 ${completed} 篇，失败 ${failed} 篇`);
         } else if (task.status === 'failed') {
             badge.className = 'badge badge-error';
             badge.textContent = '失败';
+            if (cancelBtn) cancelBtn.style.display = 'none';
+        } else if (task.status === 'cancelled') {
+            badge.className = 'badge badge-warning';
+            badge.textContent = '已停止';
+            if (cancelBtn) cancelBtn.style.display = 'none';
         }
 
         const note = document.getElementById('url-download-note');

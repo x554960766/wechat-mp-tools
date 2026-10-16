@@ -529,7 +529,7 @@ const ArticlesPage = {
     async downloadSingle(localIdx) {
         const article = this.articles[localIdx];
         if (!article) return;
-        await this.downloadArticles([{ title: article.title, link: article.link }]);
+        await this.downloadArticles([{ title: article.title, link: article.link, id: article.id, aid: article.id }]);
     },
 
     async downloadSelected() {
@@ -537,7 +537,7 @@ const ArticlesPage = {
         this.selectedArticles.forEach(globalIdx => {
             const article = this.loadedArticlesMap.get(globalIdx);
             if (article && article.link) {
-                selectedList.push({ title: article.title, link: article.link });
+                selectedList.push({ title: article.title, link: article.link, id: article.id, aid: article.id });
             }
         });
 
