@@ -8,7 +8,7 @@
 
 > [!TIP]
 > **开箱即用，无需配置本地 Python 开发环境！**
-> 本项目已通过 GitHub Actions 自动构建 Windows 与 macOS 双平台客户端。请直接前往 [👉 GitHub Releases 下载最新版本 (v2.2.2)](https://github.com/x554960766/wechatAutoRSSTool/releases)。
+> 本项目已通过 GitHub Actions 自动构建 Windows 与 macOS 双平台客户端。请直接前往 [👉 GitHub Releases 下载最新版本 (v2.2.3)](https://github.com/x554960766/wechatAutoRSSTool/releases)。
 
 ### 📦 安装包版本说明（Full 完整版 vs Lite 精简版）
 
@@ -111,6 +111,12 @@ python3 app.py    # 浏览器模式（访问 http://localhost:5200）
 ---
 
 ## 📝 更新日志 (Changelog)
+
+### v2.2.3 (2026-10-19)
+- **🚀 客户端构建与打包发布流水线优化**：
+  - 更新项目版本至 `v2.2.3`，触发 GitHub Actions 双平台（Windows / macOS）全自动矩阵构建；
+  - 优化跨平台构建产物同步逻辑，完善 Windows 与 macOS 客户端 Release 自动发布与附件关联；
+  - 提升推文长短链转换、验证码规避及网络下载容灾稳定性。
 
 ### v2.2.2 (2026-10-16)
 - **📱 微信公众号抓取底层升级与防风控验证码根治（核心重大优化）**：
