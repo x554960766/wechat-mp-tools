@@ -4,7 +4,7 @@
 
 > [!TIP]
 > **桌面端开箱即用，无需配置 Python 开发环境！**
-> 本项目已通过 GitHub Actions 自动构建 Windows 与 macOS 双平台客户端。可直接前往 [👉 GitHub Releases 下载最新客户端](https://github.com/x554960766/wechat-mp-tools/releases)。
+> 本项目已通过 GitHub Actions 自动构建 Windows 与 macOS（同时支持 Apple Silicon ARM64 及 Intel x86_64 架构）客户端。可直接前往 [👉 GitHub Releases 下载最新客户端](https://github.com/x554960766/wechat-mp-tools/releases)。
 
 ---
 
