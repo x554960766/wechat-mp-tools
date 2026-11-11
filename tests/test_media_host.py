@@ -79,6 +79,45 @@ def test_media_root_env_without_index(tmp_path):
     assert roots == ["articles-full"]
 
 
+def _orphan_host(tmp_path, *, healthy: bool, port_open: bool, killed: list, pid: int = 424242):
+    host = mh.MediaHost(port=9998, media_root=str(tmp_path), data_dir=str(tmp_path / "media"))
+    monkeypatch_targets = {
+        "_read_pid_file": lambda: pid,
+        "_pid_alive": lambda p: True,
+        "_is_healthy": lambda: healthy,
+        "_port_open": lambda: port_open,
+        "_terminate_pid": lambda p: killed.append(p),
+    }
+    for name, fn in monkeypatch_targets.items():
+        setattr(host, name, fn)
+    return host
+
+
+def test_adopt_orphan_does_not_kill_reused_pid(tmp_path):
+    """PID 被系统复用给无关进程时，端口空着就不能按 pid 直接 kill。"""
+    killed: list = []
+    host = _orphan_host(tmp_path, healthy=False, port_open=False, killed=killed)
+    assert host._adopt_orphan() is False
+    assert killed == []
+
+
+def test_adopt_orphan_reclaims_hung_process_holding_port(tmp_path):
+    """端口仍被占着且健康检查失败：判定为卡死的媒体子进程，可以回收。"""
+    killed: list = []
+    host = _orphan_host(tmp_path, healthy=False, port_open=True, killed=killed)
+    assert host._adopt_orphan() is False
+    assert killed == [424242]
+
+
+def test_adopt_orphan_reuses_healthy_process(tmp_path):
+    killed: list = []
+    host = _orphan_host(tmp_path, healthy=True, port_open=True, killed=killed)
+    assert host._adopt_orphan() is True
+    assert killed == []
+    assert host._external_pid == 424242
+    assert host._state == "running"
+
+
 def test_filter_resp_headers_is_case_insensitive():
     headers = {
         "content-type": "image/webp",

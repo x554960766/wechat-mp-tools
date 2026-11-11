@@ -350,6 +350,18 @@ class MediaHost:
             return False
         return True
 
+    def _port_open(self, timeout: float = 0.5) -> bool:
+        """端口上是否有人监听。
+
+        用于确认「pid 文件里的进程」是否还占着媒体端口——这是判断它
+        是不是我们上次遗留的子进程的唯一可靠依据（不依赖 ps）。
+        """
+        try:
+            with socket.create_connection(("127.0.0.1", self.port), timeout=timeout):
+                return True
+        except OSError:
+            return False
+
     def _adopt_orphan(self) -> bool:
         """复用上次 wmp 进程留下的媒体子进程。
 
@@ -369,7 +381,11 @@ class MediaHost:
                 self._last_error = None
                 log.warning("复用已在运行的媒体服务 pid=%s（上次 wmp 退出时未清理）", pid)
                 return True
-            self._terminate_pid(pid)
+            # pid 文件可能指向已被系统复用给无关进程的 PID：端口没人监听时
+            # 不能按 pid 直接 kill，否则会误伤。只有端口仍被占用，才认定它
+            # 是上次遗留、卡死不响应的媒体子进程。
+            if self._port_open():
+                self._terminate_pid(pid)
             self._remove_pid_file()
             return False
         if pid:
