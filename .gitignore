@@ -55,3 +55,14 @@ wechat-mp-server/
 *.recovered
 *.spec.bak
 *.pyc
+
+# ai-media (fork): media service runtime data and venv
+# 显式写出 .venv/ 与 data/media/：wmp 的 venv*/ 不匹配 .venv/，data/ 规则将来可能细化
+.venv/
+data/media/
+.pytest_cache/
+.serena/
+
+# 本机 Obsidian 软链（绝对路径，不入库）
+docs/api
+docs/specs

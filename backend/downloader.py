@@ -13,6 +13,7 @@ import signal
 import shutil
 import subprocess
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs, quote, unquote
@@ -32,6 +33,30 @@ from backend.request_profile import (
 )
 
 logger = logging.getLogger(__name__)
+
+# 正文配图下载口径（与 docs/specs/wmp-hosted-media-service.md §6.1 对齐）
+IMAGE_CONCURRENCY = 4
+IMAGE_TIMEOUT = 15.0
+IMAGE_RETRIES = 2
+IMAGE_REFERER = "https://mp.weixin.qq.com/"
+MIN_BODY_IMAGE_SIDE = 80
+
+
+def _is_tiny_image(path: Path) -> bool:
+    """短边小于阈值的小图视为图标/分隔线，不参与归档。
+
+    Pillow 不可用时不做判断（宁可多收一张图，也不让主链路依赖可选包）。
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return False
+    try:
+        with Image.open(path) as image:
+            width, height = image.size
+    except Exception:  # noqa: BLE001 - 打不开的交由后续流程当作坏图
+        return False
+    return min(width, height) < MIN_BODY_IMAGE_SIDE
 
 
 MPVIDEO_RE = re.compile(r'(?:https?:)?//mpvideo\.qpic\.cn/[^"\'\s<>]+?\.mp4(?:\?[^"\'\s<>]+)?', re.I)
@@ -636,15 +661,35 @@ def normalize_url(url: str) -> str:
     return url
 
 
-def download_resource(url: str, path: Path) -> str | None:
+def download_resource(
+    url: str,
+    path: Path,
+    *,
+    timeout: float = 60,
+    retries: int = 0,
+    referer: str = "",
+) -> str | None:
     """下载单个资源文件，返回实际落盘的文件名；失败返回 None。
 
     三个约束：
-    1. 走独立 CDN 客户端 —— 不携带 Cookie、不发送 Referer，与数据会话完全隔离；
+    1. 走独立 CDN 客户端 —— 不携带 Cookie，与数据会话完全隔离；图片类请求
+       可以显式传 ``referer``（微信 CDN 对无 Referer 的抓取更严），默认不带；
     2. 先写 .part 临时文件，按文件头魔数确定后缀后原子改名，避免半截文件被当成成品；
     3. 后缀以真实字节为准，不信任 Content-Type 与 URL 里的 wx_fmt 参数
        （微信同一地址可能返回 jpg/png/webp，两者经常对不上）。
     """
+    headers = {"Referer": referer} if referer else None
+    attempts = max(0, int(retries)) + 1
+    for attempt in range(attempts):
+        result = _download_resource_once(url, path, timeout=timeout, headers=headers)
+        if result:
+            return result
+        if attempt + 1 < attempts:
+            time.sleep(0.5 * (attempt + 1))
+    return None
+
+
+def _download_resource_once(url: str, path: Path, *, timeout: float, headers: dict | None) -> str | None:
     proxy_url = None
     part = path.with_name(path.name + ".part")
     try:
@@ -653,8 +698,9 @@ def download_resource(url: str, path: Path) -> str | None:
         r = get_cdn_client().get(
             url,
             proxies=proxies,
-            timeout=60,
+            timeout=timeout,
             stream=True,
+            headers=headers,
         )
         r.raise_for_status()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1290,16 +1336,27 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "", _redi
 
     # 下载图片
     url_map = {}
+    image_stats = {"expected": 0, "saved": 0, "failed": 0, "skipped": 0}
     if save_images:
         img_urls = set()
 
         # 优先下载封面图
         if cover_url:
+            image_stats["expected"] += 1
             cover_ext = get_ext(cover_url) or "jpg"
             cover_filename = f"cover.{cover_ext}"
-            real_cover = download_resource(cover_url, media_dir / cover_filename)
+            real_cover = download_resource(
+                cover_url,
+                media_dir / cover_filename,
+                timeout=IMAGE_TIMEOUT,
+                retries=IMAGE_RETRIES,
+                referer=IMAGE_REFERER,
+            )
             if real_cover:
                 url_map[cover_url] = f"media/{real_cover}"
+                image_stats["saved"] += 1
+            else:
+                image_stats["failed"] += 1
 
         # 仅在文章正文 content_html 内提取图片，避免下载外部页眉、页脚、微信小图标等多余资源
         for m in re.finditer(r'data-src="([^"]*mmbiz[^"]*)"', content_html):
@@ -1310,14 +1367,40 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "", _redi
         video_covers = {normalize_url(v["cover"]) for v in video_iframes if v.get("cover")}
         img_urls = {u for u in img_urls if u not in video_covers}
 
-        for i, img_url in enumerate(img_urls, 1):
-            if img_url in url_map:
-                continue
-            ext = get_ext(img_url)
-            fname = f"img_{i:03d}.{ext}"
-            real_img = download_resource(img_url, media_dir / fname)
-            if real_img:
-                url_map[img_url] = f"media/{real_img}"
+        # 排序后再编号：集合的迭代顺序不保证稳定，落盘文件名要可复现。
+        ordered = sorted(u for u in img_urls if u not in url_map)
+        image_stats["expected"] += len(ordered)
+
+        def _fetch(item):
+            index, img_url = item
+            real = download_resource(
+                img_url,
+                media_dir / f"img_{index:03d}.{get_ext(img_url)}",
+                timeout=IMAGE_TIMEOUT,
+                retries=IMAGE_RETRIES,
+                referer=IMAGE_REFERER,
+            )
+            return img_url, real
+
+        # 并发 4 路下载：批量归档时逐张串行会把单篇耗时拉成几十秒。
+        # 单张失败只计数，不影响整篇落盘；<80px 的小图落地后剔除，不写进 HTML。
+        if ordered:
+            with ThreadPoolExecutor(
+                max_workers=IMAGE_CONCURRENCY, thread_name_prefix="img-dl"
+            ) as pool:
+                for img_url, real_img in pool.map(_fetch, list(enumerate(ordered, 1))):
+                    if not real_img:
+                        image_stats["failed"] += 1
+                        continue
+                    if _is_tiny_image(media_dir / real_img):
+                        try:
+                            (media_dir / real_img).unlink()
+                        except OSError:
+                            pass
+                        image_stats["skipped"] += 1
+                        continue
+                    url_map[img_url] = f"media/{real_img}"
+                    image_stats["saved"] += 1
 
     # 下载视频
     if save_videos:
@@ -1507,9 +1590,13 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "", _redi
             pass
 
     # 保存元数据
+    from backend import media_sync
+
+    article_key = media_sync.normalize_article_url(url)
     meta = {
         "title": safe_title,
         "url": url,
+        "article_key": article_key,
         "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "publish_time": publish_time,
         "cover_url": cover_url,
@@ -1518,6 +1605,7 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "", _redi
         "digest": digest,
         "source": source,
         "author": author,
+        "images": image_stats,
         "resources_count": len(url_map),
         "videos_count": len(video_iframes),
         "leftover_urls": len(find_mmbiz_urls(localized)),
@@ -1533,12 +1621,20 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "", _redi
         encoding="utf-8"
     )
 
+    # 通知媒体服务做一次防抖后的增量扫描；媒体服务没装/没起来时静默跳过。
+    try:
+        media_sync.notify_scan(f"{safe_title}")
+    except Exception:  # noqa: BLE001 - 索引维护不能影响归档结果
+        logger.debug("媒体扫描通知失败", exc_info=True)
+
     return {
         "success": True,
         "title": safe_title,
         "source": source,
         "author": author or source,
         "path": str(art_dir),
+        "article_key": article_key,
+        "images": image_stats,
         "resources": len(url_map),
         "cover_url": cover_url,
         "digest": digest,

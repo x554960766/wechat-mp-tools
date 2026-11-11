@@ -96,6 +96,13 @@ app.register_blueprint(bilibili_login_bp)
 app.register_blueprint(updater_bp)
 app.register_blueprint(waterwall_bp)
 
+# ── AI 媒体服务反代（必须在 SPA 兜底 /<path:path> 之前注册）──
+from backend.media_host import MediaHost, init_blueprint
+media_host = MediaHost()
+app.config["MEDIA_HOST_OBJ"] = media_host
+app.register_blueprint(init_blueprint(app))
+media_host.start_in_thread()
+
 
 # 确保必要目录与数据库结构就绪
 ensure_dirs()
@@ -157,7 +164,7 @@ def healthz():
     """容器健康检查（桌面版也可用，方便统一探针）"""
     from flask import jsonify
     from backend.config import APP_VERSION
-    return jsonify({"status": "ok", "version": APP_VERSION, "mode": "full"})
+    return jsonify({"status": "ok", "version": APP_VERSION, "mode": "full", "media": media_host.status()})
 
 
 @app.route("/api/capabilities")

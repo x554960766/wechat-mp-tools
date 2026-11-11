@@ -14,6 +14,7 @@
 flask>=3.0
 flask-cors>=4.0
 requests>=2.31
+Pillow>=10.0
 beautifulsoup4>=4.12
 playwright>=1.40
 pymysql>=1.1.0

@@ -13,6 +13,8 @@ const Router = {
             'login': LoginPage,
             'accounts': AccountsPage,
             'articles': ArticlesPage,
+            'media_search': typeof MediaSearchPage !== 'undefined' ? MediaSearchPage : null,
+            'media_archive': typeof MediaArchivePage !== 'undefined' ? MediaArchivePage : null,
             'download': DownloadPage,
             'history': HistoryPage,
             'channels': ChannelsPage,
