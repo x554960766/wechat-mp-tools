@@ -158,6 +158,7 @@ def save_settings(settings: dict):
 # ── 代理管理器全局状态管理 ────────────────────────────────────
 _proxy_states = {}                  # 代理节点状态, key: raw_host, val: {"failures": 0, "last_used": 0.0, "cooldown_until": 0.0}
 _resolved_to_template_map = {}      # 动态子域名映射回模板, key: resolved_url, val: raw_host
+_wildcard_host_cache = {}           # 通配符子域名短时复用缓存 (30s)，key: raw_host, val: (expire_at, actual_host)
 _proxy_lock = threading.Lock()
 
 
@@ -257,9 +258,15 @@ def get_proxy_url(config: dict = None) -> str | None:
         proxy_type = selected_node.get("type", "http")
         raw_host = selected_node["host"]
         
-        # 负载均衡：节点中带通配符 * 时，自动替换为随机子域名以提高并发与防止单 IP 被微信限流
+        # 负载均衡：节点中带通配符 * 时，短时间（30秒）内复用子域名，
+        # 既保证单篇各资源复用连接池提升吞吐与防止大量创建连接池泄露，又兼顾定时轮换
         if "*" in raw_host:
-            actual_host = raw_host.replace("*", f"node-{get_random_subdomain()}")
+            cached_host = _wildcard_host_cache.get(raw_host)
+            if cached_host and cached_host[0] > current_time:
+                actual_host = cached_host[1]
+            else:
+                actual_host = raw_host.replace("*", f"node-{get_random_subdomain()}")
+                _wildcard_host_cache[raw_host] = (current_time + 30.0, actual_host)
         else:
             actual_host = raw_host
             
@@ -278,6 +285,9 @@ def get_proxy_url(config: dict = None) -> str | None:
             actual_url = f"http://{auth}{actual_host}{port_str}"
             
         with _proxy_lock:
+            if len(_resolved_to_template_map) > 200:
+                for old_k in list(_resolved_to_template_map.keys())[:100]:
+                    _resolved_to_template_map.pop(old_k, None)
             _resolved_to_template_map[actual_url] = raw_host
             
         return actual_url
@@ -290,7 +300,12 @@ def get_proxy_url(config: dict = None) -> str | None:
     proxy_type = config.get("type", "http")
     
     if "*" in host:
-        actual_host = host.replace("*", f"node-{get_random_subdomain()}")
+        cached_host = _wildcard_host_cache.get(host)
+        if cached_host and cached_host[0] > current_time:
+            actual_host = cached_host[1]
+        else:
+            actual_host = host.replace("*", f"node-{get_random_subdomain()}")
+            _wildcard_host_cache[host] = (current_time + 30.0, actual_host)
     else:
         actual_host = host
         
@@ -309,6 +324,9 @@ def get_proxy_url(config: dict = None) -> str | None:
         actual_url = f"http://{auth}{actual_host}{port_str}"
         
     with _proxy_lock:
+        if len(_resolved_to_template_map) > 200:
+            for old_k in list(_resolved_to_template_map.keys())[:100]:
+                _resolved_to_template_map.pop(old_k, None)
         _resolved_to_template_map[actual_url] = host
         
     return actual_url
@@ -340,6 +358,10 @@ def report_proxy_status(proxy_url: str, success: bool):
                         break
             except Exception:
                 raw_host = proxy_url
+
+        # 请求失败时立即清除通配符短时复用缓存，确保重试时立即换用新节点/子域名
+        if not success and raw_host in _wildcard_host_cache:
+            _wildcard_host_cache.pop(raw_host, None)
                 
         state = _proxy_states.get(raw_host)
         if not state:

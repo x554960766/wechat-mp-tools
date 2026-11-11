@@ -345,20 +345,62 @@ def get_user_subscribed_mps():
 
     def _safe_get(u):
         nonlocal acc_id, headers
-        try:
-            r = s.get(u, headers=headers, timeout=8)
-            if r.status_code == 401:
-                account_pool.report(acc_id, status_code=401)
-                acc_id, vid, token, headers = borrow_weread_session()
-                r = s.get(u, headers=headers, timeout=8)
-            elif r.status_code == 499 and "-2041" in r.text:
-                from backend.weread_signer import activate_terminal_session
-                activate_terminal_session(headers, session=s)
-                r = s.get(u, headers=headers, timeout=8)
-            return r if r.status_code == 200 else None
-        except Exception as ex:
-            logger.debug("[user-mps] 请求 %s 异常: %s", u, ex)
-            return None
+        from backend.waterwall import detect_waterwall, waterwall_hit, record_failure
+        for att in range(2):
+            try:
+                r = s.get(u, headers=headers, timeout=10)
+                # 优先检测防水墙
+                ww = detect_waterwall(r.status_code, r.text)
+                if ww:
+                    record_failure(u, r.status_code, r.headers, r.text, ww)
+                    waterwall_hit(u, r.status_code, ww)
+                    return r
+
+                if r.status_code == 401:
+                    account_pool.report(acc_id, status_code=401)
+                    acc_id, vid, token, headers = borrow_weread_session()
+                    time.sleep(0.5)
+                    continue
+
+                if r.status_code in (429, 499):
+                    # -2014 频控: 退避 2.5s 降频重试
+                    if "-2014" in r.text:
+                        time.sleep(2.5)
+                        try:
+                            r_retry = s.get(u, headers=headers, timeout=10)
+                            if r_retry.status_code == 200:
+                                return r_retry
+                        except Exception:
+                            pass
+                        record_failure(u, r.status_code, r.headers, r.text, "-2014")
+                        waterwall_hit(u, r.status_code, "-2014")
+                        return r
+                    # -2012 超时: 0.5s 重试
+                    elif "-2012" in r.text:
+                        time.sleep(0.5)
+                        try:
+                            return s.get(u, headers=headers, timeout=10)
+                        except Exception:
+                            pass
+                    # -2041 在线态激活
+                    elif "-2041" in r.text:
+                        from backend.weread_signer import activate_terminal_session
+                        activate_terminal_session(headers, session=s)
+                        try:
+                            r_sync = s.get(u, headers=headers, timeout=10)
+                            if r_sync.status_code == 200:
+                                return r_sync
+                        except Exception:
+                            pass
+                        record_failure(u, r.status_code, r.headers, r.text, "-2041")
+                        waterwall_hit(u, r.status_code, "-2041")
+                        return r
+
+                return r if r.status_code == 200 else None
+            except Exception as ex:
+                logger.debug("[user-mps] 请求 %s 异常: %s", u, ex)
+                time.sleep(0.5)
+        return None
 
     # 1. 微信读书官方 /mp/list (listType=0, 1) 必须带 synckey=0
     for lt in (0, 1):
@@ -426,7 +468,13 @@ def get_user_subscribed_mps():
                     "service_type": 1,
                 })
 
-    return jsonify({"mps": mps, "total": len(mps)})
+    from backend.waterwall import waterwall_snapshot, is_waterwall_active
+    snap = waterwall_snapshot()
+    resp_data = {"mps": mps, "total": len(mps)}
+    if is_waterwall_active() or snap.get("active"):
+        resp_data["need_verify"] = True
+        resp_data["waterwall"] = snap
+    return jsonify(resp_data)
 
 
 # ── RSS 订阅路由保持向后兼容 ──────────────────────────

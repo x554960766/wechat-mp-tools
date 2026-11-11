@@ -22,8 +22,9 @@ const WaterWall = {
             const resp = await fetch('/api/waterwall');
             if (resp.ok) {
                 const data = await resp.json();
-                if (data && data.active) {
-                    this.renderBanner(data);
+                const isActive = data && (data.active || data.need_verify || (data.waterwall && data.waterwall.active));
+                if (isActive) {
+                    this.renderBanner(data.waterwall || data);
                 }
             }
         } catch (e) {

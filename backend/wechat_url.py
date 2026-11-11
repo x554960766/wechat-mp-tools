@@ -11,9 +11,16 @@ def short_id_from_review_id(review_id: str) -> str:
     if not isinstance(review_id, str):
         return ""
     match = _REVIEW_ID.fullmatch(review_id)
-    if not match:
-        return ""
-    return match.group("short_id").replace("~", "_")
+    if match:
+        return match.group("short_id").replace("~", "_")
+    # 遵循官方规则兜底：兼容包含多段或非纯数字前缀的 MP_WXS 标识
+    if "MP_WXS_" in review_id:
+        parts = review_id.split("_")
+        if len(parts) >= 4:
+            sid = "_".join(parts[3:]).replace("~", "_")
+            if len(sid) >= 10:
+                return sid
+    return ""
 
 
 def normalize_wechat_short_url(url: str) -> str:

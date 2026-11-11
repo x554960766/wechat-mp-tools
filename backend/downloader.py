@@ -10,6 +10,7 @@ import re
 import json
 import time
 import signal
+import threading
 import shutil
 import subprocess
 import logging
@@ -820,6 +821,16 @@ def replace_video_iframe(html: str, video: dict, local: str) -> str:
 
 
 _canonical_url_cache = {}
+_canonical_url_cache_lock = threading.Lock()
+
+
+def _cache_canonical_url(cache_key: str, value: str):
+    """带容量上限的短链解析缓存，防止长时间运行内存泄露"""
+    with _canonical_url_cache_lock:
+        if len(_canonical_url_cache) >= 1000:
+            for old_k in list(_canonical_url_cache.keys())[:250]:
+                _canonical_url_cache.pop(old_k, None)
+        _canonical_url_cache[cache_key] = value
 
 
 def clean_wechat_article_url(url: str) -> str:
@@ -863,14 +874,15 @@ def resolve_canonical_short_url(url: str, review_id: str = "") -> str:
         return url
 
     cache_key = f"{url}::{review_id}"
-    if cache_key in _canonical_url_cache:
-        return _canonical_url_cache[cache_key]
+    with _canonical_url_cache_lock:
+        if cache_key in _canonical_url_cache:
+            return _canonical_url_cache[cache_key]
 
     # 1. 从 review_id 的完整账号前缀后提取 short_id，保留下划线
     sid = short_id_from_review_id(review_id)
     if sid:
         res = f"https://mp.weixin.qq.com/s/{sid}"
-        _canonical_url_cache[cache_key] = res
+        _cache_canonical_url(cache_key, res)
         return res
 
     # 2. 调用微信读书接口通过 URL 查询 reviewId
@@ -884,12 +896,12 @@ def resolve_canonical_short_url(url: str, review_id: str = "") -> str:
             sid = short_id_from_review_id(rid)
             if sid:
                 resolved = f"https://mp.weixin.qq.com/s/{sid}"
-                _canonical_url_cache[cache_key] = resolved
+                _cache_canonical_url(cache_key, resolved)
                 return resolved
     except Exception as e:
         logger.debug(f"[ShortURL] 解析推文短链异常: {e}")
 
-    _canonical_url_cache[cache_key] = url
+    _cache_canonical_url(cache_key, url)
     return url
 
 

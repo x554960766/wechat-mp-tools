@@ -34,8 +34,8 @@ UPLOAD_QUARANTINE_THRESHOLD = 3
 # 上传审计日志最多保留的记录条数
 MAX_UPLOAD_LOG = 100
 
-# 并发抓取的最大线程数（I/O 密集型，线程大部分时间在等网络响应和延时）
-MAX_FETCH_WORKERS = 50
+# 并发抓取的最大线程数（设为 8 个兼顾并发与风控，同时极大减少 Linux glibc 线程内存池 arena 碎片）
+MAX_FETCH_WORKERS = 8
 
 # 全局兜底上传的间隔（分钟）：扫描所有账号的待传文章，兜住因账号不属于
 # 当前启用订阅（改名/退订/禁用/手动下载）而永远不会被按账号触发上传的文章
@@ -604,6 +604,13 @@ class RssScheduler:
         finally:
             with self._fetching_lock:
                 self._fetching.discard(sub.get("fakeid", ""))
+                is_idle = len(self._fetching) == 0
+            if is_idle:
+                try:
+                    from backend.runtime import release_memory
+                    release_memory()
+                except Exception:
+                    pass
 
     def _fetch_for_account(self, sub: dict):
         """为单个订阅抓取最新文章并执行离线下载（由线程池调度）"""
@@ -851,6 +858,7 @@ class RssScheduler:
     def _run_loop(self):
         logger.info("RSS 调度器已启动")
         last_sweep = 0.0
+        last_trim = time.time()
         while not self._stop_event.is_set():
             try:
                 self._tick()
@@ -858,6 +866,14 @@ class RssScheduler:
                 if now - last_sweep >= GLOBAL_UPLOAD_SWEEP_MINUTES * 60:
                     last_sweep = now
                     self._global_upload_sweep()
+                # 每 3 分钟执行一次主动内存清理，归还 Linux 容器堆内存
+                if now - last_trim >= 180:
+                    last_trim = now
+                    try:
+                        from backend.runtime import release_memory
+                        release_memory()
+                    except Exception:
+                        pass
             except Exception as e:
                 logger.error("RSS 调度器异常: %s", e)
             # 每 5 秒检查一次是否有订阅需要执行

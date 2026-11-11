@@ -86,6 +86,9 @@ def host_path_hint(path) -> str:
 
 
 def configure_runtime():
+    # 限制 Linux glibc ptmalloc 的线程内存池数量，防止多线程并发时产生大量碎片与虚增内存占用
+    os.environ.setdefault("MALLOC_ARENA_MAX", "2")
+
     # 修复在守护进程或终端关闭后 stdout/stderr 写入导致的 [Errno 5] Input/output error
     class _SafeStream:
         def __init__(self, stream):
@@ -295,5 +298,22 @@ def write_startup_error(exc: BaseException):
             "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
             encoding="utf-8",
         )
+    except Exception:
+        pass
+
+
+def release_memory():
+    """主动触发垃圾回收并向操作系统归还未使用的堆内存（针对 Linux 容器环境的 glibc 碎片化）"""
+    import gc
+    try:
+        gc.collect()
+        if sys.platform.startswith("linux"):
+            import ctypes
+            try:
+                libc = ctypes.CDLL("libc.so.6")
+                if hasattr(libc, "malloc_trim"):
+                    libc.malloc_trim(0)
+            except Exception:
+                pass
     except Exception:
         pass

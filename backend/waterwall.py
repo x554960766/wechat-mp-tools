@@ -234,6 +234,7 @@ def get_waterwall_status():
     snap = waterwall_snapshot()
     return jsonify({
         "need_verify": snap["active"],
+        "active": snap["active"],
         "waterwall": snap,
         "app_id": "2044038556", # 微信读书官方 TCaptcha 客户端 AppId
     })

@@ -54,9 +54,11 @@ def login():
         }
 
         start = time.time()
+        last_code = None
         while time.time() - start < 300:
             try:
-                req = urllib.request.Request(poll_url, headers=headers)
+                curr_url = poll_url + (f"&last={last_code}" if last_code else "")
+                req = urllib.request.Request(curr_url, headers=headers)
                 with urllib.request.urlopen(req, context=ctx, timeout=28) as resp:
                     res = json.loads(resp.read().decode('utf-8'))
                     errcode = res.get('wx_errcode') if 'wx_errcode' in res else res.get('errcode')
@@ -65,19 +67,38 @@ def login():
                         print("✅ 用户已授权，正在换取微信读书长效 Token...")
                         info = exchange_weread_token(wx_code)
                         user = info.get("user", {})
+                        vid_val = str(info.get("vid", ""))
+                        tok_val = str(info.get("accessToken", ""))
                         acc = account_pool.add_or_update({
-                            "vid": info.get("vid"),
-                            "accessToken": info.get("accessToken"),
+                            "vid": vid_val,
+                            "accessToken": tok_val,
                             "refreshToken": info.get("refreshToken"),
                             "skey": info.get("skey"),
                             "deviceId": info.get("deviceId"),
                             "nickname": user.get("name", "微信读书账号"),
                             "avatar": user.get("avatar", ""),
                         })
+
+                        # 遵循官方客户端机制：登录换号完成时立即向服务端执行终端全量会话同步 (mobileSync)，确保新账号在线态
+                        try:
+                            from backend.weread_signer import activate_terminal_session
+                            auth_h = {
+                                "accessToken": tok_val,
+                                "vid": vid_val,
+                                "skey": info.get("skey") or tok_val,
+                                "deviceId": info.get("deviceId", ""),
+                                "Cookie": f"wr_vid={vid_val}; wr_skey={info.get('skey') or tok_val}"
+                            }
+                            activate_terminal_session(auth_h)
+                            print("✅ 移动端在线会话激活成功 (mobileSync 已就绪)")
+                        except Exception as ex_sync:
+                            print(f"⚠️ 终端会话激活提示: {ex_sync}")
+
                         print(f"🎉 登录成功！用户：{acc.get('nickname')} (VID: {acc.get('vid')})")
                         print("已保存至账号池。")
                         return True
                     elif errcode == 404:
+                        last_code = "404"
                         print("📱 已扫码，请在手机上点击确认...")
                     elif errcode in (402, 403):
                         print("❌ 二维码已过期，请重新运行脚本。")

@@ -471,12 +471,22 @@ def build_feed(account: str | None, limit: int, offset: int,
     ttl = _cfg_int(settings, "rss_cache_ttl", "RSS_CACHE_TTL", DEFAULT_TTL)
     local_avatar = _cfg_bool(settings, "rss_local_avatar", "RSS_LOCAL_AVATAR", True)
     from_article = _cfg_bool(settings, "rss_avatar_from_article", "RSS_AVATAR_FROM_ARTICLE", True)
+    current_mtimes = _file_mtimes()
     key = (account or "", limit, offset, bool(fulltext), base_url,
-           local_avatar, from_article, _file_mtimes())
+           local_avatar, from_article, current_mtimes)
 
+    now = time.time()
     with _cache_lock:
+        # 主动清理过期或因底层文件更新而失效的旧缓存，防止全文字符串堆积导致内存泄漏
+        stale_keys = [
+            k for k, v in _cache.items()
+            if (ttl > 0 and (now - v[0]) >= ttl) or (len(k) >= 8 and k[7] != current_mtimes)
+        ]
+        for k in stale_keys:
+            _cache.pop(k, None)
+
         hit = _cache.get(key)
-        if hit and (ttl <= 0 or time.time() - hit[0] < ttl):
+        if hit and (ttl <= 0 or now - hit[0] < ttl):
             return hit[1], hit[2]
 
     items = collect_items(account)
@@ -501,10 +511,19 @@ def build_feed(account: str | None, limit: int, offset: int,
     etag = 'W/"%s"' % hashlib.sha1(xml.encode("utf-8")).hexdigest()[:20]
 
     with _cache_lock:
-        if len(_cache) > 64:
-            _cache.clear()
-        _cache[key] = (time.time(), xml, etag)
+        # 控制缓存容量在极小范围（至多保留最近 8 个），超限时淘汰一半
+        if len(_cache) >= 8:
+            oldest_keys = sorted(_cache.keys(), key=lambda k: _cache[k][0])[:4]
+            for k in oldest_keys:
+                _cache.pop(k, None)
+        _cache[key] = (now, xml, etag)
     return xml, etag
+
+
+def clear_rss_cache():
+    """主动清空 RSS 渲染结果缓存"""
+    with _cache_lock:
+        _cache.clear()
 
 
 def rss_response(request, account: str | None = None) -> Response:

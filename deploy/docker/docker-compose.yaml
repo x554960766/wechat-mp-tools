@@ -32,6 +32,7 @@ services:
     environment:
       TZ: ${TZ:-Asia/Shanghai}
       PORT: "5200"
+      MALLOC_ARENA_MAX: ${MALLOC_ARENA_MAX:-2}
       # 宿主机上 ./data 对应的路径，仅用于「打开文件夹」时的提示文案
       HOST_DATA_DIR: ${HOST_DATA_DIR:-./data}
       # 可选：强制指定容器内下载目录（默认 /app/data/articles_full）

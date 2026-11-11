@@ -43,6 +43,16 @@ XHS_HISTORY_FILE = DATA_DIR / "xhs_history.json"
 _download_tasks = {}
 _download_lock = threading.Lock()
 
+
+def _clean_old_tasks_locked():
+    if len(_download_tasks) > 50:
+        finished = [
+            k for k, t in _download_tasks.items()
+            if isinstance(t, dict) and t.get("status") in ("completed", "failed", "cancelled")
+        ]
+        for k in finished[:max(1, len(_download_tasks) - 50)]:
+            _download_tasks.pop(k, None)
+
 # ── 工具函数 ──────────────────────────────────────────────
 def lognormal_sleep(avg_delay: float = 6.0, sigma: float = 0.6):
     """对数正态分布随机等待时间，模拟人类在浏览器中的浏览/阅读停留行为，比均匀随机更自然以规避频控"""
@@ -1745,6 +1755,7 @@ def download_urls():
         
     task_id = f"xhs_{int(time.time())}"
     with _download_lock:
+        _clean_old_tasks_locked()
         _download_tasks[task_id] = {
             "status": "running",
             "total": len(extracted_urls),
@@ -1881,6 +1892,7 @@ def download_notes():
         
     task_id = f"xhs_{int(time.time())}"
     with _download_lock:
+        _clean_old_tasks_locked()
         _download_tasks[task_id] = {
             "status": "running",
             "total": len(urls),
