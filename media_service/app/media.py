@@ -88,6 +88,19 @@ def _excluded(root, relpath):
 
 
 def list_entries(root_id):
+    """只列图片。内容条目索引需要全部文件时用 ``list_files``。"""
+    return _list_files(root_id, IMAGE_EXTS)
+
+
+def list_files(root_id):
+    """列举媒体根内全部普通文件（不只图片），供内容条目发现使用。
+
+    跳过规则与 ``list_entries`` 完全一致，减少两套遍历出现行为差异。
+    """
+    return _list_files(root_id, None)
+
+
+def _list_files(root_id, suffixes):
     root=config.get_root(root_id)
     if root["type"]=="local":
         base=Path(root["path"]).resolve()
@@ -103,7 +116,9 @@ def list_entries(root_id):
                 if name.startswith((".ai-media-", ".download-")):
                     continue
                 p=Path(directory)/name
-                if _excluded(root, p.relative_to(base).as_posix()) or p.suffix.lower() not in IMAGE_EXTS:
+                if _excluded(root, p.relative_to(base).as_posix()):
+                    continue
+                if suffixes is not None and p.suffix.lower() not in suffixes:
                     continue
                 resolved=p.resolve()
                 if not resolved.is_relative_to(base):
@@ -127,7 +142,10 @@ def list_entries(root_id):
                 if name in {"_rejected", "_manifests"} or name.startswith((".ai-media-", ".download-")) or _excluded(root, rel):
                     continue
                 if str(item.get("is_dir"))=="1": stack.append(item["path"])
-                elif Path(name).suffix.lower() in IMAGE_EXTS:
+                else:
+                    suffix=Path(name).suffix.lower()
+                    if suffixes is not None and suffix not in suffixes:
+                        continue
                     rel=item["path"][len(root["path"].rstrip("/")+"/"):]
                     validate_relpath(rel); entries.append(MediaEntry(root_id,rel,int(item.get("size") or 0),float(item.get("modify_time") or 0)))
             if not items and start<total: raise OSError("zspace 分页不完整")

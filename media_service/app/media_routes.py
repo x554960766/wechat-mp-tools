@@ -7,7 +7,9 @@ from fastapi import APIRouter,HTTPException,Query,UploadFile,File,Form,Body
 from fastapi.responses import Response
 from pydantic import BaseModel,Field,StrictInt,field_validator
 from starlette.concurrency import run_in_threadpool
-from . import config,media,encoder,review,search,thumbs
+import re
+from urllib.parse import urlencode
+from . import config,contents,media,encoder,review,search,thumbs
 from .store import STORE
 from .jobs import JOBS
 
@@ -173,3 +175,103 @@ def scan_cancel(job_id: str):
     if item is None or item.get("kind") != "scan":
         raise HTTPException(404, "扫描任务不存在")
     return JOBS.cancel(job_id)
+
+
+def _media_url(path, root, relpath, version, **extra):
+    params={"root":root,"relpath":relpath,"version":version}
+    params.update(extra)
+    return path+"?"+urlencode(params)
+
+
+def _snippet(body, terms, width=140):
+    if not body:
+        return None
+    text=re.sub(r"\s+"," ",body).strip()
+    if not text:
+        return None
+    lowered=text.lower()
+    pos=-1
+    for term in terms:
+        if len(term)<2:
+            continue
+        found=lowered.find(term)
+        if found>=0 and (pos<0 or found<pos):
+            pos=found
+    if pos<0:
+        return text[:width]+("…" if len(text)>width else "")
+    start=max(0,pos-width//3)
+    end=min(len(text),start+width)
+    return ("…" if start else "")+text[start:end]+("…" if end<len(text) else "")
+
+
+def _cover(row):
+    """封面的缩略图地址；封面图没被图片索引收录时返回 None，前端退回占位。"""
+    cover=row.get("cover_relpath")
+    if not cover:
+        return None
+    image=STORE.get(row["root"],cover)
+    if image is None or image["state"]!="ready":
+        return None
+    return {"root":row["root"],"relpath":cover,"version":image["content_version"],
+            "thumb":_media_url("/api/media/thumb",row["root"],cover,image["content_version"],size=480),
+            "file":_media_url("/api/media/file",row["root"],cover,image["content_version"],display=1)}
+
+
+def _content_out(row, terms):
+    root=next((x for x in config.MEDIA_ROOTS if x["id"]==row["root"]),None)
+    return {
+        "content_id":row["content_id"],
+        "root":row["root"],
+        "relpath":row["relpath"],
+        "platform":row["platform"],
+        "platform_label":contents.PLATFORMS.get(row["platform"],row["platform"]),
+        "kind":row["kind"],
+        "title":row["title"],
+        "account":row["account"],
+        "url":row["url"],
+        "published_at":row["published_at"],
+        "digest":row["digest"],
+        "snippet":_snippet(row.get("body"),terms),
+        "media_count":row["media_count"],
+        "cover":_cover(row),
+        "indexed_at":row["indexed_at"],
+        "source_label":(root or {}).get("label",row["root"]),
+    }
+
+
+@router.get("/api/contents/search")
+def contents_search(q:str="",platform:str|None=None,root:str|None=None,account:str|None=None,
+                    limit:int=Query(24,ge=1,le=100),offset:int=Query(0,ge=0)):
+    if len(q)>2000: raise HTTPException(422,"查询最多 2000 字符")
+    if platform and platform not in contents.PLATFORMS: raise HTTPException(422,"未知平台")
+    if root:
+        try: config.get_root(root)
+        except KeyError: raise HTTPException(422,"未知媒体根")
+    rows,total,terms=STORE.search_contents(q,platform=platform,root=root,account=account,
+                                           limit=limit,offset=offset)
+    return {"items":[_content_out(row,terms) for row in rows],"total":total,
+            "limit":limit,"offset":offset,"terms":terms}
+
+
+@router.get("/api/contents/facets")
+def contents_facets():
+    data=STORE.content_facets()
+    for item in data["platforms"]:
+        item["label"]=contents.PLATFORMS.get(item["platform"],item["platform"])
+    return data
+
+
+@router.get("/api/contents/{content_id}")
+def contents_detail(content_id:str):
+    row=STORE.content_detail(content_id)
+    if row is None: raise HTTPException(404,detail={"error":{"code":"not_found","message":"内容条目不存在"}})
+    data=_content_out(row,contents.tokenize(row["title"]))
+    data["body"]=row.get("body")
+    data["images"]=[{
+        "root":image["root"],"relpath":image["relpath"],
+        "content_version":image["content_version"],"version":image["content_version"],
+        "size":image["size"],"shot_at":image["shot_at"],
+        "thumb":_media_url("/api/media/thumb",image["root"],image["relpath"],image["content_version"],size=360),
+        "file":_media_url("/api/media/file",image["root"],image["relpath"],image["content_version"],display=1),
+    } for image in row["images"]]
+    return data

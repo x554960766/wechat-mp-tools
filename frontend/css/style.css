@@ -231,6 +231,52 @@ body {
     animation: fadeIn 0.3s ease;
 }
 
+/* ── 侧栏全局检索 ──────────────────────────────────────── */
+.sidebar-global-search {
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    margin: 0 var(--spacing-md) var(--spacing-xs);
+    padding: 0 var(--spacing-sm);
+    height: 38px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    transition: border-color var(--transition-normal), box-shadow var(--transition-normal);
+}
+
+.sidebar-global-search:focus-within {
+    border-color: var(--border-focus);
+    box-shadow: 0 0 0 3px var(--primary-glow);
+}
+
+.sidebar-search-icon {
+    display: flex;
+    align-items: center;
+    color: var(--text-muted);
+    flex-shrink: 0;
+    cursor: pointer;
+}
+
+.sidebar-search-icon svg {
+    width: 16px;
+    height: 16px;
+}
+
+.sidebar-search-input {
+    flex: 1;
+    min-width: 0;
+    border: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    outline: none;
+}
+
+.sidebar-search-input::placeholder {
+    color: var(--text-muted);
+}
+
 /* ── 导航菜单 ──────────────────────────────────────────── */
 .sidebar-nav {
     flex: 1;
@@ -2126,6 +2172,132 @@ body {
     font-size: 0.8rem;
     color: var(--text-secondary);
     font-weight: 400;
+}
+
+/* ── 内容条目检索：文章 / 视频 / 图集 / 笔记 ── */
+.media-chip.is-active {
+    border-color: var(--primary);
+    color: var(--primary);
+    background: rgba(102, 126, 234, 0.14);
+}
+.media-chip-count {
+    font-size: 0.72rem;
+    opacity: 0.72;
+}
+.content-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: var(--spacing-md);
+}
+.content-card {
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    overflow: hidden;
+    text-align: left;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    cursor: pointer;
+    transition: transform 0.15s ease, border-color 0.15s ease;
+}
+.content-card:hover {
+    transform: translateY(-2px);
+    border-color: var(--primary-light);
+}
+.content-cover {
+    position: relative;
+    display: block;
+    aspect-ratio: 16 / 10;
+    background: rgba(0, 0, 0, 0.28);
+    overflow: hidden;
+}
+.content-cover img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+.content-cover.is-broken img { opacity: 0; }
+.content-cover-fallback {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 2rem;
+    color: rgba(255, 255, 255, 0.85);
+    background: linear-gradient(135deg, rgba(102, 126, 234, 0.35), rgba(0, 0, 0, 0.35));
+}
+.content-cover-fallback.is-douyin { background: linear-gradient(135deg, rgba(35, 35, 45, 0.85), rgba(0, 0, 0, 0.5)); }
+.content-cover-fallback.is-xhs { background: linear-gradient(135deg, rgba(255, 36, 66, 0.45), rgba(0, 0, 0, 0.4)); }
+.content-cover-fallback.is-bilibili { background: linear-gradient(135deg, rgba(0, 161, 214, 0.45), rgba(0, 0, 0, 0.4)); }
+.content-cover-fallback.is-kuaishou { background: linear-gradient(135deg, rgba(255, 125, 0, 0.45), rgba(0, 0, 0, 0.4)); }
+.content-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 12px 14px 14px;
+}
+.content-title {
+    font-size: 0.95rem;
+    font-weight: 500;
+    color: var(--text-primary);
+    line-height: 1.4;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.content-sub {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+.content-snippet {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+}
+.content-pager {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    margin-top: var(--spacing-lg);
+}
+.content-detail-body {
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 38vh;
+    overflow: auto;
+    font-size: 0.88rem;
+    line-height: 1.75;
+    color: var(--text-primary);
+    margin: 12px 0;
+    padding-right: 6px;
+}
+.content-assets {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+    gap: 8px;
+    max-height: 40vh;
+    overflow: auto;
+}
+.content-asset {
+    display: block;
+    border-radius: 8px;
+    overflow: hidden;
+    background: rgba(0, 0, 0, 0.25);
+}
+.content-asset img {
+    width: 100%;
+    aspect-ratio: 1 / 1;
+    object-fit: cover;
+    display: block;
 }
 
 .media-task {

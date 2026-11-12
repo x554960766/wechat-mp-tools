@@ -11,6 +11,8 @@ ms-playwright/
 # Local WeChat/Douyin data, credentials and logs (CRITICAL FOR SECURITY)
 data/
 *.log
+# start.sh 的输出目录（宿主 + 媒体子服务日志）
+logs/
 
 # OS generated files
 .DS_Store

@@ -329,6 +329,15 @@ const API = {
         roots() { return API.get('/media/api/media/roots', { showError: false }); },
         stats() { return API.get('/media/api/search/stats', { showError: false }); },
         searchText(payload, opts) { return API.post('/media/api/search/text', payload, opts); },
+        contentsSearch(params, opts) {
+            const query = new URLSearchParams();
+            Object.entries(params || {}).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') query.set(key, value);
+            });
+            return API.get(`/media/api/contents/search?${query.toString()}`, opts);
+        },
+        contentsFacets() { return API.get('/media/api/contents/facets', { showError: false }); },
+        contentsDetail(contentId) { return API.get(`/media/api/contents/${encodeURIComponent(contentId)}`); },
         scan(root = 'articles-full', rebuild = false) {
             return API.post('/media/api/media/scan', { root, rebuild });
         },

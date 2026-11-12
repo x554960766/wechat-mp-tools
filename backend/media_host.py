@@ -77,7 +77,10 @@ class MediaHost:
 
         self._proc: subprocess.Popen | None = None
         self._log_file: object | None = None
-        self._log_path = os.path.join(tempfile.gettempdir(), f"wmp-media-{port}.log")
+        # 默认写系统临时目录；启动脚本可用 MEDIA_LOG_PATH 指到项目 logs/ 下长期留存
+        self._log_path = os.getenv("MEDIA_LOG_PATH") or os.path.join(
+            tempfile.gettempdir(), f"wmp-media-{port}.log"
+        )
         # 上一次运行残留、但仍在跑的媒体服务 pid（跨进程重启时复用/清理）
         self._external_pid: int | None = None
         self._lock = threading.Lock()
@@ -221,7 +224,9 @@ class MediaHost:
            ``root_binding_mismatch`` 起不来，继承旧根才能继续用旧索引；
         2. 外部显式配置的 ``AI_MEDIA_ROOTS``；
         3. wmp 下载落图目录 articles_full（与 backend/config.py 的
-           OUTPUT_DIR = <repo>/data/articles_full 对齐）。
+           OUTPUT_DIR = <repo>/data/articles_full 对齐）；
+        4. 抖音/快手/B站/小红书各自的下载目录——只在目录真实存在时挂上，
+           没用过某平台就不给它凭空多一个空媒体根。
         """
         repo_root = os.path.dirname(os.path.abspath(self.media_root))
         articles_root = {
@@ -235,6 +240,17 @@ class MediaHost:
             if root_id:
                 merged[root_id] = root
         merged.setdefault("articles-full", articles_root)
+        for root_id, subdir in (
+            ("douyin", "douyin_downloads"),
+            ("kuaishou", "kuaishou_downloads"),
+            ("bilibili", "bilibili_downloads"),
+            ("xhs", "xhs_downloads"),
+        ):
+            path = os.path.join(repo_root, "data", subdir)
+            # 已被索引记录过的根即使目录暂时不在也要保留，否则绑定对比会判定为
+            # 「根被删除」并让子服务拒绝启动（root_binding_mismatch）。
+            if os.path.isdir(path) or root_id in merged:
+                merged.setdefault(root_id, {"id": root_id, "type": "local", "path": path})
         return list(merged.values())
 
     def _indexed_roots(self) -> list[dict]:

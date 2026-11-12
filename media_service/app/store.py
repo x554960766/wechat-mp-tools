@@ -1,6 +1,7 @@
 """SQLite 持久化与不可变检索快照。"""
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -19,7 +20,14 @@ CREATE TABLE IF NOT EXISTS articles(article_id TEXT PRIMARY KEY,title TEXT NOT N
 CREATE TABLE IF NOT EXISTS images(id INTEGER PRIMARY KEY,root TEXT NOT NULL,relpath TEXT NOT NULL,size INTEGER NOT NULL,mtime REAL NOT NULL,content_sha256 TEXT,content_version TEXT NOT NULL,emb BLOB,article_id TEXT REFERENCES articles(article_id),shot_at TEXT,ingested_at TEXT,indexed_at TEXT,origin TEXT NOT NULL CHECK(origin IN ('archive','scan','legacy_import')),state TEXT NOT NULL CHECK(state IN ('ready','quarantined','deleted')),last_error TEXT,UNIQUE(root,relpath),CHECK((state='ready' AND emb IS NOT NULL AND length(emb)=2048 AND ingested_at IS NOT NULL AND indexed_at IS NOT NULL) OR (state<>'ready' AND emb IS NULL)));
 CREATE INDEX IF NOT EXISTS idx_images_root ON images(root);
 CREATE INDEX IF NOT EXISTS idx_images_ingested ON images(ingested_at);
+CREATE TABLE IF NOT EXISTS contents(content_id TEXT PRIMARY KEY,root TEXT NOT NULL,relpath TEXT NOT NULL,platform TEXT NOT NULL,kind TEXT NOT NULL,title TEXT NOT NULL,account TEXT,url TEXT,published_at TEXT,digest TEXT,body TEXT,cover_relpath TEXT,media_count INTEGER NOT NULL DEFAULT 0,observed_at TEXT,content_sha256 TEXT NOT NULL,indexed_at TEXT NOT NULL,UNIQUE(root,relpath));
+CREATE INDEX IF NOT EXISTS idx_contents_root ON contents(root);
+CREATE INDEX IF NOT EXISTS idx_contents_platform ON contents(platform);
+CREATE VIRTUAL TABLE IF NOT EXISTS content_fts USING fts5(content_id UNINDEXED,title,body,account,tokenize='unicode61');
 """
+
+# 内容条目的 FTS 列存的是切好词的空格串（见 contents.tokenize）；这里不建 content= 外部
+# 内容表，因为那样删除时要用 FTS5 的 'delete' 指令回填旧值，容易和真值不一致。
 
 def utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
@@ -32,12 +40,20 @@ class Store:
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
-        self.conn.execute("PRAGMA user_version=1")
+        self._migrate()
+        self.conn.execute("PRAGMA user_version=2")
         self.conn.commit()
         from .encoder import fingerprint
         self.set_fingerprint(fingerprint(), {"model_id": config.MODEL_ID, "revision": config.MODEL_REVISION, "dimension": 512, "dtype": "float32", "normalize": "l2"})
         self._snapshot = (0, [], np.empty((0, 512), dtype=np.float32))
         self.reload_snapshot()
+
+    def _migrate(self):
+        """把旧库补齐到当前结构；已有列一律不动，避免覆盖线上数据。"""
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(images)")}
+        if "content_id" not in columns:
+            self.conn.execute("ALTER TABLE images ADD COLUMN content_id TEXT")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_images_content ON images(content_id)")
 
     def _commit(self, sql: str, params=()):
         with self.lock:
@@ -152,6 +168,168 @@ class Store:
         with self.lock:
             roots=[dict(r) for r in self.conn.execute("SELECT root,COUNT(*) count,MAX(ingested_at) latest_ingested_at FROM images WHERE state='ready' GROUP BY root")]
             return {"generation":self._snapshot[0],"total":sum(r["count"] for r in roots),"roots":roots}
+
+    # ---- 内容条目（文章 / 视频 / 图集 / 笔记）--------------------------------
+    _CONTENT_FIELDS = ("root", "relpath", "platform", "kind", "title", "account", "url",
+                       "published_at", "digest", "body", "cover_relpath", "media_count")
+
+    @classmethod
+    def _content_digest(cls, item):
+        fields = {key: item.get(key) for key in cls._CONTENT_FIELDS}
+        return hashlib.sha256(json.dumps(fields, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+    def sync_contents(self, items, *, prune_root=None, now=None):
+        """把一次发现的内容条目落库，并重建受影响条目的全文索引与图片挂接。
+
+        ``prune_root`` 给出时，该根下不在 ``items`` 里的旧条目会被删除——目录被删、
+        视频被清理后索引不该继续留着幽灵条目。图片只解除引用，不删除图片记录。
+        """
+        now = now or utcnow()
+        report = {"new": 0, "updated": 0, "unchanged": 0, "removed": 0}
+        with self.lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                for item in items:
+                    content_id = item["content_id"]
+                    old = self.conn.execute(
+                        "SELECT content_sha256 FROM contents WHERE content_id=?", (content_id,)
+                    ).fetchone()
+                    digest = self._content_digest(item)
+                    if old and old[0] == digest:
+                        self.conn.execute("UPDATE contents SET observed_at=? WHERE content_id=?",
+                                          (item.get("observed_at"), content_id))
+                        report["unchanged"] += 1
+                    else:
+                        self._upsert_content_tx(item, digest, now)
+                        report["new" if old is None else "updated"] += 1
+                    self._bind_images_tx(item)
+                if prune_root:
+                    keep = {item["content_id"] for item in items}
+                    stale = self.conn.execute(
+                        "SELECT content_id FROM contents WHERE root=?", (prune_root,)
+                    ).fetchall()
+                    for row in stale:
+                        content_id = row["content_id"]
+                        if content_id in keep:
+                            continue
+                        self.conn.execute("DELETE FROM content_fts WHERE content_id=?", (content_id,))
+                        self.conn.execute("UPDATE images SET content_id=NULL WHERE content_id=?", (content_id,))
+                        self.conn.execute("DELETE FROM contents WHERE content_id=?", (content_id,))
+                        report["removed"] += 1
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+        return report
+
+    def _upsert_content_tx(self, item, digest, now):
+        from . import contents as content_index
+        content_id = item["content_id"]
+        self.conn.execute(
+            "INSERT INTO contents(content_id,root,relpath,platform,kind,title,account,url,published_at,"
+            "digest,body,cover_relpath,media_count,observed_at,content_sha256,indexed_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(content_id) DO UPDATE SET "
+            "root=excluded.root,relpath=excluded.relpath,platform=excluded.platform,kind=excluded.kind,"
+            "title=excluded.title,account=excluded.account,url=excluded.url,published_at=excluded.published_at,"
+            "digest=excluded.digest,body=excluded.body,cover_relpath=excluded.cover_relpath,"
+            "media_count=excluded.media_count,observed_at=excluded.observed_at,"
+            "content_sha256=excluded.content_sha256,indexed_at=excluded.indexed_at",
+            (content_id, item["root"], item["relpath"], item["platform"], item["kind"], item["title"],
+             item.get("account"), item.get("url"), item.get("published_at"), item.get("digest"),
+             item.get("body"), item.get("cover_relpath"), int(item.get("media_count") or 0),
+             item.get("observed_at"), digest, now),
+        )
+        self.conn.execute("DELETE FROM content_fts WHERE content_id=?", (content_id,))
+        self.conn.execute(
+            "INSERT INTO content_fts(content_id,title,body,account) VALUES(?,?,?,?)",
+            (content_id,
+             " ".join(content_index.tokenize(item["title"])),
+             " ".join(content_index.tokenize(item.get("body") or "")),
+             " ".join(content_index.tokenize(item.get("account") or ""))),
+        )
+
+    def _bind_images_tx(self, item):
+        """条目目录内的图片按路径前缀挂到条目上，详情页据此列出配图。"""
+        if not item.get("is_dir", True):
+            return
+        prefix = item["relpath"] + "/"
+        self.conn.execute(
+            "UPDATE images SET content_id=? WHERE root=? AND substr(relpath,1,?)=?",
+            (item["content_id"], item["root"], len(prefix), prefix),
+        )
+
+    def search_contents(self, query, *, platform=None, root=None, account=None, limit=24, offset=0):
+        from . import contents as content_index
+        tokens = content_index.tokenize(query)
+        filters, filter_args = [], []
+        if platform:
+            filters.append("c.platform=?")
+            filter_args.append(platform)
+        if root:
+            filters.append("c.root=?")
+            filter_args.append(root)
+        if account:
+            filters.append("c.account=?")
+            filter_args.append(account)
+        join = "FROM content_fts JOIN contents c ON c.content_id=content_fts.content_id"
+        # 先要求全部二元词同时命中（"手机壁纸"不会召回到只有"手"或"纸"的内容），
+        # 没有结果才退回任意词命中，避免长查询一条都搜不到。
+        attempts = []
+        phrases = [token for token in tokens if len(token) >= 2]
+        if phrases:
+            attempts.append(" AND ".join(f'"{token}"' for token in phrases))
+        if tokens:
+            attempts.append(" OR ".join(f'"{token}"' for token in tokens))
+        chosen, total, rows = None, 0, []
+        with self.lock:
+            for match in attempts:
+                where = ["content_fts MATCH ?", *filters]
+                args = [match, *filter_args]
+                clause = "WHERE " + " AND ".join(where)
+                count = self.conn.execute(f"SELECT COUNT(*) {join} {clause}", args).fetchone()[0]
+                chosen = match
+                total = int(count)
+                if count:
+                    break
+            if chosen is None:
+                clause = ("WHERE " + " AND ".join(filters)) if filters else ""
+                total = int(self.conn.execute(
+                    f"SELECT COUNT(*) FROM contents c {clause}", filter_args).fetchone()[0])
+                rows = self.conn.execute(
+                    f"SELECT c.*, 0 AS score FROM contents c {clause} "
+                    "ORDER BY COALESCE(c.published_at,c.indexed_at) DESC LIMIT ? OFFSET ?",
+                    [*filter_args, int(limit), int(offset)],
+                ).fetchall()
+            else:
+                clause = "WHERE " + " AND ".join(["content_fts MATCH ?", *filters])
+                args = [chosen, *filter_args]
+                rows = self.conn.execute(
+                    f"SELECT c.*, bm25(content_fts, 4.0, 1.0, 2.0) AS score {join} {clause} "
+                    "ORDER BY score LIMIT ? OFFSET ?",
+                    [*args, int(limit), int(offset)],
+                ).fetchall()
+        return [dict(row) for row in rows], total, tokens
+
+    def content_detail(self, content_id):
+        with self.lock:
+            row = self.conn.execute("SELECT * FROM contents WHERE content_id=?", (content_id,)).fetchone()
+            if not row:
+                return None
+            images = [dict(r) for r in self.conn.execute(
+                "SELECT root,relpath,content_version,size,shot_at FROM images "
+                "WHERE content_id=? AND state='ready' ORDER BY relpath", (content_id,))]
+        return {**dict(row), "images": images}
+
+    def content_facets(self):
+        with self.lock:
+            platforms = [dict(r) for r in self.conn.execute(
+                "SELECT platform,COUNT(*) count FROM contents GROUP BY platform ORDER BY count DESC")]
+            accounts = [dict(r) for r in self.conn.execute(
+                "SELECT platform,account,COUNT(*) count FROM contents "
+                "WHERE account IS NOT NULL AND account<>'' GROUP BY platform,account "
+                "ORDER BY count DESC LIMIT 200")]
+            total = self.conn.execute("SELECT COUNT(*) FROM contents").fetchone()[0]
+        return {"platforms": platforms, "accounts": accounts, "total": int(total)}
 
 STORE=Store()
 

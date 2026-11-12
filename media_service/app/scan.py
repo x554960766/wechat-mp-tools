@@ -2,7 +2,7 @@
 from __future__ import annotations
 import hashlib, threading, uuid
 from datetime import datetime
-from . import article_link, encoder, media
+from . import article_link, contents, encoder, media
 from .store import STORE, utcnow
 
 _scan_lock=threading.Lock()
@@ -79,6 +79,13 @@ def scan_root(root, rebuild=False, progress=None, cancel=None):
         if cancel and cancel(): counts["status"]="cancelled"; return counts
         entries,complete=media.list_entries(root)
         if not complete: raise OSError("来源目录列举不完整")
+        # 图片索引按 list_entries 走；内容条目需要全部文件（文案/元数据/视频），单独再列一次。
+        # 列举失败只影响内容条目，不该让已经可用的图片索引本轮失败。
+        try:
+            content_files,content_complete=media.list_files(root)
+            if not content_complete: content_files=None
+        except (OSError,TimeoutError):
+            content_files=None
         if cancel and cancel(): counts["status"]="cancelled"; return counts
         seen={e.relpath for e in entries}; candidates={}; systematic=False
         article_cache={}  # 每轮扫描按文章目录缓存侧车元数据
@@ -150,6 +157,12 @@ def scan_root(root, rebuild=False, progress=None, cancel=None):
                     # 不回滚会把连接留在打开的事务里，后续每次 BEGIN IMMEDIATE 都报
                     # cannot start a transaction within a transaction。
                     STORE.conn.rollback(); raise
+        if content_files is not None:
+            try:
+                items=contents.discover(root,content_files)
+                counts["contents"]=STORE.sync_contents(items,prune_root=root)
+            except Exception as exc:  # noqa: BLE001 - 内容索引进度独立于图片索引
+                counts["content_error"]=str(exc)[:300]
         counts["complete"]=True; counts["status"]="partial" if counts["failed"] else "completed"
         return counts
     finally: _scan_lock.release()
