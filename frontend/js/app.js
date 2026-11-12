@@ -30,6 +30,9 @@ const App = {
         // 初始化侧边栏手风琴折叠菜单
         this.initSidebarAccordion();
 
+        // 初始化侧栏全局检索框
+        this.initGlobalSearch();
+
         // 启动定时状态检查 (每 30 秒检查一次登录态)
         setInterval(() => this.checkAuthStatus(), 30000);
 
@@ -186,6 +189,25 @@ const App = {
                 }
             });
         });
+    },
+
+    initGlobalSearch() {
+        const input = document.getElementById('sidebar-global-q');
+        if (!input) return;
+        const go = () => {
+            // 空关键词也带参数，强制重渲染以便回到「最近入库」列表
+            Router.navigate('media_search', { q: input.value.trim() });
+        };
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                go();
+            }
+        });
+        const icon = input.parentElement
+            ? input.parentElement.querySelector('.sidebar-search-icon')
+            : null;
+        if (icon) icon.addEventListener('click', go);
     },
 
     toggleNavGroup(targetGroup) {

@@ -12,7 +12,7 @@
     'use strict';
 
     // 公众号版保留的页面，与 app_mp.py 注册的蓝图一一对应
-    var ALLOWED = ['login', 'accounts', 'articles', 'download', 'history', 'proxy', 'settings'];
+    var ALLOWED = ['login', 'accounts', 'articles', 'media_search', 'media_archive', 'download', 'history', 'proxy', 'settings'];
     var FALLBACK = 'articles';
 
     function applyNav() {

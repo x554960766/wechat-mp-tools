@@ -57,6 +57,13 @@ app.register_blueprint(articles_bp)
 app.register_blueprint(account_pool_bp)
 app.register_blueprint(proxy_bp)
 
+# ── AI 媒体服务反代（必须在 SPA 兜底 /<path:path> 之前注册）──
+from backend.media_host import MediaHost, init_blueprint
+media_host = MediaHost()
+app.config["MEDIA_HOST_OBJ"] = media_host
+app.register_blueprint(init_blueprint(app))
+media_host.start_in_thread()
+
 ensure_dirs()
 migrate_legacy_config()
 
@@ -77,6 +84,7 @@ def healthz():
         "status": "ok",
         "version": APP_VERSION,
         "modules": len(ENABLED_MODULES),
+        "media": media_host.status(),
     })
 
 
