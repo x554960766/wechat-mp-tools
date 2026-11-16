@@ -277,10 +277,18 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
     s = get_weread_session()
 
     def _do_get(url: str):
-        """内部请求函数：对齐官方 SyncKeyRequestFeature 与 WRRetryHandler 错误码自愈策略"""
+        """内部请求函数：对齐官方 SyncKeyRequestFeature、WRRequestInterceptor 与 WRRetryHandler 错误码自愈策略"""
+        from backend.weread_signer import (
+            sanitize_apk_headers,
+            pace_weread_request,
+            mark_rate_limited,
+            activate_terminal_session,
+        )
+        from backend.waterwall import detect_waterwall, waterwall_hit, record_failure
+
         req_url = url
         # 遵循 APK SyncKeyRequestFeature: 缺少 synckey 时自动追加 (但翻页带 offset 时官方接口不追加 synckey)
-        if any(k in req_url for k in ("/mp/list", "/shelf/sync", "/subscription/books")) or ("/mp/chapters" in req_url and "offset=" not in req_url):
+        if any(k in req_url for k in ("/mp/list", "/shelf/sync")) or ("/mp/chapters" in req_url and "offset=" not in req_url):
             if "synckey=" not in req_url:
                 req_url = f"{req_url}&synckey=0" if "?" in req_url else f"{req_url}?synckey=0"
 
@@ -292,14 +300,15 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
                 acc_id, vid, tok, h = borrow_weread_session()
             except RuntimeError as e:
                 raise RuntimeError("账号池中无可用微信读书账号，请先在『账号池』页面扫码登录") from e
+            h = sanitize_apk_headers(h)
             last_h = h
             last_acc = acc_id
             try:
+                pace_weread_request(req_url)
                 r = s.get(req_url, headers=h, timeout=10)
                 last_resp = r
 
                 # ── 优先检测腾讯防水墙 (TCaptcha) ──
-                from backend.waterwall import detect_waterwall, waterwall_hit, record_failure
                 ww_marker = detect_waterwall(r.status_code, r.text)
                 if ww_marker:
                     record_failure(req_url, r.status_code, r.headers, r.text, ww_marker)
@@ -313,6 +322,18 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
                     time.sleep(0.5)
                     continue
 
+                # HTTP 200 但 JSON 业务层返回 -2014 频控
+                if r.status_code == 200:
+                    try:
+                        j_ok = r.json()
+                        if isinstance(j_ok, dict) and j_ok.get("errcode") == -2014:
+                            cooldown_left = mark_rate_limited(req_url)
+                            record_failure(req_url, r.status_code, r.headers, r.text, "-2014")
+                            account_pool.report(acc_id, status_code=200, ret=-2014, error_msg=f"触发频控 (-2014)，冷却 {cooldown_left}s")
+                            return r, h, acc_id
+                    except Exception:
+                        pass
+
                 # 429 或 499: 精准匹配官方错误码 (对齐 OverFreqInterceptor 与 WRRetryHandler 策略)
                 if r.status_code in (429, 499):
                     err_json = {}
@@ -323,22 +344,13 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
                     err_c = err_json.get("errcode")
                     err_m = str(err_json.get("errmsg") or "")
 
-                    # 1. 微信读书频控 -2014 (OverFreqInterceptor): 短时间瞬时并发过高，自动退避 2.5 秒后降频重试
-                    if err_c == -2014 or "-2014" in r.text:
-                        print(f"[_fetch_articles_page] 触发微信读书网关频控 (-2014)，自动退避 2.5 秒后降频重试...", flush=True)
-                        time.sleep(2.5)
-                        try:
-                            r_retry = s.get(req_url, headers=h, timeout=10)
-                            if r_retry.status_code == 200:
-                                return r_retry, h, acc_id
-                        except Exception as ex_retry:
-                            logger.debug("频控退避重试网络异常: %s", ex_retry)
-
-                        # 退避重试后依然触发 -2014 频控：激活腾讯防水墙/频控熔断并触发前端验证
-                        print(f"[_fetch_articles_page] 账号 [{acc_id}] 退避重试后仍处于高频风控 (-2014)，激活防水墙与熔断保护...", flush=True)
+                    # 1. 微信读书频控 -2014 (OverFreqInterceptor): 严格对齐官方 WRRetryHandler，
+                    #    不盲目原地强行重放（避免雪上加霜），也不误弹 -2041 防水墙滑块！
+                    if err_c == -2014 or "-2014" in r.text or r.status_code == 429:
+                        cooldown_left = mark_rate_limited(req_url)
+                        print(f"[_fetch_articles_page] 账号 [{acc_id}] 触发网关频控 (-2014)，进入 {cooldown_left}s 冷却保护并切换账号...", flush=True)
                         record_failure(req_url, r.status_code, r.headers, r.text, "-2014")
-                        waterwall_hit(req_url, r.status_code, "-2014")
-                        account_pool.report(acc_id, status_code=499, ret=-2014, error_msg="触发高频风控 (-2014)，临时冷却并建议完成安全验证")
+                        account_pool.report(acc_id, status_code=r.status_code, ret=-2014, error_msg=f"触发高频风控 (-2014)，冷却 {cooldown_left}s")
                         return r, h, acc_id
 
                     # 2. 网关超时 -2012 (对齐 WRRetryHandler.canRetryTimeOut / whetherNeedToRetry 策略)
@@ -346,6 +358,7 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
                         print(f"[_fetch_articles_page] 上游网关超时 (-2012)，遵循官方策略等待 0.5 秒自动重试...", flush=True)
                         time.sleep(0.5)
                         try:
+                            pace_weread_request(req_url)
                             r_retry = s.get(req_url, headers=h, timeout=10)
                             if r_retry.status_code == 200:
                                 return r_retry, h, acc_id
@@ -355,9 +368,9 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
                     # 3. 账号人机验证 / 终端同步态 -2041 (对齐 WRRetryHandler.canRetryAfterVerify 策略)
                     elif err_c == -2041 or "2041" in r.text:
                         print(f"[_fetch_articles_page] 账号 [{acc_id}] 触发终端会话在线态核验 (-2041)，调用 activate_terminal_session 模拟真机同步...", flush=True)
-                        from backend.weread_signer import activate_terminal_session
                         if activate_terminal_session(h, session=s):
                             try:
+                                pace_weread_request(req_url)
                                 r_retry = s.get(req_url, headers=h, timeout=10)
                                 if r_retry.status_code == 200:
                                     print(f"[_fetch_articles_page] 账号 [{acc_id}] 移动端会话同步激活成功，重试请求通过！", flush=True)
@@ -575,6 +588,7 @@ def get_articles(fakeid):
         print(f"[Articles API] Fetch finished in {time.time() - t_start:.2f}s, got {len(articles)} articles", flush=True)
 
         from backend.waterwall import is_waterwall_active, waterwall_snapshot
+        from backend.weread_signer import get_rate_limit_status
         res_data = {
             "articles": articles,
             "total": total_count,
@@ -582,6 +596,12 @@ def get_articles(fakeid):
             "begin": begin,
             "count": len(articles),
         }
+        throttled_now, cooldown_left = get_rate_limit_status()
+        if throttled_now and len(articles) == 0:
+            res_data["throttled"] = True
+            res_data["errcode"] = -2014
+            res_data["cooldown_left"] = cooldown_left
+            res_data["error"] = f"触发微信读书频控 (-2014)，请 {cooldown_left} 秒后重试"
         if is_waterwall_active():
             res_data["need_verify"] = True
             res_data["waterwall"] = waterwall_snapshot()

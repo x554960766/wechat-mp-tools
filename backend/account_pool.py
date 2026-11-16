@@ -306,7 +306,8 @@ class AccountPool:
                 acc["vid"] = vid
                 acc["cookie_str"] = f"wr_vid={vid}; wr_skey={acc['skey']}"
 
-            acc["userAgent"] = "WeRead/7.5.0 (Android; 33; arm64-v8a)"
+            from backend.weread_signer import APK_USER_AGENT
+            acc["userAgent"] = APK_USER_AGENT
 
             user = res.get("user")
             if isinstance(user, dict):
@@ -395,14 +396,16 @@ class AccountPool:
             token = acc.get("accessToken") or acc.get("token")
             vid = acc.get("vid")
             if token and vid:
-                headers = {
-                    "User-Agent": "WeRead/7.5.0 (Android; 33; arm64-v8a)",
+                from backend.weread_signer import sanitize_apk_headers, pace_weread_request
+                headers = sanitize_apk_headers({
                     "vid": str(vid),
                     "accessToken": str(token),
-                }
+                })
                 try:
                     s = get_weread_session()
-                    resp = s.get("https://i.weread.qq.com/mp/list?listType=0&count=1", headers=headers, timeout=8)
+                    u_ping = "https://i.weread.qq.com/mp/list?listType=0&count=1&synckey=0"
+                    pace_weread_request(u_ping)
+                    resp = s.get(u_ping, headers=headers, timeout=8)
                     if resp.status_code == 200:
                         acc["status"] = "active"
                         acc["failures"] = 0
@@ -648,15 +651,11 @@ def borrow_weread_session() -> tuple[str, str, str, dict]:
     vid = str(acc.get("vid", ""))
     token = acc.get("accessToken") or acc.get("token", "")
     skey = acc.get("skey") or token
-    ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    headers = {
-        "User-Agent": ua,
-        "Content-Type": "application/json; charset=UTF-8",
+    from backend.weread_signer import sanitize_apk_headers
+    headers = sanitize_apk_headers({
         "vid": vid,
         "accessToken": token,
-        "skey": skey,
-        "Cookie": f"wr_vid={vid}; wr_skey={skey}",
-    }
+    })
     # 注入人工完成腾讯滑块验证后签发的微信读书安全票据 (wr_ticket & wr_randstr)
     try:
         from backend.waterwall import get_captcha_headers

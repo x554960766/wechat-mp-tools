@@ -8,6 +8,7 @@ import re
 import html
 import time
 import base64
+import threading
 import urllib.parse
 import requests as req
 from flask import Blueprint, jsonify, request
@@ -331,62 +332,131 @@ def update_account(fakeid):
     return jsonify({"message": "更新成功", "account": target})
 
 
+_USER_MPS_CACHE: dict[str, dict] = {}
+_USER_MPS_LOCK = threading.Lock()
+
+
+def _get_cached_user_mps(vid: str) -> list | None:
+    key = str(vid or "")
+    now = time.time()
+    with _USER_MPS_LOCK:
+        item = _USER_MPS_CACHE.get(key)
+        if not item:
+            return None
+        if now >= item.get("expire", 0):
+            _USER_MPS_CACHE.pop(key, None)
+            return None
+        return list(item["mps"])
+
+
+def _set_cached_user_mps(vid: str, mps: list, ttl: int = 120):
+    key = str(vid or "")
+    with _USER_MPS_LOCK:
+        _USER_MPS_CACHE[key] = {"expire": time.time() + ttl, "mps": list(mps)}
+
+
+def invalidate_user_mps_cache(vid: str = None):
+    with _USER_MPS_LOCK:
+        if vid is None:
+            _USER_MPS_CACHE.clear()
+        else:
+            _USER_MPS_CACHE.pop(str(vid), None)
+
+
 @accounts_bp.route("/user-mps", methods=["GET"])
 def get_user_subscribed_mps():
-    """获取当前登录微信读书用户已关注/书架中的公众号列表 (同步 weread_web 多源聚合与 shelf/sync)"""
+    """获取当前登录微信读书用户已关注/书架中的公众号列表 (带内存缓存与 -2014 短路保护)"""
+    from backend.weread_signer import (
+        sanitize_apk_headers,
+        pace_weread_request,
+        get_rate_limit_status,
+        mark_rate_limited,
+        activate_terminal_session,
+    )
+    from backend.waterwall import detect_waterwall, waterwall_hit, record_failure, waterwall_snapshot, is_waterwall_active
+
+    force = request.args.get("force", "0") in ("1", "true", "yes")
     try:
         acc_id, vid, token, headers = borrow_weread_session()
     except RuntimeError as e:
         return jsonify({"error": str(e)}), 401
 
+    if not force:
+        cached = _get_cached_user_mps(vid)
+        if cached is not None:
+            resp_data = {"mps": cached, "total": len(cached), "cached": True}
+            snap = waterwall_snapshot()
+            if is_waterwall_active() or snap.get("active"):
+                resp_data["need_verify"] = True
+                resp_data["waterwall"] = snap
+            return jsonify(resp_data)
+
+    headers = sanitize_apk_headers(headers)
     s = get_weread_session()
     mps = []
     seen_ids = set()
+    throttled = False
+    cooldown_left = 0
+
+    throttled_now, left_now = get_rate_limit_status()
+    if throttled_now:
+        return jsonify({
+            "mps": [],
+            "total": 0,
+            "cached": False,
+            "throttled": True,
+            "errcode": -2014,
+            "cooldown_left": left_now,
+            "error": f"触发频控冷却中，请 {left_now} 秒后再试",
+        })
 
     def _safe_get(u):
-        nonlocal acc_id, headers
-        from backend.waterwall import detect_waterwall, waterwall_hit, record_failure
+        nonlocal acc_id, vid, headers, throttled, cooldown_left
         for att in range(2):
+            if throttled or is_waterwall_active():
+                return None
             try:
+                pace_weread_request(u)
                 r = s.get(u, headers=headers, timeout=10)
                 # 优先检测防水墙
                 ww = detect_waterwall(r.status_code, r.text)
                 if ww:
                     record_failure(u, r.status_code, r.headers, r.text, ww)
                     waterwall_hit(u, r.status_code, ww)
-                    return r
+                    return None
 
                 if r.status_code == 401:
                     account_pool.report(acc_id, status_code=401)
+                    invalidate_user_mps_cache(vid)
                     acc_id, vid, token, headers = borrow_weread_session()
+                    headers = sanitize_apk_headers(headers)
                     time.sleep(0.5)
                     continue
 
                 if r.status_code in (429, 499):
-                    # -2014 频控: 退避 2.5s 降频重试
-                    if "-2014" in r.text:
-                        time.sleep(2.5)
-                        try:
-                            r_retry = s.get(u, headers=headers, timeout=10)
-                            if r_retry.status_code == 200:
-                                return r_retry
-                        except Exception:
-                            pass
+                    # -2014 频控: 对齐官方策略，登记冷却窗口，不盲目重放且不误弹防水墙
+                    if "-2014" in r.text or r.status_code == 429:
+                        throttled = True
+                        cooldown_left = mark_rate_limited(u)
                         record_failure(u, r.status_code, r.headers, r.text, "-2014")
-                        waterwall_hit(u, r.status_code, "-2014")
-                        return r
+                        account_pool.report(acc_id, status_code=r.status_code, ret=-2014, error_msg=f"触发频控 (-2014)，冷却 {cooldown_left}s")
+                        return None
                     # -2012 超时: 0.5s 重试
                     elif "-2012" in r.text:
                         time.sleep(0.5)
                         try:
-                            return s.get(u, headers=headers, timeout=10)
+                            pace_weread_request(u)
+                            r_to = s.get(u, headers=headers, timeout=10)
+                            if r_to.status_code == 200:
+                                return r_to
                         except Exception:
                             pass
+                        return None
                     # -2041 在线态激活
                     elif "-2041" in r.text:
-                        from backend.weread_signer import activate_terminal_session
                         activate_terminal_session(headers, session=s)
                         try:
+                            pace_weread_request(u)
                             r_sync = s.get(u, headers=headers, timeout=10)
                             if r_sync.status_code == 200:
                                 return r_sync
@@ -394,9 +464,21 @@ def get_user_subscribed_mps():
                             pass
                         record_failure(u, r.status_code, r.headers, r.text, "-2041")
                         waterwall_hit(u, r.status_code, "-2041")
-                        return r
+                        return None
 
-                return r if r.status_code == 200 else None
+                if r.status_code == 200:
+                    try:
+                        j = r.json()
+                        if isinstance(j, dict) and j.get("errcode") == -2014:
+                            throttled = True
+                            cooldown_left = mark_rate_limited(u)
+                            record_failure(u, r.status_code, r.headers, r.text, "-2014")
+                            account_pool.report(acc_id, status_code=200, ret=-2014, error_msg=f"触发频控 (-2014)，冷却 {cooldown_left}s")
+                            return None
+                    except Exception:
+                        pass
+                    return r
+                return None
             except Exception as ex:
                 logger.debug("[user-mps] 请求 %s 异常: %s", u, ex)
                 time.sleep(0.5)
@@ -404,6 +486,8 @@ def get_user_subscribed_mps():
 
     # 1. 微信读书官方 /mp/list (listType=0, 1) 必须带 synckey=0
     for lt in (0, 1):
+        if throttled or is_waterwall_active():
+            break
         r = _safe_get(f"https://i.weread.qq.com/mp/list?listType={lt}&count=50&synckey=0")
         if r:
             items = r.json().get("lists", []) or r.json().get("items", []) or []
@@ -427,50 +511,39 @@ def get_user_subscribed_mps():
                     "service_type": 1,
                 })
 
-    # 2. 从官方书架接口 /shelf/sync?synckey=0 补充已加入书架的公众号
-    r_shelf = _safe_get("https://i.weread.qq.com/shelf/sync?synckey=0")
-    if r_shelf:
-        for b in r_shelf.json().get("books", []):
-            bid = b.get("bookId", "")
-            if (bid.startswith("MP_") or "MP_WXS" in bid) and bid not in seen_ids:
-                seen_ids.add(bid)
-                title = b.get("title", "")
-                cover = b.get("cover", "")
-                intro = b.get("intro", "")
-                fid = book_id_to_biz(bid) or bid
-                mps.append({
-                    "fakeid": fid,
-                    "bookId": bid,
-                    "nickname": title,
-                    "alias": fid,
-                    "round_head_img": cover,
-                    "signature": intro,
-                    "service_type": 1,
-                })
+    # 2. 从官方书架接口 /shelf/sync 补充已加入书架的公众号 (对齐官方 BaseShelfService 参数)
+    if not throttled and not is_waterwall_active():
+        r_shelf = _safe_get("https://i.weread.qq.com/shelf/sync?synckey=0&teenmode=0&album=1&onlyBookid=0&localBookCount=0")
+        if r_shelf:
+            for b in r_shelf.json().get("books", []):
+                bid = b.get("bookId", "")
+                if (bid.startswith("MP_") or "MP_WXS" in bid) and bid not in seen_ids:
+                    seen_ids.add(bid)
+                    title = b.get("title", "")
+                    cover = b.get("cover", "")
+                    intro = b.get("intro", "")
+                    fid = book_id_to_biz(bid) or bid
+                    mps.append({
+                        "fakeid": fid,
+                        "bookId": bid,
+                        "nickname": title,
+                        "alias": fid,
+                        "round_head_img": cover,
+                        "signature": intro,
+                        "service_type": 1,
+                    })
 
-    # 3. /subscription/books 补充
-    r_sub = _safe_get("https://i.weread.qq.com/subscription/books?count=50")
-    if r_sub:
-        for b in r_sub.json().get("books", []) or r_sub.json().get("data", []):
-            b_info = b.get("bookInfo", b)
-            bid = b_info.get("bookId", "")
-            title = b_info.get("title", "")
-            if bid and (bid.startswith("MP_") or "MP_WXS" in bid) and bid not in seen_ids:
-                seen_ids.add(bid)
-                fid = book_id_to_biz(bid) or bid
-                mps.append({
-                    "fakeid": fid,
-                    "bookId": bid,
-                    "nickname": title,
-                    "alias": fid,
-                    "round_head_img": b_info.get("cover", ""),
-                    "signature": b_info.get("intro", ""),
-                    "service_type": 1,
-                })
+    # 已移除非官方客户端接口 /subscription/books，避免额外风控请求
+    if mps and not throttled and not is_waterwall_active():
+        _set_cached_user_mps(vid, mps, ttl=120)
 
-    from backend.waterwall import waterwall_snapshot, is_waterwall_active
     snap = waterwall_snapshot()
-    resp_data = {"mps": mps, "total": len(mps)}
+    resp_data = {"mps": mps, "total": len(mps), "cached": False}
+    if throttled:
+        resp_data["throttled"] = True
+        resp_data["errcode"] = -2014
+        resp_data["cooldown_left"] = cooldown_left
+        resp_data["error"] = f"触发微信读书频控 (-2014)，请 {cooldown_left} 秒后重试"
     if is_waterwall_active() or snap.get("active"):
         resp_data["need_verify"] = True
         resp_data["waterwall"] = snap

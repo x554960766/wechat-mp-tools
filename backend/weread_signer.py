@@ -8,7 +8,106 @@ import json
 import hashlib
 import time
 import random
+import threading
 import requests
+
+# 对齐微信读书官方客户端 (10.2.2 / 10167650) 请求头规范
+APK_VERSION = "10.2.2"
+APK_VERSION_CODE = "10167650"
+APK_FULL_VERSION = f"{APK_VERSION}.{APK_VERSION_CODE}"
+APK_USER_AGENT = (
+    f"WeRead/{APK_VERSION} WRBrand/Xiaomi "
+    "Dalvik/2.1.0 (Linux; U; Android 13; 2211133C Build/TKQ1.220905.001)"
+)
+APK_CLIENT_HEADERS = {
+    "User-Agent": APK_USER_AGENT,
+    "osver": "13",
+    "appver": APK_FULL_VERSION,
+    "basever": APK_FULL_VERSION,
+    "channelId": "990",
+    "baseapi": "33",
+    "Content-Type": "application/json; charset=UTF-8",
+}
+
+# 对齐官方客户端全局节流与短时频控冷却，避免瞬时并发冲击 i.weread.qq.com
+WEREAD_MIN_INTERVAL = 0.35
+_PACE_LOCK = threading.Lock()
+_LAST_WEREAD_REQ_AT = 0.0
+
+RATE_LIMIT_COOLDOWN = 15
+_RATE_LIMIT_LOCK = threading.Lock()
+RATE_LIMIT = {
+    "until": 0.0,
+    "hits": 0,
+    "last_url": "",
+}
+
+
+class WeReadRateLimitError(RuntimeError):
+    """触发微信读书 -2014 ErrorOverFreq 频控时的显式异常。"""
+
+    def __init__(self, msg='HTTP 499: {"errcode":-2014,"errmsg":"请求频率过高"}', cooldown_left=0):
+        super().__init__(msg)
+        self.errcode = -2014
+        self.cooldown_left = int(max(0, cooldown_left))
+
+
+def pace_weread_request(url: str):
+    """对 i.weread.qq.com 请求施加最小间隔 + 随机抖动，避免并发冲击频控阈值。"""
+    if "i.weread.qq.com" not in (url or ""):
+        return
+    global _LAST_WEREAD_REQ_AT
+    interval = WEREAD_MIN_INTERVAL + random.uniform(0.05, 0.18)
+    with _PACE_LOCK:
+        now = time.time()
+        target = max(now, _LAST_WEREAD_REQ_AT + interval)
+        _LAST_WEREAD_REQ_AT = target
+        wait_s = target - now
+    if wait_s > 0:
+        time.sleep(wait_s)
+
+
+def get_rate_limit_status() -> tuple[bool, int]:
+    """返回当前是否处于 -2014 本地冷却窗口及剩余秒数。"""
+    with _RATE_LIMIT_LOCK:
+        left = max(0, int(round(RATE_LIMIT["until"] - time.time())))
+        return left > 0, left
+
+
+def mark_rate_limited(url: str, cooldown: int = RATE_LIMIT_COOLDOWN) -> int:
+    """登记 -2014 频控冷却窗口（对齐官方重试策略，不盲目重放且不误弹防水墙）。"""
+    with _RATE_LIMIT_LOCK:
+        RATE_LIMIT["until"] = max(RATE_LIMIT["until"], time.time() + cooldown)
+        RATE_LIMIT["hits"] += 1
+        RATE_LIMIT["last_url"] = url or ""
+        return max(0, int(round(RATE_LIMIT["until"] - time.time())))
+
+
+def clear_rate_limit():
+    """重置本地 -2014 频控冷却窗口。"""
+    with _RATE_LIMIT_LOCK:
+        RATE_LIMIT["until"] = 0.0
+
+
+def build_apk_headers(extra: dict = None) -> dict:
+    """构建对齐微信读书官方客户端的基础请求头。"""
+    headers = dict(APK_CLIENT_HEADERS)
+    if extra:
+        headers.update(extra)
+    return headers
+
+
+def sanitize_apk_headers(headers: dict = None) -> dict:
+    """确保传给 i.weread.qq.com 的请求头与官方客户端登录态规范一致。"""
+    h = build_apk_headers(headers)
+    if h.get("accessToken"):
+        # 官方客户端接口仅传 vid 与 accessToken，不附带 Web 端冲突的 skey/Cookie
+        if h.get("skey") == h.get("accessToken"):
+            h.pop("skey", None)
+        cookie = h.get("Cookie", "")
+        if "wr_vid=" in cookie or "wr_skey=" in cookie:
+            h.pop("Cookie", None)
+    return h
 
 # libencrypt.so 内置 256 字节 S-Box 置换盒 (偏移 0xd9fc)
 SBOX = [
@@ -127,11 +226,9 @@ def refresh_access_token(
         "deviceName": str(device_name or "Android")
     }
 
-    headers = {
-        "User-Agent": "WeRead/7.5.0 (Android; 33; arm64-v8a)",
-        "Content-Type": "application/json; charset=UTF-8",
+    headers = build_apk_headers({
         "Host": "i.weread.qq.com"
-    }
+    })
 
     try:
         s = requests.Session()
@@ -195,18 +292,15 @@ def activate_terminal_session(headers: dict, session=None) -> bool:
     将新旧账号的服务端会话通道从未激活态转变为在线活跃态，彻底解除 /mp/chapters 和 store/search 的 499 (-2041) 拦截。
     """
     try:
-        h = dict(headers)
-        # 移除 WeRead 特定 UA 避免网关设备指纹误判
-        if "User-Agent" not in h or "WeRead/" in h.get("User-Agent", ""):
-            h["User-Agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        h = sanitize_apk_headers(headers)
         h["Content-Type"] = "application/json; charset=UTF-8"
 
         s = session or requests.Session()
 
-        # 1. 核心步骤：调用 mobileSync 激活服务端通道
+        # 1. 核心步骤：调用 mobileSync 激活服务端通道 (字段严格对齐官方 AppService.mobileSync)
         u_mobile_sync = "https://i.weread.qq.com/mobileSync"
         payload = {
-            "shelf": 0, "bookInventory": 0, "shelfLecture": 0, "notifications": 0,
+            "shelf": 0, "booklist": 0, "shelfLecture": 0, "notifications": 0,
             "config": 0, "gift": 0, "payItem": 0, "balance": 0.0, "reviewTimeline": 0,
             "follower": 0, "readingExchange": 0, "chat": 0, "chatRemovedSynckey": 0,
             "wechatFriend": 0, "inBackground": 0, "refluxSynckey": 0, "following": 0,
@@ -215,14 +309,17 @@ def activate_terminal_session(headers: dict, session=None) -> bool:
             "discoverColumnSynckey": 0, "friendReviewSynckey": 0, "wehearSyncKey": 0,
             "preferTab": 1, "localBrowseTab": "", "localCommunityTab": ""
         }
+        pace_weread_request(u_mobile_sync)
         resp = s.post(u_mobile_sync, json=payload, headers=h, timeout=8)
         print(f"[TERMINAL SYNC] mobileSync status={resp.status_code}")
 
-        # 2. 辅助同步基础书架与公众号索引
-        u_shelf = "https://i.weread.qq.com/shelf/sync?synckey=0"
+        # 2. 辅助同步基础书架与公众号索引 (带节流间隔与官方客户端查询参数)
+        u_shelf = "https://i.weread.qq.com/shelf/sync?synckey=0&teenmode=0&album=1&onlyBookid=1&localBookCount=0"
+        pace_weread_request(u_shelf)
         s.get(u_shelf, headers=h, timeout=6)
 
         u_mpl = "https://i.weread.qq.com/mp/list?listType=0&count=50&synckey=0"
+        pace_weread_request(u_mpl)
         s.get(u_mpl, headers=h, timeout=6)
 
         print("[TERMINAL SYNC] Successfully activated mobile online sync session via AppService.mobileSync!")
