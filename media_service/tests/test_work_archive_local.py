@@ -4,6 +4,10 @@
 NAS 校验结果已持久化、本地文件仍属同一版本」时才允许清理本地。
 """
 import hashlib
+import io
+import json
+
+from PIL import Image
 
 from app import config, media, work_archive
 
@@ -222,3 +226,109 @@ def test_cleanup_disabled_keeps_local_files(monkeypatch, tmp_path):
     assert (dst / "archive" / "work-1" / "body.txt").read_bytes() == b"keep me"
     assert (src / "body.txt").read_bytes() == b"keep me"
     assert job.get("manifest_path") == "archive/_manifests/job-1.json"
+
+
+# ---------------------------------------------------------------------------
+# 归档前图片筛选（filter.py 接入 work_archive）：被筛图不写 NAS、不入清单、本地保留
+# ---------------------------------------------------------------------------
+
+
+def _png_bytes(size=(300, 300), sigma=40) -> bytes:
+    """生成一张能通过筛选的噪声 PNG（尺寸/面积/长宽比/对比度/透明度都过关）。"""
+    buf = io.BytesIO()
+    Image.effect_noise(size, sigma).save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _tiny_png_bytes() -> bytes:
+    """100x100 缩略图，触发 filter 的 tiny 判定。"""
+    return _png_bytes(size=(100, 100), sigma=40)
+
+
+def test_all_images_filtered_fails_work_and_keeps_local(monkeypatch, tmp_path):
+    """作品内文件全被筛掉：判 FAILED，本地保留，不写 NAS、不发清单。"""
+    src, dst = _setup(monkeypatch, tmp_path)
+    digest, size = _write(src, "tiny.png", _tiny_png_bytes())
+
+    job = _job("dst-root", str(dst), [_work("src-root", [{"relpath": "tiny.png", "digest": digest, "size": size}])])
+    work_archive.run_work_archive(job)
+    work = job["works"][0]
+
+    assert work["status"] == work_archive.FAILED
+    assert work.get("filtered") == [{"relpath": "tiny.png", "reason": "tiny"}]
+    assert job["status"] == "failed"
+    # 本地保留，不写 NAS，未发清单
+    assert (src / "tiny.png").exists()
+    assert not (dst / "archive" / "work-1" / "tiny.png").exists()
+    assert not job.get("manifest_path")
+
+
+def test_filtered_image_skipped_from_manifest_and_cleanup(monkeypatch, tmp_path):
+    """保留图正常归档清理，被筛图不写 NAS、不入清单、本地保留。"""
+    src, dst = _setup(monkeypatch, tmp_path)
+    good_digest, good_size = _write(src, "good.png", _png_bytes())
+    tiny_digest, tiny_size = _write(src, "tiny.png", _tiny_png_bytes())
+
+    job = _job("dst-root", str(dst), [_work("src-root", [
+        {"relpath": "good.png", "digest": good_digest, "size": good_size},
+        {"relpath": "tiny.png", "digest": tiny_digest, "size": tiny_size},
+    ])])
+    work_archive.run_work_archive(job)
+    work = job["works"][0]
+
+    assert work["status"] == work_archive.ARCHIVED
+    assert work["filtered"] == [{"relpath": "tiny.png", "reason": "tiny"}]
+    # 保留图已归档并清理本地
+    assert (dst / "archive" / "work-1" / "good.png").exists()
+    assert not (src / "good.png").exists()
+    # 被筛图不写 NAS、本地保留
+    assert not (dst / "archive" / "work-1" / "tiny.png").exists()
+    assert (src / "tiny.png").exists()
+    # 清单只含真正写入 NAS 的保留图
+    manifest = json.loads((dst / "archive" / "_manifests" / "job-1.json").read_text(encoding="utf-8"))
+    assert {f["relpath"] for f in manifest["files"]} == {"archive/work-1/good.png"}
+
+
+def test_non_image_files_are_not_filtered(monkeypatch, tmp_path):
+    """正文/字幕等非图片不受筛选影响，照常归档清理。"""
+    src, dst = _setup(monkeypatch, tmp_path)
+    body_digest, body_size = _write(src, "body.txt", b"hello")
+    tiny_digest, tiny_size = _write(src, "tiny.png", _tiny_png_bytes())
+
+    job = _job("dst-root", str(dst), [_work("src-root", [
+        {"relpath": "body.txt", "digest": body_digest, "size": body_size},
+        {"relpath": "tiny.png", "digest": tiny_digest, "size": tiny_size},
+    ])])
+    work_archive.run_work_archive(job)
+    work = job["works"][0]
+
+    assert work["status"] == work_archive.ARCHIVED
+    assert work["filtered"] == [{"relpath": "tiny.png", "reason": "tiny"}]
+    # 正文照常归档并清理
+    assert (dst / "archive" / "work-1" / "body.txt").read_bytes() == b"hello"
+    assert not (src / "body.txt").exists()
+    # 被筛图本地保留
+    assert (src / "tiny.png").exists()
+
+
+def test_auto_archive_keeps_filtered_and_archived_images_local(monkeypatch, tmp_path):
+    """cleanup=False（下载即自动归档）：保留图与被筛图本地都保留。"""
+    src, dst = _setup(monkeypatch, tmp_path)
+    good_digest, good_size = _write(src, "good.png", _png_bytes())
+    tiny_digest, tiny_size = _write(src, "tiny.png", _tiny_png_bytes())
+
+    job = _job("dst-root", str(dst), [_work("src-root", [
+        {"relpath": "good.png", "digest": good_digest, "size": good_size},
+        {"relpath": "tiny.png", "digest": tiny_digest, "size": tiny_size},
+    ])])
+    job["cleanup"] = False
+    work_archive.run_work_archive(job)
+    work = job["works"][0]
+
+    assert job["status"] == "completed"
+    assert work["status"] == work_archive.ARCHIVED
+    assert work["local_retained"] is True
+    # 保留图与被筛图本地都保留，被筛图不写 NAS
+    assert (src / "good.png").exists()
+    assert (src / "tiny.png").exists()
+    assert not (dst / "archive" / "work-1" / "tiny.png").exists()

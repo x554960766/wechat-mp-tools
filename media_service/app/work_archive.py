@@ -15,6 +15,7 @@ import tempfile
 from pathlib import Path
 
 from . import config, media
+from .filter import inspect, judge
 
 # 作品状态机（§4.2 七态）
 PENDING = "pending"                       # 待归档
@@ -90,6 +91,10 @@ def _suffix(relpath: str) -> str:
     return suffix if suffix and len(suffix) <= 8 else ".bin"
 
 
+# 归档前筛选只针对图片文件，正文/视频/字幕等不筛。
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+
 def _archive_work(job: dict, work: dict, target_root: dict) -> None:
     """复制一个作品的全部文件到目标根，逐文件读回校验。"""
     if work.get("status") in (ARCHIVED, PENDING_CLEANUP, TARGET_MATCHED):
@@ -102,8 +107,26 @@ def _archive_work(job: dict, work: dict, target_root: dict) -> None:
     target_dir = _work_target_dir(job, work)
 
     target_match = False
+    seen: list = []  # 同作品内已保留图片，供去重（与逐篇归档同口径）
     for item in work.get("files", []):
         rel = item["relpath"]
+
+        # 归档前图片筛选：与逐篇归档 filter.py 同口径，只读判定，不移动本地。
+        # 被丢的图不写 NAS、不入清单、保留本地，原因记入 work["filtered"]。
+        # 读图失败时保守放行，走正常归档，避免误杀正文配图。
+        if Path(rel).suffix.lower() in _IMAGE_SUFFIXES and not item.get("filtered"):
+            try:
+                info = inspect(_local_path(source_root, rel))
+                reason = judge(info, seen)
+            except Exception:
+                reason = ""
+            if reason:
+                item["filtered"] = True
+                item["filtered_reason"] = reason
+                work.setdefault("filtered", []).append({"relpath": rel, "reason": reason})
+                continue
+            seen.append(info)
+
         try:
             media.validate_relpath(rel)
             target_rel = f"{target_dir}/{rel}"
@@ -180,6 +203,15 @@ def _archive_work(job: dict, work: dict, target_root: dict) -> None:
         item["target_size"] = result.get("size")
         item["target_digest"] = digest
 
+    # 全部文件被筛选剔除：未向 NAS 写入任何内容，本地保留并判失败，
+    # 避免误判为已归档（清单为空但状态为 ARCHIVED 会造成清理凭据缺失）。
+    if work.get("files") and not any(f.get("target_relpath") for f in work["files"]):
+        work["errors"].append(
+            f"作品内文件均被筛选剔除，未归档任何内容，保留本地：{work.get('id')}"
+        )
+        work["status"] = FAILED
+        return
+
     work["target_dir"] = target_dir
     work["manifest_confirmed"] = False
     # 目标原本就有同版本则标记 target_matched，否则进入待清理
@@ -204,6 +236,7 @@ def _persist_manifest(job: dict, target_root: dict) -> None:
         for w in works
         if w.get("status") in (_VERIFIED + (ARCHIVED,))
         for f in w.get("files", [])
+        if f.get("target_relpath")  # 被筛选剔除的图未写 NAS，不入清单
     ]
     if not files:
         return
@@ -263,6 +296,9 @@ def _cleanup_work(job: dict, work: dict) -> None:
     blocked: list[dict] = []
     for item in work.get("files", []):
         rel = item["relpath"]
+        # 筛选剔除的图从未写入 NAS，本地必须保留，不参与清理与复核。
+        if item.get("filtered"):
+            continue
         expected = item.get("target_digest") or item.get("digest")
         target_rel = item.get("target_relpath")
 
