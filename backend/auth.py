@@ -10,6 +10,7 @@ import time
 import uuid
 import random
 import hashlib
+import logging
 import threading
 import urllib.request
 import urllib.parse
@@ -25,14 +26,20 @@ from backend.account_pool import (
     account_pool, borrow_weread_session, get_weread_session,
     generate_random_device_profile
 )
-from backend.weread_signer import gen_signature
+from backend.weread_signer import (
+    APK_USER_AGENT,
+    DEFAULT_DEVICE_NAME,
+    build_apk_headers,
+    clear_rate_limit,
+    gen_signature,
+    sanitize_apk_headers,
+)
+
+logger = logging.getLogger(__name__)
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 
-APP_HEADERS = {
-    'User-Agent': 'WeRead/7.5.0 (Android; 33; arm64-v8a)',
-    'Content-Type': 'application/json; charset=UTF-8',
-}
+APP_HEADERS = build_apk_headers()
 
 # 登录状态管理
 _login_state = {
@@ -93,9 +100,9 @@ def exchange_weread_token(auth_code: str, device_profile: dict = None) -> dict:
     if not device_profile:
         device_profile = generate_random_device_profile()
     device_id = device_profile.get("deviceId") or hashlib.md5(uuid.uuid4().bytes).hexdigest()
-    device_name = device_profile.get("deviceName", "Xiaomi 14")
+    device_name = device_profile.get("deviceName", DEFAULT_DEVICE_NAME)
     install_id = device_profile.get("installId", str(uuid.uuid4()))
-    ua = device_profile.get("userAgent", APP_HEADERS['User-Agent'])
+    ua = device_profile.get("userAgent", APK_USER_AGENT)
 
     ts = int(time.time() * 1000)
     rand_val = random.randint(0, 999)
@@ -114,19 +121,25 @@ def exchange_weread_token(auth_code: str, device_profile: dict = None) -> dict:
         "installId": install_id,
         "isFromQrcode": 1,
         "isAutoLogout": 0,
-        "deviceName": "Android",
+        "deviceName": device_name,
         "deviceType": 1
     }
 
     url = 'https://i.weread.qq.com/login'
     s = get_weread_session()
-    headers = {**APP_HEADERS, "User-Agent": ua}
+    headers = build_apk_headers({"User-Agent": ua})
     resp = s.post(url, json=payload, headers=headers, timeout=12)
     res = resp.json()
     res['deviceId'] = device_id
     res['deviceName'] = device_name
     res['installId'] = install_id
     res['userAgent'] = ua
+    if isinstance(res, dict) and res.get("accessToken") and not res.get("errcode"):
+        now_ts = time.time()
+        res["loginAt"] = now_ts
+        res["refreshedAt"] = now_ts
+        res["lastActiveAt"] = now_ts
+        res["refreshTokenExpired"] = False
     return res
 
 
@@ -165,26 +178,36 @@ def _background_poll_login(uuid_val: str, device_profile: dict):
                         "accessToken": login_info.get("accessToken"),
                         "refreshToken": login_info.get("refreshToken"),
                         "skey": login_info.get("skey"),
+                        "wxAccessToken": login_info.get("wxAccessToken"),
+                        "openId": login_info.get("openId"),
+                        "pf": login_info.get("pf"),
                         "deviceId": login_info.get("deviceId"),
                         "deviceName": login_info.get("deviceName"),
                         "installId": login_info.get("installId"),
                         "userAgent": login_info.get("userAgent"),
+                        "loginAt": login_info.get("loginAt"),
+                        "refreshedAt": login_info.get("refreshedAt"),
+                        "lastActiveAt": login_info.get("lastActiveAt"),
+                        "refreshTokenExpired": False,
                         "nickname": user.get("name", f"微信读书用户_{vid}"),
                         "avatar": user.get("avatar", ""),
                     })
 
-                    # 立即模拟真机在线同步会话 (shelf/sync 与 mp/list)，完成新设备在线态激活
+                    clear_rate_limit()
+                    try:
+                        from backend.accounts import invalidate_user_mps_cache
+                        invalidate_user_mps_cache(str(vid))
+                    except Exception:
+                        pass
+
+                    # 立即模拟真机在线同步会话 (mobileSync + syncFeature + shelf/sync + mp/list)，完成新设备在线态激活
                     try:
                         from backend.weread_signer import activate_terminal_session
-                        auth_h = {
-                            "accessToken": login_info.get("accessToken"),
+                        auth_h = sanitize_apk_headers({
+                            "accessToken": str(login_info.get("accessToken") or ""),
                             "vid": str(vid),
-                            "basekey": login_info.get("accessToken"),
-                            "deviceId": login_info.get("deviceId"),
-                            "User-Agent": login_info.get("userAgent", APP_HEADERS['User-Agent']),
-                            "Cookie": f"wr_vid={vid}; wr_skey={login_info.get('skey')}"
-                        }
-                        activate_terminal_session(auth_h, session=s)
+                        })
+                        activate_terminal_session(auth_h, session=s, include_feature=True)
                     except Exception as ex:
                         logger.debug("登录后激活终端会话异常: %s", ex)
 

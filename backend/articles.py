@@ -315,10 +315,10 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
                     waterwall_hit(req_url, r.status_code, ww_marker)
                     return r, h, acc_id
 
-                # 401 Token 过期: 自动静默续期重试
+                # 401 Token 过期: 自动单飞静默续期重试
                 if r.status_code == 401:
-                    print(f"[_fetch_articles_page] 微信读书 401 Token 过期，触发自动静默续期 (第 {att+1} 次)...", flush=True)
-                    account_pool.report(acc_id, status_code=401)
+                    print(f"[_fetch_articles_page] 微信读书 401 Token 过期，触发单飞静默续期 (第 {att+1} 次)...", flush=True)
+                    account_pool.report(acc_id, status_code=401, expected_access_token=tok)
                     time.sleep(0.5)
                     continue
 

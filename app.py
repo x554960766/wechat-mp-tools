@@ -100,9 +100,10 @@ app.register_blueprint(waterwall_bp)
 # 确保必要目录与数据库结构就绪
 ensure_dirs()
 
-# 账号池旧数据迁移
-from backend.account_pool import migrate_legacy_config
+# 账号池旧数据迁移与会话激活保活线程
+from backend.account_pool import migrate_legacy_config, start_session_keepalive_thread
 migrate_legacy_config()
+start_session_keepalive_thread()
 
 # 启动 RSS 自动抓取调度器
 from backend.rss_scheduler import rss_scheduler

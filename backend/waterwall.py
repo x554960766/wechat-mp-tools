@@ -251,6 +251,11 @@ def verify_waterwall():
         return jsonify({"ok": False, "error": "验证码凭证 ticket 或 randstr 不能为空"}), 400
 
     set_captcha_ticket(ticket, randstr)
+    try:
+        from backend.weread_signer import clear_rate_limit
+        clear_rate_limit()
+    except Exception:
+        pass
     print(f"[WATERWALL] 前端人机滑动验证成功！写入票据: ticket={ticket[:10]}***, randstr={randstr}，拦截已彻底解除！", flush=True)
     return jsonify({
         "ok": True,
@@ -264,7 +269,12 @@ def clear_waterwall():
     """用户手动解除防水墙拦截态（例如已在微信读书 App 中完成滑动验证）"""
     was_active = WATERWALL["active"]
     waterwall_reset()
-    print("[WATERWALL] 拦截态已由用户手动解除", flush=True)
+    try:
+        from backend.weread_signer import clear_rate_limit
+        clear_rate_limit()
+    except Exception:
+        pass
+    print("[WATERWALL] 拦截态与频控冷却已由用户手动解除", flush=True)
     return jsonify({
         "ok": True,
         "was_active": was_active,
@@ -294,7 +304,17 @@ def diagnose_upstream():
     elif counts.get("session_inactive", 0) > 0:
         suggestion = "检测到终端会话休眠 (-2041)，系统已自动执行 mobileSync 尝试激活并轮询健康账号。"
 
+    throttled, cooldown_left = False, 0
+    try:
+        from backend.weread_signer import get_rate_limit_status
+        throttled, cooldown_left = get_rate_limit_status()
+    except Exception:
+        pass
+
     return jsonify({
+        "need_verify": is_waterwall_active(),
+        "throttled": throttled,
+        "cooldown_left": cooldown_left,
         "summary": counts,
         "hints": hints,
         "suggestion": suggestion,

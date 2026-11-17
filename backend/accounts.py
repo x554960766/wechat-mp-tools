@@ -107,6 +107,15 @@ def search_accounts():
     seen_ids = set()
 
     s = get_weread_session()
+    from backend.weread_signer import (
+        sanitize_apk_headers,
+        pace_weread_request,
+        get_rate_limit_status,
+        mark_rate_limited,
+        activate_terminal_session,
+    )
+    from backend.waterwall import detect_waterwall, waterwall_hit, record_failure, is_waterwall_active
+    headers = sanitize_apk_headers(headers)
 
     # ── 模式 1：链接 / biz 解析 ──────────────────────────
     if keyword.startswith("http://") or keyword.startswith("https://") or keyword.startswith("biz:"):
@@ -175,29 +184,64 @@ def search_accounts():
 
     # ── 模式 2：名称关键字搜索 (微信读书官方 scope=2 检索) ──
     try:
+        throttled_now, left_now = get_rate_limit_status()
+        if throttled_now:
+            return jsonify({
+                "results": [],
+                "total": 0,
+                "throttled": True,
+                "errcode": -2014,
+                "cooldown_left": left_now,
+                "error": f"触发频控冷却中，请 {left_now} 秒后再试",
+            })
+
         encoded_kw = urllib.parse.quote(keyword)
         url_mp = f"https://i.weread.qq.com/store/search?keyword={encoded_kw}&scope=2&v=2&count=20"
-        
-        # 智能重试循环 (支持 401 自动续期与 499 自动激活/轮换)
+
+        # 智能重试循环 (支持 401 单飞自动续期、-2014 冷却与 -2041/-2012 处理)
         resp = None
         for attempt in range(3):
+            if is_waterwall_active() or get_rate_limit_status()[0]:
+                break
+            pace_weread_request(url_mp)
             resp = s.get(url_mp, headers=headers, timeout=10)
+            ww = detect_waterwall(resp.status_code, resp.text)
+            if ww:
+                record_failure(url_mp, resp.status_code, resp.headers, resp.text, ww)
+                waterwall_hit(url_mp, resp.status_code, ww)
+                break
             if resp.status_code == 200:
+                try:
+                    j_ok = resp.json()
+                    if isinstance(j_ok, dict) and j_ok.get("errcode") == -2014:
+                        cd = mark_rate_limited(url_mp)
+                        record_failure(url_mp, resp.status_code, resp.headers, resp.text, "-2014")
+                        account_pool.report(acc_id, status_code=200, ret=-2014, error_msg=f"频控 -2014，冷却 {cd}s")
+                        resp = None
+                        break
+                except Exception:
+                    pass
                 break
             elif resp.status_code == 401:
-                account_pool.report(acc_id, status_code=401)
+                account_pool.report(acc_id, status_code=401, expected_access_token=token)
                 acc_id, vid, token, headers = borrow_weread_session()
-            elif resp.status_code == 499:
+                headers = sanitize_apk_headers(headers)
+            elif resp.status_code in (429, 499):
                 err_text = resp.text
-                if "-2041" in err_text:
-                    from backend.weread_signer import activate_terminal_session
-                    activate_terminal_session(headers, session=s)
-                elif "-2014" in err_text:
-                    from backend.waterwall import waterwall_hit, record_failure
+                if "-2014" in err_text or resp.status_code == 429:
+                    cd = mark_rate_limited(url_mp)
                     record_failure(url_mp, resp.status_code, resp.headers, resp.text, "-2014")
-                    waterwall_hit(url_mp, resp.status_code, "-2014")
-                    account_pool.report(acc_id, status_code=499, ret=-2014, error_msg="频控 -2014")
-                    acc_id, vid, token, headers = borrow_weread_session()
+                    account_pool.report(acc_id, status_code=resp.status_code, ret=-2014, error_msg=f"频控 -2014，冷却 {cd}s")
+                    break
+                elif "-2012" in err_text:
+                    time.sleep(0.5)
+                    continue
+                elif "-2041" in err_text:
+                    if activate_terminal_session(headers, session=s):
+                        continue
+                    record_failure(url_mp, resp.status_code, resp.headers, resp.text, "-2041")
+                    waterwall_hit(url_mp, resp.status_code, "-2041")
+                    break
                 else:
                     break
             else:
@@ -223,9 +267,9 @@ def search_accounts():
                 })
 
         # 若 scope=2 无结果且未处于防水墙/频控熔断，拉取通用搜索作为补充
-        from backend.waterwall import WATERWALL
-        if not results and not WATERWALL.get("active"):
+        if not results and not is_waterwall_active() and not get_rate_limit_status()[0]:
             url_gen = f"https://i.weread.qq.com/store/search?keyword={encoded_kw}&v=2&count=20"
+            pace_weread_request(url_gen)
             resp_gen = s.get(url_gen, headers=headers, timeout=10)
             if resp_gen.status_code == 200:
                 for b in resp_gen.json().get("books", []):
@@ -411,7 +455,7 @@ def get_user_subscribed_mps():
         })
 
     def _safe_get(u):
-        nonlocal acc_id, vid, headers, throttled, cooldown_left
+        nonlocal acc_id, vid, token, headers, throttled, cooldown_left
         for att in range(2):
             if throttled or is_waterwall_active():
                 return None
@@ -426,7 +470,7 @@ def get_user_subscribed_mps():
                     return None
 
                 if r.status_code == 401:
-                    account_pool.report(acc_id, status_code=401)
+                    account_pool.report(acc_id, status_code=401, expected_access_token=token)
                     invalidate_user_mps_cache(vid)
                     acc_id, vid, token, headers = borrow_weread_session()
                     headers = sanitize_apk_headers(headers)

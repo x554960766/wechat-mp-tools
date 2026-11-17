@@ -17,7 +17,21 @@ from backend.config import (
     ACCOUNT_POOL_FILE, CONFIG_FILE, DATA_DIR,
     load_json, save_json, get_proxies_dict
 )
-from backend.weread_signer import refresh_access_token
+from backend.weread_signer import (
+    APK_USER_AGENT,
+    DEFAULT_DEVICE_NAME,
+    MIN_REFRESH_DEDUP_SECONDS,
+    PROACTIVE_REFRESH_INTERVAL,
+    _atomic_write_json,
+    activate_terminal_session,
+    get_guest_token,
+    get_rate_limit_status,
+    maybe_sync_guest_token_on_retry,
+    needs_proactive_refresh,
+    pace_weread_request,
+    refresh_access_token,
+    sanitize_apk_headers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,14 +72,13 @@ def generate_random_device_profile() -> dict:
     model, brand, _ = random.choice(RANDOM_DEVICE_MODELS)
     device_id = hashlib.md5(uuid.uuid4().bytes).hexdigest()
     install_id = str(uuid.uuid4())
-    ua = "WeRead/7.5.0 (Android; 33; arm64-v8a)"
     return {
         "deviceId": device_id,
         "deviceName": model,
         "brand": brand,
         "installId": install_id,
         "deviceType": 1,
-        "userAgent": ua,
+        "userAgent": APK_USER_AGENT,
     }
 
 
@@ -76,6 +89,7 @@ class AccountPool:
         self._lock = threading.RLock()
         self._kick_events: list[dict] = []
         self._recently_removed_ids: dict[str, float] = {}
+        self._refresh_meta: dict[str, dict] = {}
 
     # ── 存储与加载 ─────────────────────────────────────
 
@@ -118,6 +132,7 @@ class AccountPool:
                     user = data.get("user", {})
                     if vid and (token or refresh_token):
                         did = data.get("deviceId", "410515152")
+                        now_ts = time.time()
                         return {
                             "id": _gen_id(vid),
                             "vid": vid,
@@ -126,13 +141,19 @@ class AccountPool:
                             "refreshToken": refresh_token,
                             "skey": data.get("skey", token),
                             "deviceId": did,
+                            "deviceName": data.get("deviceName") or DEFAULT_DEVICE_NAME,
+                            "userAgent": APK_USER_AGENT,
                             "nickname": user.get("name") or f"微信读书用户_{vid}",
                             "avatar": user.get("avatar", ""),
                             "cookie_str": f"wr_vid={vid}; wr_skey={token}",
                             "status": "active",
                             "failures": 0,
-                            "save_time": time.time(),
-                            "last_used": time.time(),
+                            "save_time": now_ts,
+                            "loginAt": data.get("loginAt") or now_ts,
+                            "refreshedAt": data.get("refreshedAt") or now_ts,
+                            "lastActiveAt": data.get("lastActiveAt") or now_ts,
+                            "refreshTokenExpired": bool(data.get("refreshTokenExpired", False)),
+                            "last_used": now_ts,
                             "last_error": None,
                         }
                 except Exception as e:
@@ -159,8 +180,13 @@ class AccountPool:
 
             active = [a for a in accounts if a.get("status") == "active"]
             if not active:
-                # 尝试自动刷新 invalid 账号（只要有 refreshToken）
-                invalid_with_rf = [a for a in accounts if a.get("refreshToken") and a.get("status") != "cooldown"]
+                # 尝试自动刷新 invalid 账号（仅限仍有有效 refreshToken 且未被 -2013 明确失效的账号）
+                invalid_with_rf = [
+                    a for a in accounts
+                    if a.get("refreshToken")
+                    and not a.get("refreshTokenExpired")
+                    and a.get("status") != "cooldown"
+                ]
                 for acc in invalid_with_rf:
                     if self._refresh_account_locked(acc):
                         active.append(acc)
@@ -200,9 +226,10 @@ class AccountPool:
 
     def report(self, account_id: str, *, ret: int | None = None,
                status_code: int | None = None, is_success: bool | None = None,
-               error_msg: str | None = None, need_refresh: bool = False):
+               error_msg: str | None = None, need_refresh: bool = False,
+               expected_access_token: str | None = None):
         """
-        上报账号使用结果。遇到 401 自动触发静默刷新。
+        上报账号使用结果。遇到 401 自动触发单飞静默刷新。
         """
         now = time.time()
         with self._lock:
@@ -219,19 +246,22 @@ class AccountPool:
 
             # 处理 401 认证过期 / 显式请求刷新
             if status_code == 401 or ret in (401, -2001, -2002) or need_refresh:
-                logger.info("账号 [%s] 认证过期，正在执行自动静默续期...", acc.get("nickname"))
-                refreshed = self._refresh_account_locked(acc)
+                logger.info("账号 [%s] 认证过期，正在执行单飞静默续期...", acc.get("nickname"))
+                refreshed = self._refresh_account_locked(
+                    acc,
+                    expected_access_token=expected_access_token,
+                )
                 if refreshed:
                     logger.info("账号 [%s] 静默续期成功！", acc.get("nickname"))
                     self._save(accounts)
                     return
                 else:
                     acc["status"] = "invalid"
-                    acc["last_error"] = error_msg or "登录过期且自动续期失败，请重新扫码"
+                    acc["last_error"] = acc.get("last_error") or error_msg or "登录过期且自动续期失败，请重新扫码"
                     self._kick_events.append({
                         "id": acc.get("id"),
                         "nickname": acc.get("nickname"),
-                        "reason": "Token 过期续期失败",
+                        "reason": "Token 过期续期失败 (-2013)" if acc.get("refreshTokenExpired") else "Token 过期续期失败",
                     })
                     self._save(accounts)
                     return
@@ -239,15 +269,13 @@ class AccountPool:
             # 处理 499 -2041 会话未激活：自动发起 mobileSync 激活会话
             if ret == -2041 or (status_code == 499 and "2041" in str(error_msg or "")):
                 try:
-                    from backend.weread_signer import activate_terminal_session
-                    h = {
-                        "Cookie": acc.get("cookie_str", f"wr_vid={acc.get('vid')}; wr_skey={acc.get('skey')}"),
-                        "vid": str(acc.get("vid")),
-                        "skey": str(acc.get("skey")),
-                        "accessToken": str(acc.get("accessToken")),
-                    }
+                    h = sanitize_apk_headers({
+                        "vid": str(acc.get("vid") or ""),
+                        "accessToken": str(acc.get("accessToken") or ""),
+                    })
                     if activate_terminal_session(h):
                         logger.info("账号 [%s] 触发 -2041，已自动执行 mobileSync 激活服务端通道", acc.get("nickname"))
+                        acc["lastActiveAt"] = now
                         acc["last_error"] = None
                         self._save(accounts)
                         return
@@ -283,30 +311,120 @@ class AccountPool:
 
     # ── 纯 Python 自动刷新核心逻辑 ───────────────────
 
-    def _refresh_account_locked(self, acc: dict) -> bool:
-        """持锁状态下调用 weread_signer 换取最新 accessToken 并就地更新"""
+    def _sync_local_session_file(self, sess_patch: dict, target_vid: str = ""):
+        """将更新后的会话字段原子写回本地 weread_web/.session.json（若存在且同账号）"""
+        try:
+            local_sess = Path("/Users/apple/Downloads/破甲一键通-v7.5/weread_web/.session.json")
+            if not local_sess.exists():
+                return
+            sess_data = json.loads(local_sess.read_text(encoding="utf-8"))
+            if not isinstance(sess_data, dict):
+                return
+            if target_vid and sess_data.get("vid") and str(sess_data.get("vid")) != str(target_vid):
+                return
+            sess_data.update(sess_patch)
+            _atomic_write_json(str(local_sess), sess_data)
+            logger.info("已将刷新后的会话同步写入 weread_web/.session.json")
+        except Exception as e:
+            logger.debug("同步 weread_web/.session.json 失败: %s", e)
+
+    def _refresh_account_locked(
+        self,
+        acc: dict,
+        expected_access_token: str | None = None,
+        force: bool = False,
+        in_background: int = 0,
+        sync_feature_on_retry: bool = True,
+    ) -> bool:
+        """持锁状态下通过单飞锁与 guest_token 换取最新 accessToken 并就地更新"""
+        current_tok = acc.get("accessToken") or acc.get("token") or ""
+        # 单飞去重：若另一线程刚完成刷新且 accessToken 已变更，直接复用最新凭证
+        if (
+            expected_access_token
+            and current_tok
+            and current_tok != expected_access_token
+            and not acc.get("refreshTokenExpired")
+        ):
+            return True
+
+        if acc.get("refreshTokenExpired") and not force:
+            logger.info("账号 [%s] refreshToken 已标记失效 (refreshTokenExpired)，等待重新扫码登录", acc.get("nickname"))
+            return False
+
         rf = acc.get("refreshToken", "")
         if not rf:
             return False
 
-        did = acc.get("deviceId") or "410515152"
-        dname = acc.get("deviceName") or "Android"
+        acc_key = str(acc.get("id") or acc.get("vid") or rf[:12])
+        meta = self._refresh_meta.setdefault(acc_key, {})
+        now = time.time()
+        last_ok_ts = float(meta.get("last_ok_ts") or 0.0)
+        last_fail_ts = float(meta.get("last_fail_ts") or 0.0)
+        if (
+            not force
+            and not expected_access_token
+            and last_ok_ts > 0
+            and (now - last_ok_ts) < MIN_REFRESH_DEDUP_SECONDS
+            and current_tok
+        ):
+            return True
+        if not force and last_fail_ts > 0 and (now - last_fail_ts) < MIN_REFRESH_DEDUP_SECONDS:
+            if not expected_access_token or meta.get("last_fail_token") == current_tok:
+                return False
+
+        did = str(acc.get("deviceId") or "410515152")
+        dname = str(acc.get("deviceName") or DEFAULT_DEVICE_NAME)
         proxies = get_proxies_dict()
 
-        status, res = refresh_access_token(rf, device_id=did, device_name="Android", proxies=proxies)
-        if status == 200 and isinstance(res, dict) and res.get("accessToken"):
+        gt_used = get_guest_token(sync_remote=False)
+        status, res = refresh_access_token(
+            rf,
+            device_id=did,
+            device_name=dname,
+            guest_token=gt_used,
+            wx_token=0,
+            in_background=in_background,
+            proxies=proxies,
+        )
+
+        # 若签名拒绝且本地 guest_token 可能过时，按 300s 节流同步 /feature?synckey=0 并重签重试一次
+        errcode = res.get("errcode") if isinstance(res, dict) else None
+        if sync_feature_on_retry and not (status == 200 and isinstance(res, dict) and res.get("accessToken") and not errcode):
+            new_gt = maybe_sync_guest_token_on_retry(gt_used, proxies=proxies)
+            if new_gt:
+                status, res = refresh_access_token(
+                    rf,
+                    device_id=did,
+                    device_name=dname,
+                    guest_token=new_gt,
+                    wx_token=0,
+                    in_background=in_background,
+                    proxies=proxies,
+                )
+                errcode = res.get("errcode") if isinstance(res, dict) else None
+
+        if status == 200 and isinstance(res, dict) and res.get("accessToken") and not errcode:
             new_token = res["accessToken"]
+            now_done = time.time()
             acc["accessToken"] = new_token
             acc["token"] = new_token
             acc["skey"] = res.get("skey", new_token)
             if res.get("refreshToken"):
                 acc["refreshToken"] = res["refreshToken"]
+            if res.get("wxAccessToken"):
+                acc["wxAccessToken"] = res["wxAccessToken"]
+            if res.get("openId"):
+                acc["openId"] = res["openId"]
+            if "pf" in res:
+                acc["pf"] = res["pf"]
+
             vid = str(acc.get("vid") or res.get("vid", ""))
             if vid:
                 acc["vid"] = vid
                 acc["cookie_str"] = f"wr_vid={vid}; wr_skey={acc['skey']}"
 
-            from backend.weread_signer import APK_USER_AGENT
+            acc["deviceId"] = did
+            acc["deviceName"] = dname
             acc["userAgent"] = APK_USER_AGENT
 
             user = res.get("user")
@@ -319,57 +437,110 @@ class AccountPool:
             acc["status"] = "active"
             acc["failures"] = 0
             acc["last_error"] = None
-            acc["save_time"] = time.time()
+            acc["refreshTokenExpired"] = False
+            acc.pop("lastRefreshError", None)
+            acc["refreshedAt"] = now_done
+            acc["lastActiveAt"] = now_done
+            acc["save_time"] = now_done
+            acc["success_refreshes"] = int(acc.get("success_refreshes") or 0) + 1
 
-            # 同步写回本地 weread_web/.session.json，确保双向一致
-            try:
-                local_sess = Path("/Users/apple/Downloads/破甲一键通-v7.5/weread_web/.session.json")
-                if local_sess.exists():
-                    sess_data = json.loads(local_sess.read_text(encoding="utf-8"))
-                    sess_data["accessToken"] = new_token
-                    if res.get("refreshToken"):
-                        sess_data["refreshToken"] = res["refreshToken"]
-                    if res.get("skey"):
-                        sess_data["skey"] = res["skey"]
-                    if did:
-                        sess_data["deviceId"] = did
-                    if vid:
-                        sess_data["vid"] = int(vid) if str(vid).isdigit() else vid
-                    local_sess.write_text(json.dumps(sess_data, ensure_ascii=False, indent=2), encoding="utf-8")
-                    logger.info("已将刷新后的 token 同步写入 weread_web/.session.json")
-            except Exception as e:
-                logger.debug("同步 weread_web/.session.json 失败: %s", e)
+            meta["last_ok_ts"] = now_done
+            meta["last_fail_ts"] = 0.0
 
-            # 换票成功后立即激活移动端会话 (shelf/sync 与 mp/list)，解除 -2041 拦截
+            sess_patch = {
+                "accessToken": new_token,
+                "deviceId": did,
+                "deviceName": dname,
+                "refreshTokenExpired": False,
+                "refreshedAt": now_done,
+                "lastActiveAt": now_done,
+            }
+            if res.get("refreshToken"):
+                sess_patch["refreshToken"] = res["refreshToken"]
+            if res.get("skey"):
+                sess_patch["skey"] = res["skey"]
+            if res.get("wxAccessToken"):
+                sess_patch["wxAccessToken"] = res["wxAccessToken"]
+            if res.get("openId"):
+                sess_patch["openId"] = res["openId"]
+            if "pf" in res:
+                sess_patch["pf"] = res["pf"]
+            if vid:
+                sess_patch["vid"] = int(vid) if str(vid).isdigit() else vid
+            self._sync_local_session_file(sess_patch, target_vid=vid)
+
+            # 换票成功后立即激活移动端会话 (mobileSync + syncFeature + shelf/sync + mp/list)，解除 -2041 拦截
             try:
-                from backend.weread_signer import activate_terminal_session
-                auth_h = {
+                auth_h = sanitize_apk_headers({
                     "accessToken": new_token,
                     "vid": str(vid),
-                    "basekey": new_token,
-                    "deviceId": did,
-                    "User-Agent": acc.get("userAgent", "WeRead/7.5.0 (Android; 33; arm64-v8a)"),
-                    "Cookie": acc.get("cookie_str", f"wr_vid={vid}; wr_skey={new_token}")
-                }
-                activate_terminal_session(auth_h)
+                })
+                if activate_terminal_session(
+                    auth_h,
+                    include_feature=True,
+                    in_background=in_background,
+                    min_interval=600,
+                    proxies=proxies,
+                ):
+                    acc["lastActiveAt"] = time.time()
             except Exception as e:
                 logger.debug("激活终端会话异常: %s", e)
 
             return True
-        else:
-            logger.warning("账号 [%s] 刷新 Token 失败: status=%s, res=%s", acc.get("nickname"), status, res)
+
+        # 对齐客户端 LoginService.handleRefreshTokenError (-2013):
+        # 仅当明确返回 -2013 (refreshToken 失效/被顶) 时标记 refreshTokenExpired=True，
+        # 若响应附带兜底 accessToken (forceAccessToken) 则先保留该短期 accessToken
+        if errcode == -2013:
+            force_tok = (res.get("accessToken") or "") if isinstance(res, dict) else ""
+            now_fail = time.time()
+            vid = str(acc.get("vid") or "")
+            acc["deviceId"] = did
+            acc["deviceName"] = dname
+            acc["refreshTokenExpired"] = True
+            acc["lastRefreshError"] = "-2013"
+            sess_patch = {
+                "deviceId": did,
+                "deviceName": dname,
+                "refreshTokenExpired": True,
+                "lastRefreshError": "-2013",
+            }
+            if force_tok:
+                acc["accessToken"] = force_tok
+                acc["token"] = force_tok
+                acc["refreshedAt"] = now_fail
+                acc["status"] = "active"
+                acc["last_error"] = "refreshToken 已失效 (-2013)，暂用兜底凭证，请尽快重新扫码"
+                sess_patch["accessToken"] = force_tok
+                sess_patch["refreshedAt"] = now_fail
+                self._sync_local_session_file(sess_patch, target_vid=vid)
+                logger.warning("账号 [%s] -2013 返回 forceAccessToken，已临时保留并标记 refreshToken 失效", acc.get("nickname"))
+                return True
+
+            self._sync_local_session_file(sess_patch, target_vid=vid)
+            meta["last_fail_ts"] = now_fail
+            meta["last_fail_token"] = current_tok
+            meta["last_errcode"] = errcode
+            acc["status"] = "invalid"
+            acc["last_error"] = "refreshToken 已失效 (-2013)，请重新扫码登录"
+            logger.warning("账号 [%s] 刷新被拒 (-2013)，已标记 refreshTokenExpired", acc.get("nickname"))
             return False
 
-    def try_refresh_account(self, account_id: str) -> bool:
+        meta["last_fail_ts"] = time.time()
+        meta["last_fail_token"] = current_tok
+        meta["last_errcode"] = errcode
+        logger.warning("账号 [%s] 刷新 Token 失败: status=%s, errcode=%s, res=%s", acc.get("nickname"), status, errcode, res)
+        return False
+
+    def try_refresh_account(self, account_id: str, force: bool = False) -> bool:
         """对外接口：刷新指定账号"""
         with self._lock:
             accounts = self._load()
             acc = next((a for a in accounts if a.get("id") == account_id), None)
             if not acc:
                 return False
-            ok = self._refresh_account_locked(acc)
-            if ok:
-                self._save(accounts)
+            ok = self._refresh_account_locked(acc, force=force)
+            self._save(accounts)
             return ok
 
     def verify_account(self, account_id: str) -> dict:
@@ -381,8 +552,8 @@ class AccountPool:
                 return {"status": "not_found", "message": "未找到该账号"}
 
             rf = acc.get("refreshToken", "")
-            if rf:
-                ok = self._refresh_account_locked(acc)
+            if rf and not acc.get("refreshTokenExpired"):
+                ok = self._refresh_account_locked(acc, force=True)
                 self._save(accounts)
                 if ok:
                     return {
@@ -392,11 +563,10 @@ class AccountPool:
                         "account": self._desensitize(acc),
                     }
 
-            # 如果没有 refreshToken，简单通过接口探活
+            # 如果没有 refreshToken 或 refreshToken 已失效但仍持有兜底 accessToken，通过接口探活
             token = acc.get("accessToken") or acc.get("token")
             vid = acc.get("vid")
             if token and vid:
-                from backend.weread_signer import sanitize_apk_headers, pace_weread_request
                 headers = sanitize_apk_headers({
                     "vid": str(vid),
                     "accessToken": str(token),
@@ -409,21 +579,23 @@ class AccountPool:
                     if resp.status_code == 200:
                         acc["status"] = "active"
                         acc["failures"] = 0
+                        acc["lastActiveAt"] = time.time()
                         self._save(accounts)
                         return {"status": "active", "valid": True, "message": "凭据验证有效"}
                 except Exception as e:
                     return {"status": acc.get("status"), "valid": False, "message": f"探活请求失败: {e}"}
 
             acc["status"] = "invalid"
-            acc["last_error"] = "凭据已失效且无 refreshToken，需重新扫码"
+            acc["last_error"] = "凭据已失效且无法自动续期，需重新扫码"
             self._save(accounts)
             return {"status": "invalid", "valid": False, "message": "凭据已失效，请重新扫码登录"}
 
     def browser_refresh_account(self, account_id: str) -> dict:
         """兼容接口：执行毫秒级纯 Python 算法刷新"""
-        ok = self.try_refresh_account(account_id)
+        ok = self.try_refresh_account(account_id, force=True)
         return {
             "ok": ok,
+            "success": ok,
             "message": "账号 Token 刷新成功" if ok else "刷新失败，请重新扫码登录",
             "needs_scan": not ok,
         }
@@ -434,8 +606,8 @@ class AccountPool:
             accounts = self._load()
             results = []
             for acc in accounts:
-                if acc.get("refreshToken"):
-                    self._refresh_account_locked(acc)
+                if acc.get("refreshToken") and not acc.get("refreshTokenExpired"):
+                    self._refresh_account_locked(acc, force=True)
                 results.append(self._desensitize(acc))
             self._save(accounts)
             return results
@@ -459,9 +631,9 @@ class AccountPool:
                 device_profile = device_profile or {}
 
             did = cred.get("deviceId") or device_profile.get("deviceId") or "410515152"
-            dname = cred.get("deviceName") or device_profile.get("deviceName") or "Xiaomi 14"
+            dname = cred.get("deviceName") or device_profile.get("deviceName") or DEFAULT_DEVICE_NAME
             install_id = cred.get("installId") or device_profile.get("installId") or str(uuid.uuid4())
-            ua = cred.get("userAgent") or device_profile.get("userAgent") or "WeRead/7.5.0 (Android; 33; arm64-v8a)"
+            ua = cred.get("userAgent") or device_profile.get("userAgent") or APK_USER_AGENT
 
             target_acc = None
             if vid:
@@ -477,6 +649,12 @@ class AccountPool:
                 target_acc["skey"] = cred.get("skey") or target_acc.get("skey", token)
                 if rf:
                     target_acc["refreshToken"] = rf
+                if cred.get("wxAccessToken"):
+                    target_acc["wxAccessToken"] = cred["wxAccessToken"]
+                if cred.get("openId"):
+                    target_acc["openId"] = cred["openId"]
+                if "pf" in cred:
+                    target_acc["pf"] = cred["pf"]
                 if did:
                     target_acc["deviceId"] = did
                 if not target_acc.get("deviceName"):
@@ -493,6 +671,11 @@ class AccountPool:
                 target_acc["status"] = "active"
                 target_acc["failures"] = 0
                 target_acc["last_error"] = None
+                target_acc["refreshTokenExpired"] = False
+                target_acc.pop("lastRefreshError", None)
+                target_acc["loginAt"] = cred.get("loginAt") or target_acc.get("loginAt") or now
+                target_acc["refreshedAt"] = cred.get("refreshedAt") or now
+                target_acc["lastActiveAt"] = cred.get("lastActiveAt") or now
                 target_acc["save_time"] = now
                 self._save(accounts)
                 logger.info("已更新微信读书账号: %s (VID: %s, 设备: %s)", nickname, vid, target_acc.get("deviceName"))
@@ -506,6 +689,9 @@ class AccountPool:
                     "token": token,
                     "refreshToken": rf,
                     "skey": cred.get("skey", token),
+                    "wxAccessToken": cred.get("wxAccessToken", ""),
+                    "openId": cred.get("openId", ""),
+                    "pf": cred.get("pf"),
                     "deviceId": did,
                     "deviceName": dname,
                     "installId": install_id,
@@ -516,6 +702,11 @@ class AccountPool:
                     "status": "active",
                     "failures": 0,
                     "save_time": now,
+                    "loginAt": cred.get("loginAt") or now,
+                    "refreshedAt": cred.get("refreshedAt") or now,
+                    "lastActiveAt": cred.get("lastActiveAt") or now,
+                    "refreshTokenExpired": False,
+                    "success_refreshes": 0,
                     "last_used": now,
                     "cooldown_until": 0.0,
                     "last_error": None,
@@ -611,6 +802,65 @@ class AccountPool:
             "vid": account_data.get("vid", ""),
         }
 
+    def ensure_fresh_accounts_if_needed(self, in_background: int = 0):
+        """
+        对齐客户端 WRApplicationContext.onActivityStarted (>40 分钟后台切回主动续期) + 终端活跃保活:
+        - 若距上次刷新/登录超过 PROACTIVE_REFRESH_INTERVAL 且存在有效 refreshToken，提前静默续期并执行一次 mobileSync + syncFeature；
+        - 避免等到 accessToken 过期返回 401 后才被动补救，同时持续保持 refreshToken 活跃态。
+        """
+        try:
+            from backend.waterwall import is_waterwall_active
+            if is_waterwall_active():
+                return
+        except Exception:
+            pass
+        if get_rate_limit_status()[0]:
+            return
+
+        with self._lock:
+            accounts = self._load()
+            changed = False
+            proxies = get_proxies_dict()
+            for acc in accounts:
+                if not isinstance(acc, dict) or not acc.get("vid"):
+                    continue
+                if acc.get("status") != "active":
+                    continue
+                if needs_proactive_refresh(acc, max_age_seconds=PROACTIVE_REFRESH_INTERVAL):
+                    logger.info(
+                        "[SESSION KEEPALIVE] Proactive refresh triggered (> %sm) for vid=%s",
+                        PROACTIVE_REFRESH_INTERVAL // 60,
+                        acc.get("vid"),
+                    )
+                    self._refresh_account_locked(acc, in_background=in_background)
+                    changed = True
+                    continue
+
+                if acc.get("accessToken") and not acc.get("refreshTokenExpired") and acc.get("lastActiveAt"):
+                    try:
+                        last_act = float(acc.get("lastActiveAt") or 0.0)
+                    except Exception:
+                        last_act = 0.0
+                    if last_act > 0 and (time.time() - last_act) >= PROACTIVE_REFRESH_INTERVAL:
+                        sync_hdrs = sanitize_apk_headers({
+                            "vid": str(acc.get("vid") or ""),
+                            "accessToken": str(acc["accessToken"]),
+                        })
+                        if activate_terminal_session(
+                            sync_hdrs,
+                            include_feature=True,
+                            in_background=in_background,
+                            min_interval=PROACTIVE_REFRESH_INTERVAL,
+                            proxies=proxies,
+                        ):
+                            now_act = time.time()
+                            acc["lastActiveAt"] = now_act
+                            self._sync_local_session_file({"lastActiveAt": now_act}, target_vid=str(acc.get("vid") or ""))
+                            changed = True
+
+            if changed:
+                self._save(accounts)
+
     def _desensitize(self, acc: dict) -> dict:
         token = acc.get("accessToken") or acc.get("token") or ""
         token_preview = f"{token[:4]}...{token[-4:]}" if len(token) > 8 else "***"
@@ -622,10 +872,12 @@ class AccountPool:
             "nickname": acc.get("nickname", "微信读书账号"),
             "avatar": acc.get("avatar", ""),
             "status": acc.get("status", "active"),
-            "deviceName": acc.get("deviceName", "Xiaomi 14"),
+            "deviceName": acc.get("deviceName", DEFAULT_DEVICE_NAME),
             "deviceId": acc.get("deviceId", ""),
             "token_preview": token_preview,
             "has_refresh_token": has_refresh,
+            "refresh_token_expired": bool(acc.get("refreshTokenExpired", False)),
+            "success_refreshes": int(acc.get("success_refreshes") or 0),
             "failures": acc.get("failures", 0),
             "save_time": acc.get("save_time", 0),
             "last_used": acc.get("last_used", 0),
@@ -707,3 +959,32 @@ def get_weread_session():
                 s.mount("http://", adapter)
                 _weread_session = s
     return _weread_session
+
+
+_KEEPALIVE_LOCK = threading.Lock()
+_KEEPALIVE_STARTED = False
+
+
+def start_session_keepalive_thread(poll_interval: int = 300):
+    """启动后台轻量保活守护线程：启动检查 + 每 5 分钟检查是否超过 40 分钟未续期，模拟 App 前后台切换保活。"""
+    global _KEEPALIVE_STARTED
+    with _KEEPALIVE_LOCK:
+        if _KEEPALIVE_STARTED:
+            return
+        _KEEPALIVE_STARTED = True
+
+    def _loop():
+        time.sleep(2)
+        try:
+            account_pool.ensure_fresh_accounts_if_needed(in_background=0)
+        except Exception as exc:
+            logger.debug("[SESSION KEEPALIVE INIT] %s", exc)
+        while True:
+            time.sleep(poll_interval)
+            try:
+                account_pool.ensure_fresh_accounts_if_needed(in_background=1)
+            except Exception as exc:
+                logger.debug("[SESSION KEEPALIVE ERROR] %s", exc)
+
+    t = threading.Thread(target=_loop, name="weread-session-keepalive", daemon=True)
+    t.start()

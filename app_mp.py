@@ -27,7 +27,7 @@ configure_runtime()
 
 from flask_cors import CORS
 
-from backend.account_pool import migrate_legacy_config
+from backend.account_pool import migrate_legacy_config, start_session_keepalive_thread
 from backend.account_pool_api import account_pool_bp
 from backend.accounts import accounts_bp
 from backend.articles import articles_bp
@@ -59,6 +59,7 @@ app.register_blueprint(proxy_bp)
 
 ensure_dirs()
 migrate_legacy_config()
+start_session_keepalive_thread()
 
 # RSS 定时抓取（后台线程，失败不影响服务启动）
 try:
