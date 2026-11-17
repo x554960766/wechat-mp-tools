@@ -179,3 +179,25 @@ def test_proxy_forwards_query_string(monkeypatch):
     assert "version=v1" in captured["url"]
     assert "relpath=a%2Fb.jpg" in captured["url"] or "relpath=a/b.jpg" in captured["url"]
     assert resp.headers["Content-Type"].startswith("image/webp")
+
+
+def test_wait_ready_accepts_healthy_port_owner_without_handle(tmp_path):
+    """认领不到 pid、也没有 Popen 句柄时，端口上健康就算就绪。
+
+    回归：_adopt_orphan 复用既有健康服务后 _external_pid 仍为空，旧
+    _wait_ready 会立刻返回 False，导致「bind 失败 → 复用 → 判未就绪 → 再
+    spawn」死循环，媒体状态永久在 starting/running 之间抖动。
+    """
+    host = mh.MediaHost(port=9997, media_root=str(tmp_path), data_dir=str(tmp_path / "media"))
+    host._is_healthy = lambda: True
+    host._external_pid = None
+    assert host._wait_ready(timeout=0.5) is True
+    assert host._state == "running"
+    assert host._healthy is True
+
+
+def test_wait_ready_reports_not_ready_without_handle_or_health(tmp_path):
+    host = mh.MediaHost(port=9996, media_root=str(tmp_path), data_dir=str(tmp_path / "media"))
+    host._is_healthy = lambda: False
+    host._external_pid = None
+    assert host._wait_ready(timeout=0.3) is False

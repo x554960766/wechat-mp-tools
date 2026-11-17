@@ -68,6 +68,10 @@ media_host.start_in_thread()
 from backend.nas_archive import init_blueprint as init_nas_archive
 app.register_blueprint(init_nas_archive(app))
 
+# 按号归档：轻量版只装公众号，xhs/bilibili/kuaishou 不在本包依赖里
+from backend.archive_by_account import init_blueprint as init_archive_by_account
+app.register_blueprint(init_archive_by_account(app, platforms=("wechat",)))
+
 ensure_dirs()
 migrate_legacy_config()
 start_session_keepalive_thread()

@@ -465,13 +465,18 @@ class MediaHost:
     def _wait_ready(self, timeout: float | None = None) -> bool:
         deadline = time.time() + (timeout or self.timeout)
         while time.time() < deadline:
-            if self._proc is None and self._external_pid:
-                # 复用上一次运行留下的子进程：没有 Popen 句柄，只能探健康。
+            if self._proc is None:
+                # 端口上已有服务（自己的遗留子进程，或认领不到的既有进程）：
+                # 没有 Popen 句柄，只能探健康。健康就算就绪，不能因为没有
+                # external_pid 就判失败——否则 _spawn 复用它之后仍会被判
+                # 未就绪，继续 spawn，陷入「bind 失败 → 复用 → 判失败」死循环。
                 if self._is_healthy():
                     with self._lock:
                         self._state = "running"
                         self._healthy = True
                     return True
+                if not self._external_pid:
+                    return False
                 time.sleep(0.3)
                 continue
             pid = self._proc.pid if self._proc else None

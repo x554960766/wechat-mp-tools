@@ -107,6 +107,12 @@ media_host.start_in_thread()
 from backend.nas_archive import init_blueprint as init_nas_archive
 app.register_blueprint(init_nas_archive(app))
 
+# 按号归档：平台 → 账号 → 最近 N 篇 → 下载 → 扫对应媒体根
+# 下载全部复用各平台原生线程，本模块只做参数换算与进度归一
+from backend.archive_by_account import init_blueprint as init_archive_by_account
+app.register_blueprint(init_archive_by_account(
+    app, platforms=("wechat", "xhs", "bilibili", "kuaishou")))
+
 
 # 确保必要目录与数据库结构就绪
 ensure_dirs()

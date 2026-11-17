@@ -159,6 +159,19 @@ const API = {
         openParent(path) { return API.post('/api/articles/open-parent', { path }); },
     },
 
+    // ── 按号归档 API（宿主侧跨平台适配层）─────────────
+    archive: {
+        platforms() { return API.get('/api/archive/platforms', { showError: false }); },
+        accounts(platform) {
+            return API.get(`/api/archive/accounts?platform=${encodeURIComponent(platform)}`);
+        },
+        start(payload) { return API.post('/api/archive/start', payload); },
+        status(platform, taskId) {
+            const qs = new URLSearchParams({ platform, task_id: taskId });
+            return API.get(`/api/archive/status?${qs.toString()}`, { showError: false });
+        },
+    },
+
     // ── Proxy API ────────────────────────────────────
     proxy: {
         getConfig() { return API.get('/api/proxy/config'); },

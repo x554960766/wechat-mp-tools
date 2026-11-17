@@ -1,11 +1,13 @@
 /**
- * 按号归档页面：先用 wmp 自己的采集能力把某个号最近 N 篇下载落盘，
- * 再触发媒体服务增量扫描入库。下载与入库是两个任务，进度分开显示。
+ * 按号归档页面：① 按平台选号，用该平台的原生采集能力把最近 N 篇下载落盘，
+ * 下载终态后由后端适配层自动触发媒体服务增量扫描入库（③ 分两行显示）。
  *
- * 兜底入口（该号不在 wmp 的账号池里）走媒体服务的 /media/api/archive/from-mp。
+ * 平台/账号从宿主适配层 /api/archive 读取；平台能力（是否支持贴链接、范围单位）
+ * 由 /api/archive/platforms 返回，前端不写死平台名单。
  */
 const MediaArchivePage = {
     _accounts: [],
+    _platforms: [],
     _roots: [],
     _downloadTimer: null,
     _scanTimer: null,
@@ -17,27 +19,41 @@ const MediaArchivePage = {
             <div class="page-header">
                 <h2 class="page-title">按号归档</h2>
                 <p class="page-description">
-                    先采集公众号最近几篇落盘并增量入库；也可以对任意平台已下载的作品手动登记到 NAS 归档队列。
+                    按平台选号，采集最近 N 篇落盘并自动增量入库；也可以对任意平台已下载的作品手动登记到 NAS 归档队列。
                     下载、入库、归档是三个独立任务，进度分开显示。
                 </p>
             </div>
 
             <div class="card" style="margin-bottom: var(--spacing-lg);">
                 <div class="card-header">
-                    <h3 class="card-title">① 选择公众号与范围</h3>
+                    <h3 class="card-title">① 选择平台、账号与范围</h3>
                 </div>
 
                 <div class="grid grid-2" style="gap: 12px;">
                     <div class="form-group">
-                        <label class="form-label" for="ma-account">公众号</label>
-                        <select class="form-input" id="ma-account">
-                            <option value="">正在读取公众号列表…</option>
+                        <label class="form-label" for="ma-platform-select">平台</label>
+                        <select class="form-input" id="ma-platform-select">
+                            <option value="">正在读取平台…</option>
                         </select>
                     </div>
                     <div class="form-group">
-                        <label class="form-label" for="ma-limit">最近几篇</label>
+                        <label class="form-label" for="ma-account">账号</label>
+                        <select class="form-input" id="ma-account">
+                            <option value="">正在读取账号列表…</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="grid grid-2" style="gap: 12px;">
+                    <div class="form-group">
+                        <label class="form-label" for="ma-limit" id="ma-limit-label">最近几篇</label>
                         <input type="number" class="form-input" id="ma-limit" value="10" min="1" max="50">
-                        <div class="form-hint">已下载的会自动跳过，只取增量</div>
+                        <div class="form-hint" id="ma-limit-hint">已下载的会自动跳过，只取增量</div>
+                    </div>
+                    <div class="form-group" id="ma-link-group" style="display: none;">
+                        <label class="form-label" for="ma-link">或贴作者主页链接</label>
+                        <input type="text" class="form-input" id="ma-link" placeholder="账号还没收藏时用这个">
+                        <div class="form-hint">该账号不在收藏列表里时，贴主页链接也能归档</div>
                     </div>
                 </div>
 
@@ -45,8 +61,8 @@ const MediaArchivePage = {
                     <button class="btn btn-primary" id="ma-start">📥 归档最近 N 篇</button>
                     <button class="btn btn-secondary" id="ma-scan-only">只扫描新增</button>
                 </div>
-                <div class="form-hint" style="margin-top: 8px;">
-                    这些图会落进 wmp 的文章目录；媒体服务负责索引，检索页才能搜到。
+                <div class="form-hint" style="margin-top: 8px;" id="ma-platform-note">
+                    这些作品会落进该平台在 wmp 的下载目录；媒体服务负责索引，检索页才能搜到。
                 </div>
             </div>
 
@@ -147,6 +163,7 @@ const MediaArchivePage = {
         this._nasTimer = null;
 
         document.getElementById('ma-start')?.addEventListener('click', () => this.startArchive());
+        document.getElementById('ma-platform-select')?.addEventListener('change', () => this.onPlatformChange());
         document.getElementById('ma-nas-list')?.addEventListener('click', (ev) => {
             const btn = ev.target.closest('[data-nas-retry]');
             if (btn) this.retryNasArchive(btn.getAttribute('data-nas-retry'));
@@ -160,7 +177,7 @@ const MediaArchivePage = {
         });
         document.getElementById('ma-fallback')?.addEventListener('click', () => this.startFallback());
 
-        await Promise.all([this.loadAccounts(), this.loadRoots()]);
+        await Promise.all([this.loadPlatforms(), this.loadRoots()]);
         this.startNasPolling();
     },
 
@@ -176,23 +193,87 @@ const MediaArchivePage = {
     },
 
     // ── 数据加载 ─────────────────────────────────────
-    async loadAccounts() {
-        const select = document.getElementById('ma-account');
+    async loadPlatforms() {
+        const select = document.getElementById('ma-platform-select');
         if (!select) return;
         try {
-            const data = await API.accounts.list();
+            const data = await API.archive.platforms();
+            this._platforms = (data && data.platforms) || [];
+        } catch (err) {
+            // 带上具体原因（常见：服务还是旧进程，/api/archive 尚未注册 → HTTP 404）
+            select.innerHTML = `<option value="">平台列表读取失败：${this.esc(err.message || '')}</option>`;
+            return;
+        }
+        const enabled = this._platforms.filter((p) => p.enabled !== false);
+        if (!enabled.length) {
+            select.innerHTML = '<option value="">没有可用平台</option>';
+            return;
+        }
+        select.innerHTML = enabled
+            .map((p) => `<option value="${this.esc(p.id)}">${this.esc(p.name || p.id)}</option>`)
+            .join('');
+        await this.onPlatformChange();
+    },
+
+    currentPlatform() {
+        const id = document.getElementById('ma-platform-select')?.value || '';
+        return this._platforms.find((p) => p.id === id) || null;
+    },
+
+    // 平台切换：范围单位、贴链接入口、说明文案、账号列表都跟着换
+    async onPlatformChange() {
+        const platform = this.currentPlatform();
+        const limitLabel = document.getElementById('ma-limit-label');
+        const limitHint = document.getElementById('ma-limit-hint');
+        const note = document.getElementById('ma-platform-note');
+        const linkGroup = document.getElementById('ma-link-group');
+        if (platform) {
+            const byPage = platform.limit_unit === 'page';
+            if (limitLabel) limitLabel.textContent = byPage ? '最近几页' : '最近几篇';
+            if (limitHint) {
+                limitHint.textContent = byPage
+                    ? (platform.note || '按页下载，实际条数可能多于设置值')
+                    : '已下载的会自动跳过，只取增量';
+            }
+            if (note) {
+                note.textContent = platform.note
+                    ? `${platform.note}。下载落到媒体根 ${platform.root}，随后由媒体服务索引。`
+                    : `下载落到媒体根 ${platform.root}，随后由媒体服务索引。`;
+            }
+            if (linkGroup) linkGroup.style.display = platform.allow_link ? '' : 'none';
+        }
+        await this.loadAccounts(platform ? platform.id : '');
+    },
+
+    async loadAccounts(platform) {
+        const select = document.getElementById('ma-account');
+        if (!select) return;
+        this._accounts = [];
+        if (!platform) {
+            select.innerHTML = '<option value="">先选择平台</option>';
+            return;
+        }
+        select.innerHTML = '<option value="">正在读取…</option>';
+        try {
+            const data = await API.archive.accounts(platform);
             this._accounts = (data && data.accounts) || [];
         } catch (err) {
-            select.innerHTML = '<option value="">公众号列表读取失败</option>';
+            select.innerHTML = `<option value="">账号列表读取失败：${this.esc(err.message || '')}</option>`;
             return;
         }
         if (!this._accounts.length) {
-            select.innerHTML = '<option value="">账号池为空，请先到「公众号管理」添加</option>';
+            const page = {
+                wechat: '「公众号管理」',
+                xhs: '「小红书」',
+                bilibili: '「B站」',
+                kuaishou: '「快手」',
+            }[platform] || '对应平台页';
+            select.innerHTML = `<option value="">还没有收藏的账号，请先到${page}添加</option>`;
             return;
         }
         select.innerHTML = this._accounts.map((a) => {
-            const name = a.nickname || a.name || a.fakeid;
-            return `<option value="${this.esc(a.fakeid)}" data-name="${this.esc(name)}">${this.esc(name)}</option>`;
+            const name = a.name || a.id;
+            return `<option value="${this.esc(a.id)}" data-name="${this.esc(name)}" data-url="${this.esc(a.url || '')}">${this.esc(name)}</option>`;
         }).join('');
     },
 
@@ -214,15 +295,22 @@ const MediaArchivePage = {
 
     // ── 归档流程 ─────────────────────────────────────
     async startArchive() {
+        const platform = this.currentPlatform();
+        if (!platform) {
+            Toast.error('请先选择平台');
+            return;
+        }
         const select = document.getElementById('ma-account');
         const opt = select && select.selectedOptions[0];
-        if (!opt || !opt.value) {
-            Toast.error('请先选择公众号');
+        const accountId = opt && opt.value ? opt.value : '';
+        const link = (document.getElementById('ma-link')?.value || '').trim();
+        if (!accountId && !(platform.allow_link && link)) {
+            Toast.error(platform.allow_link ? '请选择账号，或贴作者主页链接' : '请先选择账号');
             return;
         }
         const limit = Number(document.getElementById('ma-limit')?.value || 10);
         if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
-            Toast.error('篇数需在 1..50');
+            Toast.error('数量需在 1..50');
             return;
         }
         this.showProgress();
@@ -231,64 +319,72 @@ const MediaArchivePage = {
 
         let started;
         try {
-            started = await API.articles.collectLatest({
-                fakeid: opt.value,
-                account_name: opt.dataset.name || '',
+            started = await API.archive.start({
+                platform: platform.id,
+                account_id: accountId,
+                account_name: accountId ? (opt.dataset.name || '') : link,
                 limit,
-                skip_existing: true,
+                profile_url: platform.allow_link ? link : '',
             });
         } catch (err) {
             this.setDownloadState('启动失败', err.message || '');
-            Toast.error(`启动采集失败: ${err.message}`);
+            Toast.error(`启动失败: ${err.message}`);
             return;
         }
-        Toast.info(started.message || '已启动采集任务');
-        this.pollDownload(started.task_id, limit);
+        Toast.info(`已提交${platform.name || platform.id}归档任务`);
+        this.pollArchive(started.task_id, platform.id);
     },
 
-    pollDownload(taskId, limit) {
+    pollArchive(taskId, platform) {
         clearInterval(this._downloadTimer);
         const tick = async () => {
             let task;
             try {
-                task = await API.articles.downloadStatus(taskId);
+                task = await API.archive.status(platform, taskId);
             } catch (err) {
                 clearInterval(this._downloadTimer);
                 this._downloadTimer = null;
                 this.setDownloadState('状态读取失败', err.message || '');
                 return;
             }
-            const total = task.total || limit;
+            const total = task.total || task.requested || 0;
             const done = (task.completed || 0) + (task.failed || 0);
+            const label = {
+                idle: '启动中',
+                running: '下载中',
+                completed: '已完成',
+                failed: '失败',
+                cancelled: '已取消',
+            }[task.status] || task.status;
             this.setDownloadState(
-                task.status === 'completed' ? '已完成' : (task.status === 'failed' ? '失败' : '下载中'),
-                `${done}/${total}　成功 ${task.completed || 0}　失败 ${task.failed || 0}${task.current ? '　' + task.current : ''}`,
+                label,
+                `${done}/${total}　成功 ${task.completed || 0}　失败 ${task.failed || 0}`
+                    + `${task.skipped ? `　跳过 ${task.skipped}` : ''}${task.current ? '　' + task.current : ''}`,
             );
-            if (['completed', 'failed'].includes(task.status)) {
+            if (['completed', 'failed', 'cancelled'].includes(task.status)) {
                 clearInterval(this._downloadTimer);
                 this._downloadTimer = null;
-                // 下载结束（即使有失败也仍可能落了图），照常触发增量扫描
-                this.runScan();
+                // 后端在下载终态时已经提交过该媒体根的扫描，前端只负责看结果
+                if (task.scan_job_id) {
+                    this.pollScan(task.scan_job_id);
+                } else if (task.scan_error) {
+                    this.setScanState('未入库', task.scan_error);
+                } else {
+                    this.setScanState('未开始', '下载已结束，但没有提交扫描');
+                }
             }
         };
         this._downloadTimer = setInterval(tick, 1200);
         tick();
     },
 
-    async runScan() {
+    pollScan(jobId) {
         clearInterval(this._scanTimer);
-        this.setScanState('提交中…', '');
-        let job;
-        try {
-            job = await API.media.scan('articles-full', false);
-        } catch (err) {
-            this.setScanState(`提交失败（${err.status || '网络'}）`, err.message || '');
-            return;
-        }
+        this.setScanState('入库中', '已提交扫描，等待媒体服务…');
         const tick = async () => {
             let status;
             try {
-                status = await API.media.scanStatus(job.id);
+                status = await API.media.scanStatus(jobId);
             } catch (err) {
                 clearInterval(this._scanTimer);
                 this._scanTimer = null;
@@ -306,6 +402,25 @@ const MediaArchivePage = {
         };
         this._scanTimer = setInterval(tick, 1200);
         tick();
+    },
+
+    scanRoot() {
+        const platform = this.currentPlatform();
+        return (platform && platform.root) || 'articles-full';
+    },
+
+    async runScan() {
+        clearInterval(this._scanTimer);
+        const root = this.scanRoot();
+        this.setScanState('提交中…', `媒体根 ${root}`);
+        let job;
+        try {
+            job = await API.media.scan(root, false);
+        } catch (err) {
+            this.setScanState(`提交失败（${err.status || '网络'}）`, err.message || '');
+            return;
+        }
+        this.pollScan(job.id);
     },
 
     async startFallback() {
