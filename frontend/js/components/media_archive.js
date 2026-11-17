@@ -227,9 +227,11 @@ const MediaArchivePage = {
         const limitHint = document.getElementById('ma-limit-hint');
         const note = document.getElementById('ma-platform-note');
         const linkGroup = document.getElementById('ma-link-group');
+        const startBtn = document.getElementById('ma-start');
         if (platform) {
             const byPage = platform.limit_unit === 'page';
             if (limitLabel) limitLabel.textContent = byPage ? '最近几页' : '最近几篇';
+            if (startBtn) startBtn.textContent = byPage ? '📥 归档最近 N 页' : '📥 归档最近 N 篇';
             if (limitHint) {
                 limitHint.textContent = byPage
                     ? (platform.note || '按页下载，实际条数可能多于设置值')
