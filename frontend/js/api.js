@@ -322,6 +322,36 @@ const API = {
         openParent(path)            { return API.post('/api/xhs/open-parent', { path }); },
     },
 
+    // ── Media Service API（经宿主 /media 反代到 ai-media）──
+    // 所有路径都带 /media 前缀：宿主 Flask 只转发该前缀，媒体服务自身不认识它。
+    media: {
+        health() { return API.get('/media/api/health', { showError: false }); },
+        roots() { return API.get('/media/api/media/roots', { showError: false }); },
+        stats() { return API.get('/media/api/search/stats', { showError: false }); },
+        searchText(payload, opts) { return API.post('/media/api/search/text', payload, opts); },
+        contentsSearch(params, opts) {
+            const query = new URLSearchParams();
+            Object.entries(params || {}).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') query.set(key, value);
+            });
+            return API.get(`/media/api/contents/search?${query.toString()}`, opts);
+        },
+        contentsFacets() { return API.get('/media/api/contents/facets', { showError: false }); },
+        contentsDetail(contentId) { return API.get(`/media/api/contents/${encodeURIComponent(contentId)}`); },
+        scan(root = 'articles-full', rebuild = false) {
+            return API.post('/media/api/media/scan', { root, rebuild });
+        },
+        scanStatus(jobId) { return API.get(`/media/api/media/scans/${jobId}`, { showError: false }); },
+        cancelScan(jobId) { return API.post(`/media/api/media/scans/${jobId}/cancel`); },
+        archiveJobs(limit = 10) { return API.get(`/media/api/archive/jobs?limit=${limit}`, { showError: false }); },
+        archiveStatus(jobId) { return API.get(`/media/api/archive/jobs/${jobId}`, { showError: false }); },
+        archiveFromMp(payload) { return API.post('/media/api/archive/from-mp', payload); },
+        // 索引返回的 thumb/file 是媒体服务内部路径，经宿主必须补 /media 前缀
+        thumb(item) { return '/media' + item.thumb; },
+        original(item) { return '/media' + item.file; },
+        display(item) { return '/media' + item.file.split('&display=1')[0]; },
+    },
+
     // ── Version Update API ──────────────────────────────
     version: {
         check()         { return API.get('/api/version/check', { showError: false }); },
