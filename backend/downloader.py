@@ -25,6 +25,7 @@ from backend.config import (
     DEFAULT_HEADERS, get_proxies_dict, get_settings, report_proxy_status
 )
 from backend.wechat_url import normalize_wechat_short_url, short_id_from_review_id
+from backend import nas_archive
 from backend.avatar_cache import extract_account_avatar, extract_avatar_account_id
 from backend.request_profile import (
     SIGNATURE_WINDOW,
@@ -1638,6 +1639,12 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "", _redi
         media_sync.notify_scan(f"{safe_title}")
     except Exception:  # noqa: BLE001 - 索引维护不能影响归档结果
         logger.debug("媒体扫描通知失败", exc_info=True)
+
+    # 登记 NAS 自动归档（后台队列，失败只记日志；作品键 wechat|<短ID>）
+    try:
+        nas_archive.submit_path("wechat", nas_archive.short_id(article_key), art_dir)
+    except Exception:  # noqa: BLE001 - 归档登记不能影响下载结果
+        logger.debug("NAS 归档登记失败", exc_info=True)
 
     return {
         "success": True,

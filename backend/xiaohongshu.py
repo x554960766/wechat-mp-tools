@@ -24,6 +24,7 @@ from flask import Blueprint, jsonify, request
 from backend.config import (
     DATA_DIR, load_json, save_json, get_settings, get_proxies_dict, report_proxy_status
 )
+from backend import nas_archive
 
 # 签名接口依赖（可选）：用于博主笔记列表的 user_posted API（见设计文档 §7）。
 # 未安装时签名路径自动禁用，get_user_profile 会降级到主页 SSR 解析。
@@ -1653,6 +1654,10 @@ def _do_xhs_download_thread(task_id: str, urls: list, account_name: str):
                 "watermarked": bool(detail.get("video_watermarked")),
             })
             save_json(XHS_HISTORY_FILE, history)
+
+            # 登记 NAS 自动归档（后台队列，失败只记日志；作品键 xhs|<note_id>）
+            if success and detail.get("note_id"):
+                nas_archive.submit_path("xhs", str(detail["note_id"]), note_dir)
             
         except Exception as e:
             err_str = str(e)

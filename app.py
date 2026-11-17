@@ -103,6 +103,10 @@ app.config["MEDIA_HOST_OBJ"] = media_host
 app.register_blueprint(init_blueprint(app))
 media_host.start_in_thread()
 
+# NAS 自动归档：只读状态/任务查询（实际提交在下载线程里登记）
+from backend.nas_archive import init_blueprint as init_nas_archive
+app.register_blueprint(init_nas_archive(app))
+
 
 # 确保必要目录与数据库结构就绪
 ensure_dirs()

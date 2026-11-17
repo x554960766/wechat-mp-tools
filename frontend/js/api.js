@@ -346,6 +346,17 @@ const API = {
         archiveJobs(limit = 10) { return API.get(`/media/api/archive/jobs?limit=${limit}`, { showError: false }); },
         archiveStatus(jobId) { return API.get(`/media/api/archive/jobs/${jobId}`, { showError: false }); },
         archiveFromMp(payload) { return API.post('/media/api/archive/from-mp', payload); },
+        // NAS 自动归档是宿主侧队列（backend/nas_archive.py），不在 /media 反代之下
+        nasStatus() { return API.get('/api/media/nas-archive/status', { showError: false }); },
+        nasJobs(limit = 20) { return API.get(`/api/media/nas-archive/jobs?limit=${limit}`, { showError: false }); },
+        nasRetry(workKey) { return API.post('/api/media/nas-archive/retry', { work_key: workKey }); },
+        // 手动批量登记某平台历史清单里已下载的作品，只入队不提交
+        nasArchivePlatform(platform, account) {
+            return API.post('/api/media/nas-archive/platform', {
+                platform,
+                account: account || '',
+            });
+        },
         // 索引返回的 thumb/file 是媒体服务内部路径，经宿主必须补 /media 前缀
         thumb(item) { return '/media' + item.thumb; },
         original(item) { return '/media' + item.file; },

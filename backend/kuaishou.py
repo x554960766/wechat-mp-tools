@@ -29,6 +29,7 @@ from backend.config import (
     DATA_DIR, get_settings, get_proxies_dict, report_proxy_status,
     load_json, save_json,
 )
+from backend import nas_archive
 
 kuaishou_bp = Blueprint("kuaishou", __name__, url_prefix="/api/kuaishou")
 
@@ -908,6 +909,9 @@ def _download_media_items(media_infos: list, target_dir: Path):
             result = download_media(media_info, target_dir)
             downloaded += 1
             _set_task_state(downloaded_count=downloaded, current_title=result["title"])
+            # 登记 NAS 自动归档（后台队列，失败只记日志）
+            if result.get("path"):
+                nas_archive.submit_path("kuaishou", str(result["id"]), result["path"])
         except Exception as e:
             failed += 1
             _set_task_state(failed_count=failed)

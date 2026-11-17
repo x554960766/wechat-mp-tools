@@ -16,6 +16,7 @@ from flask import Blueprint, jsonify, request
 
 from backend.config import DATA_DIR, OUTPUT_DIR, get_settings, load_json, save_json
 from backend.runtime import launch_chromium
+from backend import nas_archive
 
 channels_bp = Blueprint("channels", __name__, url_prefix="/api/channels")
 CHANNELS_HISTORY_FILE = DATA_DIR / "channels_history.json"
@@ -660,7 +661,10 @@ def download_video():
             add_channels_history_item(description or filename, "视频", filepath, size_bytes)
         except Exception as eh:
             print(f"写入视频号专属下载历史记录失败: {eh}")
-                    
+
+        # 登记 NAS 自动归档（后台队列，失败只记日志，不影响下载结果）
+        nas_archive.submit_path("channels", filename, filepath)
+
         return jsonify({
             "success": True,
             "message": "视频下载成功",

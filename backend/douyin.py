@@ -28,6 +28,7 @@ from backend.config import (
     get_proxies_dict, report_proxy_status, load_json, save_json
 )
 from backend.douyin_sign import sign_detail, sign_params, sign_secsdk_url
+from backend import nas_archive
 
 douyin_bp = Blueprint("douyin", __name__, url_prefix="/api/douyin")
 
@@ -2139,6 +2140,8 @@ def download_media(media_info: dict, target_dir: Path, custom_dir: Path = None,
         total_bytes = download_file(urls[0], save_file)
         _add_log(f"✅ {type_label}下载完成! 大小: {total_bytes / (1024 * 1024):.2f} MB")
         add_history_item(title, history_type, save_file, total_bytes)
+        # 登记 NAS 自动归档（后台队列，失败只记日志）
+        nas_archive.submit_path("douyin", aweme_id, save_file)
         _progress_mark(progress_key, aweme_id)
     else:
         folder_path = user_dir / title_with_id
@@ -2199,6 +2202,8 @@ def download_media(media_info: dict, target_dir: Path, custom_dir: Path = None,
                     _add_log(f"⚠️ 背景音乐下载失败: {me}")
 
         add_history_item(title, "图文", folder_path, total_bytes)
+        # 登记 NAS 自动归档（后台队列，失败只记日志）
+        nas_archive.submit_path("douyin", aweme_id, folder_path)
         _progress_mark(progress_key, aweme_id)
 
     return {
