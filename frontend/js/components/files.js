@@ -192,6 +192,19 @@ const FilesPage = {
 
             <div class="card">
                 <div class="card-header">
+                    <h3 class="card-title">NSFW 复核</h3>
+                    <div class="btn-group">
+                        <button class="btn btn-secondary btn-sm" id="files-nsfw-scan">检测未判定</button>
+                        <button class="btn btn-secondary btn-sm" id="files-nsfw-rescan">全部重检</button>
+                        <button class="btn btn-secondary btn-sm" id="files-nsfw-load">加载待复核</button>
+                    </div>
+                </div>
+                <p class="form-hint" id="files-nsfw-state"></p>
+                <div id="files-nsfw-panel"><p class="form-hint">点击「加载待复核」查看仍判疑似敏感的图片，可直接确认敏感或标为误报。</p></div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
                     <h3 class="card-title">文件清单</h3>
                     <span class="form-hint" id="files-count">—</span>
                 </div>
@@ -211,18 +224,6 @@ const FilesPage = {
                 <div id="files-dups"><p class="form-hint">点击「刷新重复组」查看按内容摘要归并的重复文件。</p></div>
             </div>
 
-            <div class="card">
-                <div class="card-header">
-                    <h3 class="card-title">NSFW 复核</h3>
-                    <div class="btn-group">
-                        <button class="btn btn-secondary btn-sm" id="files-nsfw-scan">检测未判定</button>
-                        <button class="btn btn-secondary btn-sm" id="files-nsfw-rescan">全部重检</button>
-                        <button class="btn btn-secondary btn-sm" id="files-nsfw-load">加载待复核</button>
-                    </div>
-                </div>
-                <p class="form-hint" id="files-nsfw-state"></p>
-                <div id="files-nsfw-panel"><p class="form-hint">点击「加载待复核」查看仍判疑似敏感的图片，可直接确认敏感或标为误报。</p></div>
-            </div>
         `;
     },
 
