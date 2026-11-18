@@ -13,11 +13,17 @@ from pathlib import Path
 import pytest
 
 VIEWER = Path(__file__).resolve().parents[1] / "frontend" / "js" / "utils" / "media_viewer.js"
+STYLES = Path(__file__).resolve().parents[1] / "frontend" / "css" / "style.css"
 
 
 @pytest.fixture(scope="module")
 def source():
     return VIEWER.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def styles():
+    return STYLES.read_text(encoding="utf-8")
 
 
 def _between(text, start, end):
@@ -54,6 +60,66 @@ def test_stereo_uses_upper_half_single_eye(source):
     build = _between(source, "buildPano(THREE, image, viewer) {", "applyPanoMode()")
     assert "new THREE.SphereGeometry(500, 64, 40)" in build
     assert build.count("new THREE.MeshBasicMaterial") == 1
+
+
+def test_stage_height_is_fixed_so_zoom_cannot_reflow(source, styles):
+    """舞台高度必须自己定死。
+
+    舞台一旦跟着图片自适应，缩放就会一边缩一边改布局、旋转后的适配尺寸也没有稳定基准；
+    所以缩放/旋转/平移只许落在 transform 上，布局尺寸只在 layout() 里算一次。
+    """
+    stage = _between(styles, ".ms-viewer-stage {", ".ms-viewer-stage img {")
+    assert "flex: 0 0 auto;" in stage
+    assert "height: clamp(" in stage
+    apply_view = _between(source, "applyView() {", "_syncViewChrome() {")
+    assert "img.style.transform =" in apply_view
+    assert "img.style.width" not in apply_view
+    assert "img.style.height" not in apply_view
+    layout = _between(source, "layout() {", "applyView() {")
+    assert "view.baseW = bh * ratio;" in layout
+
+
+def test_rotate_refits_by_bounding_box(source):
+    layout = _between(source, "layout() {", "applyView() {")
+    assert "Math.abs(Math.cos(rad))" in layout
+    assert "Math.abs(Math.sin(rad))" in layout
+    # 适配尺寸按旋转后的外接框算，否则 90° 后两侧会被裁掉
+    rotate = _between(source, "rotateBy(delta) {", "toggleLens() {")
+    assert "this.layout();" in rotate
+    assert "view.tx = 0;" in rotate and "view.ty = 0;" in rotate
+
+
+def test_zoom_anchors_on_cursor_within_limits(source):
+    zoom = _between(source, "zoomTo(nextScale, clientX, clientY) {", "zoomBy(factor) {")
+    # 1–8 倍：低于 1 没有意义，高于 8 只剩马赛克
+    assert "const next = Math.max(1, Math.min(8, nextScale));" in zoom
+    # 光标下的图内点保持不动（先反解到基准坐标，再按新倍率放回去）
+    assert "view.tx = qx - next * (px * cos - py * sin);" in zoom
+    assert "view.ty = qy - next * (px * sin + py * cos);" in zoom
+
+
+def test_lens_geometry_matches_styles(styles, source):
+    """镜片 180px 与 margin -90px 必须一起改，否则放大的取样点会偏出镜心。"""
+    lens = _between(styles, ".ms-viewer-lens {", ".ms-viewer-lens[hidden]")
+    assert "width: 180px;" in lens
+    assert "height: 180px;" in lens
+    assert "margin: -90px 0 0 -90px;" in lens
+    body = _between(source, "updateLensAt(clientX, clientY) {", "async panorama() {")
+    assert "const zoom = Math.min(8, Math.max(2, view.scale * 2));" in body
+
+
+def test_panorama_hides_planar_zoom_chrome(source):
+    build = _between(source, "buildPano(THREE, image, viewer) {", "applyPanoMode() {")
+    assert "zoomBar.hidden = true;" in build
+    assert "this.hideLens();" in build
+    exit_pano = _between(source, "exitPano() {", "disposePano(pano) {")
+    assert "zoomBar.hidden = false;" in exit_pano
+
+
+def test_close_removes_zoom_listeners(source):
+    close = _between(source, "close() {", "window.MediaViewer")
+    assert "window.removeEventListener('resize', this._onResize);" in close
+    assert "document.removeEventListener('keydown', this._keys);" in close
 
 
 def test_viewer_is_exported_and_prefixed(source):

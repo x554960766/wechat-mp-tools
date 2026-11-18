@@ -2492,20 +2492,92 @@ body {
 }
 .ms-viewer-stage {
     position: relative;
-    flex: 1;
-    min-height: 280px;
+    /* 舞台高度固定：缩放/旋转只改 transform，舞台若跟着图片自适应会边缩边跳。
+       100vh-250px 是按顶部按钮行、缩放栏、标签行、状态行的实际高度留出的余量 */
+    flex: 0 0 auto;
+    height: clamp(220px, calc(100vh - 250px), 760px);
     display: flex;
     align-items: center;
     justify-content: center;
     overflow: hidden;
     border-radius: 10px;
     background: rgba(0, 0, 0, 0.35);
+    touch-action: none;
 }
 .ms-viewer-stage img {
     display: block;
     max-width: 100%;
-    max-height: 68vh;
+    max-height: 100%;
     object-fit: contain;
+    transform-origin: center center;
+    will-change: transform;
+    user-select: none;
+    -webkit-user-drag: none;
+}
+.ms-viewer-stage.is-zoomed img { cursor: grab; }
+.ms-viewer-stage.is-panning img { cursor: grabbing; }
+.ms-viewer-stage.is-lens img { cursor: crosshair; }
+/* 缩放栏放在舞台下方而不是浮在图上：竖图旋转后几乎占满舞台，浮层会盖住画面 */
+.ms-viewer-zoom {
+    display: flex;
+    align-items: center;
+    align-self: center;
+    gap: 2px;
+    padding: 4px 6px;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.04);
+}
+.ms-viewer-zoom[hidden] { display: none; }
+.ms-zoom-btn {
+    min-width: 30px;
+    height: 30px;
+    padding: 0 8px;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 15px;
+    line-height: 1;
+    cursor: pointer;
+    transition: background var(--transition-fast), color var(--transition-fast);
+}
+.ms-zoom-btn:hover { background: rgba(255, 255, 255, 0.12); }
+.ms-zoom-btn[aria-pressed="true"] { background: var(--primary); color: #fff; }
+.ms-zoom-value {
+    min-width: 54px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+.ms-zoom-sep {
+    width: 1px;
+    height: 18px;
+    margin: 0 4px;
+    background: rgba(255, 255, 255, 0.14);
+}
+/* 局部放大镜：光标下的图内点放大后落进这个圆里 */
+.ms-viewer-lens {
+    position: absolute;
+    z-index: 4;
+    width: 180px;
+    height: 180px;
+    margin: -90px 0 0 -90px;
+    overflow: hidden;
+    border: 2px solid rgba(255, 255, 255, 0.7);
+    border-radius: 50%;
+    background: #05070a;
+    box-shadow: 0 8px 26px rgba(0, 0, 0, 0.6);
+    pointer-events: none;
+}
+.ms-viewer-lens[hidden] { display: none; }
+.ms-viewer-lens img {
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    max-width: none;
+    max-height: none;
+    transform-origin: center center;
 }
 .ms-viewer-pano {
     position: absolute;

@@ -60,9 +60,19 @@ class MediaViewer {
                     <button class="btn btn-primary btn-sm" data-act="pano">全景查看</button>
                     <button class="btn btn-secondary btn-sm" data-act="close">关闭</button>
                 </div>
-                <div class="ms-viewer-stage">
-                    <img id="${this._id('viewer-img')}" alt="">
+                <div class="ms-viewer-stage" id="${this._id('stage')}">
+                    <img id="${this._id('viewer-img')}" alt="" draggable="false">
                     <div class="ms-viewer-pano" id="${this._id('viewer-pano')}" hidden></div>
+                    <div class="ms-viewer-lens" id="${this._id('lens')}" hidden><img alt="" draggable="false"></div>
+                </div>
+                <div class="ms-viewer-zoom" id="${this._id('zoom-bar')}" role="toolbar" aria-label="缩放与旋转">
+                    <button type="button" class="ms-zoom-btn" data-act="zoom-out" title="缩小（-）" aria-label="缩小">−</button>
+                    <button type="button" class="ms-zoom-btn ms-zoom-value" data-act="zoom-reset" id="${this._id('zoom-value')}" title="还原（0）" aria-label="还原到 100%">100%</button>
+                    <button type="button" class="ms-zoom-btn" data-act="zoom-in" title="放大（+）" aria-label="放大">＋</button>
+                    <span class="ms-zoom-sep" aria-hidden="true"></span>
+                    <button type="button" class="ms-zoom-btn" data-act="rotate-left" title="逆时针旋转（Shift+R）" aria-label="逆时针旋转">⟲</button>
+                    <button type="button" class="ms-zoom-btn" data-act="rotate-right" title="顺时针旋转（R）" aria-label="顺时针旋转">⟳</button>
+                    <button type="button" class="ms-zoom-btn" data-act="lens" id="${this._id('zoom-lens')}" title="局部放大镜（M）" aria-label="局部放大镜" aria-pressed="false">放大镜</button>
                 </div>
                 ${withTags ? `<div class="ms-viewer-tags" id="${this._id('viewer-tags')}">
                     <span class="ms-tag-chips" id="${this._id('tag-chips')}"></span>
@@ -73,7 +83,18 @@ class MediaViewer {
             </div>`;
         document.body.appendChild(box);
         this._handlers = handlers;
-        this._viewer = { box, images, index: 0, seq: 0, pano: null };
+        // baseW/baseH 是按当前旋转角算出的「适配尺寸」，scale/tx/ty 都叠加在它之上：
+        // 缩放不改变布局尺寸，只改 transform，舞台大小才不会跟着图片抖。
+        this._viewer = {
+            box, images, index: 0, seq: 0, pano: null,
+            view: { scale: 1, rotate: 0, tx: 0, ty: 0, lens: false, baseW: 0, baseH: 0 },
+        };
+
+        this._bindStage();
+        this._onResize = () => this.layout();
+        window.addEventListener('resize', this._onResize);
+        const viewerImg = this._el('viewer-img');
+        if (viewerImg) viewerImg.addEventListener('load', () => this.layout());
 
         box.addEventListener('click', (event) => {
             if (event.target === box) {
@@ -91,6 +112,12 @@ class MediaViewer {
             else if (name === 'review-nsfw') this.review('nsfw');
             else if (name === 'review-safe') this.review('safe');
             else if (name === 'tag-remove') this.editTag(act.dataset.tag, 'remove');
+            else if (name === 'zoom-in') this.zoomBy(1.25);
+            else if (name === 'zoom-out') this.zoomBy(1 / 1.25);
+            else if (name === 'zoom-reset') this.resetView();
+            else if (name === 'rotate-left') this.rotateBy(-1);
+            else if (name === 'rotate-right') this.rotateBy(1);
+            else if (name === 'lens') this.toggleLens();
         });
 
         const mode = document.getElementById(this._id('pano-mode'));
@@ -108,9 +135,17 @@ class MediaViewer {
                 this.close();
                 return;
             }
+            // 标签输入框里敲 r/0/- 不该触发旋转或缩放
+            const tag = event.target && event.target.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (event.target && event.target.isContentEditable)) return;
             if (this._viewer.pano) return; // 全景下方向键留给场景拖动
             if (event.key === 'ArrowLeft') this.step(-1);
             if (event.key === 'ArrowRight') this.step(1);
+            if (event.key === '+' || event.key === '=') this.zoomBy(1.25);
+            if (event.key === '-' || event.key === '_') this.zoomBy(1 / 1.25);
+            if (event.key === '0') this.resetView();
+            if (event.key === 'r' || event.key === 'R') this.rotateBy(event.shiftKey ? -1 : 1);
+            if (event.key === 'm' || event.key === 'M') this.toggleLens();
         };
         document.addEventListener('keydown', this._keys);
         this.show(index);
@@ -127,10 +162,16 @@ class MediaViewer {
         const count = document.getElementById(this._id('viewer-count'));
         if (count) count.textContent = `${viewer.index + 1} / ${total} · ${image.relpath || ''}`;
         if (img) {
-            img.src = this._fileUrl(image);
+            const url = this._fileUrl(image);
+            // 同一张图重复 show（比如复核后刷新状态）不该把用户的缩放/旋转重置掉
+            if (img.getAttribute('src') !== url) {
+                img.src = url;
+                this.resetView();
+            }
             img.alt = image.relpath || '';
             img.hidden = false;
         }
+        this._syncViewChrome();
         const handlers = this._handlers || {};
         const nsfw = typeof handlers.getNsfw === 'function' ? handlers.getNsfw(image) : null;
         const risky = !!(nsfw && nsfw.label === 'nsfw');
@@ -239,6 +280,281 @@ class MediaViewer {
         this.show(viewer.index + delta);
     }
 
+    // ── 缩放 / 旋转 / 局部放大镜 ─────────────────────────
+    /** 按后缀取查看器内元素。 */
+    _el(name) {
+        return document.getElementById(this._id(name));
+    }
+
+    _viewState() {
+        return this._viewer ? this._viewer.view : null;
+    }
+
+    /** 舞台上的手势：滚轮缩放（以光标为锚点）、放大后拖动、双击切换、放大镜跟随。 */
+    _bindStage() {
+        const stage = this._el('stage');
+        if (!stage) return;
+        let drag = null;
+        stage.addEventListener('pointerdown', (event) => {
+            const view = this._viewState();
+            if (!view || !this._viewer || this._viewer.pano || event.button !== 0) return;
+            if (event.target.closest('[data-act]')) return; // 控件上的按下不当作拖动
+            if (view.scale <= 1.001) return; // 未放大时画面没有可拖动的余量
+            drag = { id: event.pointerId, x: event.clientX, y: event.clientY, tx: view.tx, ty: view.ty };
+            if (stage.setPointerCapture) stage.setPointerCapture(event.pointerId);
+            stage.classList.add('is-panning');
+            this.hideLens();
+        });
+        stage.addEventListener('pointermove', (event) => {
+            const view = this._viewState();
+            if (!view) return;
+            this._pointer = { x: event.clientX, y: event.clientY };
+            if (drag && drag.id === event.pointerId) {
+                view.tx = drag.tx + (event.clientX - drag.x);
+                view.ty = drag.ty + (event.clientY - drag.y);
+                this.applyView();
+                return;
+            }
+            this.updateLensAt(event.clientX, event.clientY);
+        });
+        const endDrag = (event) => {
+            if (!drag || (event && drag.id !== event.pointerId)) return;
+            const pointerId = drag.id;
+            drag = null;
+            stage.classList.remove('is-panning');
+            if (stage.releasePointerCapture && stage.hasPointerCapture && stage.hasPointerCapture(pointerId)) {
+                stage.releasePointerCapture(pointerId);
+            }
+        };
+        stage.addEventListener('pointerup', endDrag);
+        stage.addEventListener('pointercancel', endDrag);
+        stage.addEventListener('pointerleave', () => this.hideLens());
+        stage.addEventListener('wheel', (event) => {
+            const view = this._viewState();
+            if (!view || !this._viewer || this._viewer.pano) return;
+            event.preventDefault();
+            // 指数缩放：触控板的细碎 deltaY 也能平滑跟手
+            this.zoomTo(view.scale * Math.exp(-event.deltaY * 0.002), event.clientX, event.clientY);
+        }, { passive: false });
+        stage.addEventListener('dblclick', (event) => {
+            const view = this._viewState();
+            if (!view || !this._viewer || this._viewer.pano) return;
+            if (event.target.closest('[data-act]')) return; // 连点按钮不该当成双击缩放
+            if (view.scale > 1.05) this.resetView();
+            else this.zoomTo(2.5, event.clientX, event.clientY);
+        });
+    }
+
+    /**
+     * 按舞台尺寸与当前旋转重算「适配尺寸」：rotate=0 时就是 contain，
+     * 旋转后按外接框重新装进舞台，避免 90° 后两侧被裁掉。
+     */
+    layout() {
+        const viewer = this._viewer;
+        const view = this._viewState();
+        const img = this._el('viewer-img');
+        const stage = this._el('stage');
+        if (!viewer || !view || !img || !stage || img.hidden) return;
+        if (!img.naturalWidth || !img.naturalHeight) return;
+        const boxW = Math.max(80, stage.clientWidth - 24);
+        const boxH = Math.max(80, stage.clientHeight - 24);
+        const rad = (view.rotate * Math.PI) / 180;
+        const cos = Math.abs(Math.cos(rad));
+        const sin = Math.abs(Math.sin(rad));
+        const ratio = img.naturalWidth / img.naturalHeight;
+        // 外接框宽 = bw*cos + bh*sin，高 = bw*sin + bh*cos（bw = ratio*bh）
+        let bh = Math.min(boxW / (ratio * cos + sin), boxH / (ratio * sin + cos));
+        bh = Math.min(bh, img.naturalHeight); // 小图不为了铺满而放大
+        view.baseW = bh * ratio;
+        view.baseH = bh;
+        img.style.maxWidth = 'none';
+        img.style.maxHeight = 'none';
+        img.style.width = `${view.baseW}px`;
+        img.style.height = `${view.baseH}px`;
+        this.hideLens(); // 尺寸变了，镜片里那份旧采样先撤掉
+        this.applyView();
+    }
+
+    applyView() {
+        const view = this._viewState();
+        const stage = this._el('stage');
+        const img = this._el('viewer-img');
+        if (!view) return;
+        this._syncViewChrome();
+        if (!stage || !img || !view.baseW) return;
+        const rad = (view.rotate * Math.PI) / 180;
+        const cos = Math.abs(Math.cos(rad));
+        const sin = Math.abs(Math.sin(rad));
+        // 平移上限按旋转后的外接框算：放大后最多把图拖到边缘贴齐，不能拖丢
+        const dispW = (view.baseW * cos + view.baseH * sin) * view.scale;
+        const dispH = (view.baseW * sin + view.baseH * cos) * view.scale;
+        const maxX = Math.max(0, (dispW - stage.clientWidth) / 2);
+        const maxY = Math.max(0, (dispH - stage.clientHeight) / 2);
+        view.tx = Math.max(-maxX, Math.min(maxX, view.tx));
+        view.ty = Math.max(-maxY, Math.min(maxY, view.ty));
+        img.style.transform = `translate(${view.tx.toFixed(2)}px, ${view.ty.toFixed(2)}px)`
+            + ` rotate(${view.rotate}deg) scale(${view.scale})`;
+    }
+
+    /** 百分比、光标形态与放大镜按钮状态；与 transform 解耦，图片还没加载时也能先同步。 */
+    _syncViewChrome() {
+        const view = this._viewState();
+        if (!view) return;
+        const value = this._el('zoom-value');
+        if (value) value.textContent = `${Math.round(view.scale * 100)}%`;
+        const stage = this._el('stage');
+        if (stage) {
+            stage.classList.toggle('is-zoomed', view.scale > 1.001);
+            stage.classList.toggle('is-lens', !!view.lens);
+        }
+        const lensBtn = this._el('zoom-lens');
+        if (lensBtn) lensBtn.setAttribute('aria-pressed', view.lens ? 'true' : 'false');
+        if (!view.lens) this.hideLens();
+    }
+
+    /**
+     * 以光标为锚点缩放到 nextScale：光标下的那块内容保持不动，
+     * 这也是淘宝/京东商品图滚轮缩放的手感来源。
+     */
+    zoomTo(nextScale, clientX, clientY) {
+        const view = this._viewState();
+        const stage = this._el('stage');
+        if (!view || !stage) return;
+        const next = Math.max(1, Math.min(8, nextScale));
+        if (Math.abs(next - view.scale) < 0.001) return;
+        const rect = stage.getBoundingClientRect();
+        const qx = (clientX == null ? rect.width / 2 : clientX - rect.left) - rect.width / 2;
+        const qy = (clientY == null ? rect.height / 2 : clientY - rect.top) - rect.height / 2;
+        const rad = (view.rotate * Math.PI) / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+        // 光标下的图内点（相对图片中心、未缩放的基准坐标）
+        const dx = qx - view.tx;
+        const dy = qy - view.ty;
+        const px = (dx * cos + dy * sin) / view.scale;
+        const py = (-dx * sin + dy * cos) / view.scale;
+        view.scale = next;
+        if (next <= 1.0001) {
+            view.scale = 1;
+            view.tx = 0;
+            view.ty = 0;
+        } else {
+            view.tx = qx - next * (px * cos - py * sin);
+            view.ty = qy - next * (px * sin + py * cos);
+        }
+        this.applyView();
+        // 键盘/按钮缩放没有光标坐标，镜片就按最后一次鼠标位置重新取样
+        if (clientX == null && this._pointer) this.updateLensAt(this._pointer.x, this._pointer.y);
+        else this.updateLensAt(clientX, clientY);
+    }
+
+    zoomBy(factor) {
+        const view = this._viewState();
+        if (!view) return;
+        this.zoomTo(view.scale * factor, null, null);
+    }
+
+    resetView() {
+        const view = this._viewState();
+        const img = this._el('viewer-img');
+        if (!view || !img) return;
+        view.scale = 1;
+        view.rotate = 0;
+        view.tx = 0;
+        view.ty = 0;
+        view.baseW = 0;
+        view.baseH = 0;
+        // 先撤掉内联尺寸，加载中的新图回到 CSS 的 contain 兜底
+        img.style.width = '';
+        img.style.height = '';
+        img.style.maxWidth = '';
+        img.style.maxHeight = '';
+        img.style.transform = '';
+        this.hideLens();
+        this.layout(); // 图片已加载时会立刻按新方向重新适配
+        this._syncViewChrome();
+    }
+
+    rotateBy(delta) {
+        const view = this._viewState();
+        if (!view) return;
+        view.rotate = ((view.rotate + delta * 90) % 360 + 360) % 360;
+        view.tx = 0; // 适配尺寸随旋转变了，平移归零，画面不会跑出可视区
+        view.ty = 0;
+        this.layout();
+        this.hideLens();
+    }
+
+    toggleLens() {
+        const view = this._viewState();
+        const stage = this._el('stage');
+        if (!view) return;
+        view.lens = !view.lens;
+        this.hideLens();
+        this.applyView();
+        // 打开镜片就把它摆在舞台中心，不用等鼠标移动才出现
+        if (view.lens && stage) {
+            const rect = stage.getBoundingClientRect();
+            this.updateLensAt(rect.left + rect.width / 2, rect.top + rect.height / 2);
+        }
+    }
+
+    hideLens() {
+        const lens = this._el('lens');
+        if (lens) lens.hidden = true;
+    }
+
+    /**
+     * 局部放大镜：镜片是 180px 的圆，内容按「当前缩放 × 2、2–8 倍封顶」重画。
+     * 镜内图用与舞台相同的基准尺寸再放大，浏览器会从原图采样，不会把已缩小的位图二次放大。
+     */
+    updateLensAt(clientX, clientY) {
+        const viewer = this._viewer;
+        const view = this._viewState();
+        const lens = this._el('lens');
+        const stage = this._el('stage');
+        if (!viewer || !view || !lens || !stage) return;
+        if (!view.lens || viewer.pano || !view.baseW || clientX == null) {
+            lens.hidden = true;
+            return;
+        }
+        const rect = stage.getBoundingClientRect();
+        const x = clientX - rect.left;
+        const y = clientY - rect.top;
+        if (x < 0 || y < 0 || x > rect.width || y > rect.height) {
+            lens.hidden = true;
+            return;
+        }
+        const rad = (view.rotate * Math.PI) / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+        const qx = x - rect.width / 2;
+        const qy = y - rect.height / 2;
+        const dx = qx - view.tx;
+        const dy = qy - view.ty;
+        const px = (dx * cos + dy * sin) / view.scale;
+        const py = (-dx * sin + dy * cos) / view.scale;
+        const zoom = Math.min(8, Math.max(2, view.scale * 2));
+        const inner = lens.querySelector('img');
+        const src = this._el('viewer-img');
+        if (inner) {
+            const url = src ? src.getAttribute('src') : '';
+            if (url && inner.getAttribute('src') !== url) inner.src = url;
+            inner.style.width = `${view.baseW}px`;
+            inner.style.height = `${view.baseH}px`;
+            inner.style.marginLeft = `${-view.baseW / 2}px`;
+            inner.style.marginTop = `${-view.baseH / 2}px`;
+            // 让光标下的图内点 (px,py) 落在镜片中心
+            const tx = -zoom * (px * cos - py * sin);
+            const ty = -zoom * (px * sin + py * cos);
+            inner.style.transform = `translate(${tx.toFixed(2)}px, ${ty.toFixed(2)}px)`
+                + ` rotate(${view.rotate}deg) scale(${zoom})`;
+        }
+        lens.style.left = `${x}px`;
+        lens.style.top = `${y}px`;
+        lens.hidden = false;
+    }
+
     async panorama() {
         const viewer = this._viewer;
         if (!viewer) return;
@@ -308,6 +624,10 @@ class MediaViewer {
         viewer.pano = pano;
         stage.hidden = false;
         if (img) img.hidden = true;
+        // 全景是独立的 3D 视口，平面缩放/旋转控件在这里没有意义
+        const zoomBar = this._el('zoom-bar');
+        if (zoomBar) zoomBar.hidden = true;
+        this.hideLens();
         const controls = document.getElementById(this._id('pano-controls'));
         if (controls) controls.hidden = false;
         this.applyPanoMode();
@@ -400,6 +720,8 @@ class MediaViewer {
         }
         const img = document.getElementById(this._id('viewer-img'));
         if (img) img.hidden = false;
+        const zoomBar = this._el('zoom-bar');
+        if (zoomBar) zoomBar.hidden = false;
         const controls = document.getElementById(this._id('pano-controls'));
         if (controls) controls.hidden = true;
         if (pano) this.status('');
@@ -434,6 +756,10 @@ class MediaViewer {
         if (this._keys) {
             document.removeEventListener('keydown', this._keys);
             this._keys = null;
+        }
+        if (this._onResize) {
+            window.removeEventListener('resize', this._onResize);
+            this._onResize = null;
         }
         const pano = viewer.pano;
         viewer.pano = null;
