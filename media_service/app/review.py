@@ -12,7 +12,10 @@
 - nsfwjs-mobilenet-v2：5 类 [Drawing, Hentai, Neutral, Porn, Sexy]，
   score = probs[1]+probs[3]+probs[4]（三类露骨内容求和）
 - freepik-eva02：4 档有序 [neutral, low, medium, high]，
-  score = probs[1]+probs[2]+probs[3] = 1 − probs[0]（中性越强分越低）
+  score = probs[2]+probs[3] = P(medium)+P(high)。刻意**不含 low**：实测 12 张
+  真实缩略图中，紧身裙、白裙街拍这类「性感但未越线」的图会被模型判进 low 且
+  low≈0.99，若把 low 计入，阈值 0.35 会把整篇文章的写真壁纸全部标黄。
+  low 是「擦边」，medium/high 才是「露骨」，拦色情只取后两档。
 所以换方案只能重扫，不能拿旧分数按新阈值重算——这是 Spec 定下的硬约束。
 
 预处理差异全部落在 spec 字段里（input_size / interp / mean / std / layout /
@@ -54,7 +57,9 @@ PROVIDERS = {
     },
     "freepik-eva02": {
         "label": "Freepik EVA02",
-        "model_version": "Freepik/nsfw_image_detector@refs/pr/4",
+        # 分数口径变更也进版本号：库里的老行是「1−neutral」算的，靠后缀区分，
+        # 否则重扫到一半中断时，新旧两种口径的行在库里长得一模一样。
+        "model_version": "Freepik/nsfw_image_detector@refs/pr/4+mh",
         "weight": "nsfw-freepik-eva02.onnx",
         "sha256": "3e4b381b77d0a711e1f61fdab973c3a04fccfff5697e074f465f4c49674e455d",
         "input_size": 448,
@@ -64,9 +69,9 @@ PROVIDERS = {
         "layout": "NCHW",
         "softmax": True,
         "score_index": None,
-        "nsfw_indices": (1, 2, 3),
+        "nsfw_indices": (2, 3),
         "labels": ("neutral", "low", "medium", "high"),
-        "score_desc": "low + medium + high 概率之和 = 1 − neutral（4 档有序，越低越可信）",
+        "score_desc": "medium + high 概率之和（4 档有序；low 是擦边不计入，拦色情只取后两档）",
     },
     "nsfwjs-mobilenet-v2": {
         "label": "NSFW.js MobileNetV2",

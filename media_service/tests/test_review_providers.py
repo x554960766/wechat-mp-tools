@@ -75,15 +75,25 @@ def test_mobilenet_prepare_is_nhwc_255_only():
     assert abs(float(x[0, 112, 112, 2]) - 7 / 255.0) < 1e-6
 
 
-def test_eva02_score_is_one_minus_neutral():
-    """4 档有序输出：score = low+medium+high = 1 − neutral。"""
-    logits = [4.0, -1.0, -2.0, -3.0]
+def test_eva02_score_excludes_low_tier():
+    """4 档有序输出：score = medium+high。low（擦边）不计入——实测白裙街拍会拿到
+    low≈0.99，若把 low 算进来，阈值 0.35 会把整篇写真壁纸判成违规。"""
+    logits = [1.0, 4.0, -1.0, -2.0]          # low 占绝对多数
     r = _run("freepik-eva02", logits)
     probs = _softmax(logits)
     assert r["status"] == "ok", r
-    assert abs(r["score"] - (1.0 - float(probs[0]))) < 1e-6
-    # 中性占绝对多数，必须判 safe
-    assert r["label"] == "safe"
+    assert abs(r["score"] - float(probs[2] + probs[3])) < 1e-6
+    assert r["label"] == "safe", r
+    # 与旧定义（1−neutral，把 low 也算进去）必须有可观测差异，否则「擦边放过」是空话
+    assert float(1.0 - probs[0]) - float(r["score"]) > 0.5
+
+
+def test_eva02_medium_tier_still_trips_threshold():
+    """跳过 low 不能变成「什么都不拦」：medium 档必须能判违规。"""
+    r = _run("freepik-eva02", [-2.0, -1.0, 4.0, 0.5])
+    assert r["status"] == "ok", r
+    assert r["label"] == "nsfw", r
+    assert r["score"] > 0.9
 
 
 def test_mobilenet_output_is_not_double_softmaxed():
