@@ -40,14 +40,17 @@ def _validate_image(data):
         media.check_pixels(im)
         im.load()
 
-def _nsfw_scan(root, relpath, digest, data, counts):
+def _nsfw_scan(root, relpath, digest, data, counts, provider, model_version):
     """把一张图的初筛结论写进库。
 
     判定绑定 content_sha256：图片换了内容，旧结论自然查不到（nsfw_summary 走
     sha 关联），不需要额外清理。任何异常都吞掉——初筛失败不该让扫描失败。
+
+    provider 由 scan_root 在整轮开头定格后传入：同一轮里不能一半用 A 方案、
+    一半用 B 方案，否则分数语义混在一起无法比较。
     """
     try:
-        result = review.score_image(data)
+        result = review.score_image(data, provider)
     except Exception:
         return
     if not result:
@@ -55,7 +58,7 @@ def _nsfw_scan(root, relpath, digest, data, counts):
     try:
         STORE.set_nsfw(root, relpath, digest, score=result.get("score"),
                        label=result.get("label"), status="ok",
-                       model_version=config.NSFW_MODEL_SOURCE)
+                       model_version=model_version)
     except Exception:
         return
     counts["nsfw_first"] = counts.get("nsfw_first", 0) + 1
@@ -98,6 +101,9 @@ def scan_root(root, rebuild=False, progress=None, cancel=None):
     counts={"scanned":0,"indexed_new":0,"indexed_updated":0,"indexed_unchanged":0,"deleted":0,"failed":0,"errors":[],"complete":False,"status":"running"}
     if not _scan_lock.acquire(blocking=False): raise RuntimeError("scan_busy")
     try:
+        # 整轮定格鉴黄方案：配置可随时热更，但一轮扫描的分数必须同一语义。
+        nsfw_provider=review.current_provider()
+        nsfw_model_version=review.PROVIDERS[nsfw_provider]["model_version"]
         if cancel and cancel(): counts["status"]="cancelled"; return counts
         entries,complete=media.list_entries(root)
         if not complete: raise OSError("来源目录列举不完整")
@@ -140,14 +146,14 @@ def scan_root(root, rebuild=False, progress=None, cancel=None):
                         article=article_link.load_article(root,entry.relpath,article_cache)
                         if rebuild:
                             candidates[entry.relpath]={"size":entry.size,"mtime":entry.mtime,"digest":digest,"embedding":vector,"shot_at":_shot_at(entry.relpath,data),"article":article}
-                            _nsfw_scan(root,entry.relpath,digest,data,counts)
+                            _nsfw_scan(root,entry.relpath,digest,data,counts,nsfw_provider,nsfw_model_version)
                             if old and old["state"]=="ready" and old["content_sha256"]==digest: counts["indexed_unchanged"]+=1
                             elif old: counts["indexed_updated"]+=1
                             else: counts["indexed_new"]+=1
                         else:
                             result=STORE.add_image(root,entry.relpath,data,origin="scan",size=entry.size,mtime=entry.mtime,embedding=vector,shot_at=_shot_at(entry.relpath,data),article=article)
                             counts["indexed_"+result["status"]]+=1
-                            _nsfw_scan(root,entry.relpath,digest,data,counts)
+                            _nsfw_scan(root,entry.relpath,digest,data,counts,nsfw_provider,nsfw_model_version)
             except (OSError,TimeoutError) as exc:
                 systematic=True; counts["failed"]+=1; counts["errors"].append({"path":entry.relpath,"error":str(exc)[:300]})
             except (ValueError, SyntaxError) as exc:

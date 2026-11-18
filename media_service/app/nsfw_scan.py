@@ -17,12 +17,29 @@ _MAX_ERRORS = 50
 
 
 def available():
-    """能不能发起检测。模型是否已加载不在判断内——首次推理时才真正加载。"""
-    if not config.NSFW_SCAN:
-        return {"enabled": False, "model": False, "reason": "nsfw_scan_disabled"}
-    if not review.available():
-        return {"enabled": True, "model": False, "reason": "nsfw_model_missing"}
-    return {"enabled": True, "model": True, "reason": None}
+    """能不能发起检测。模型是否已加载不在判断内——首次推理时才真正加载。
+
+    ``model`` 保持布尔（前端据此判断「未安装」），方案信息另用 provider/provider_label
+    给出；两者不能互换，旧字段删掉会把 files.js 的提示逻辑反转成「装了也说没装」。
+    """
+    settings = config.nsfw_settings()
+    provider = review.current_provider()
+    spec = review.PROVIDERS[provider]
+    installed = review.available()
+    reason = None
+    if not settings["auto_scan"]:
+        reason = "nsfw_scan_disabled"
+    elif not installed:
+        reason = "nsfw_model_missing"
+    return {
+        "enabled": bool(settings["auto_scan"]),
+        "model": installed,
+        "provider": provider,
+        "provider_label": spec["label"],
+        "model_version": spec["model_version"],
+        "weight": spec["weight"],
+        "reason": reason,
+    }
 
 
 def scan(roots=None, force=False, progress=None, cancel=None):
@@ -31,7 +48,12 @@ def scan(roots=None, force=False, progress=None, cancel=None):
     ``force=False`` 只处理「当前内容版本还没有 first=ok 结论」的图片，适合日常补检；
     ``force=True`` 全部重跑，用于换模型或调阈值之后。两种模式都按内容摘要校验：
     源文件已变而索引还没重扫时跳过，避免把新内容的结论挂到旧摘要上。
+
+    整轮扫描在开头定格 provider：期间用户改配置（settings.json 随时可写）不能让
+    同一批结果一半来自 A 方案一半来自 B 方案，否则分数语义混在一起没法解释。
     """
+    provider = review.current_provider()
+    model_version = review.PROVIDERS[provider]["model_version"]
     state = available()
     if not state["model"]:
         raise RuntimeError(state["reason"])
@@ -57,14 +79,14 @@ def scan(roots=None, force=False, progress=None, cancel=None):
             if indexed and digest != indexed:
                 counts["skipped"] += 1
             else:
-                result = review.review_bytes(data)
+                result = review.review_bytes(data, provider)
                 if result.get("status") != "ok":
                     _fail(counts, row, result.get("error") or "review_failed")
                 else:
                     try:
                         STORE.set_nsfw(row["root"], row["relpath"], digest,
                                        score=result["score"], label=result["label"],
-                                       status="ok", model_version=config.NSFW_MODEL_SOURCE)
+                                       status="ok", model_version=model_version)
                     except Exception as exc:  # noqa: BLE001 - 单图落库失败不该中断整轮
                         _fail(counts, row, str(exc))
                     else:
@@ -76,6 +98,13 @@ def scan(roots=None, force=False, progress=None, cancel=None):
 
     counts["complete"] = True
     counts["status"] = "partial" if counts["failed"] else "completed"
+    if force and counts["status"] == "completed":
+        # 只有全量重扫跑完，历史结论才真正等于当前配置的口径，这时才回写 applied_*，
+        # 让面板的 stale 提示归零。回写失败不影响本轮结论（分数已落库），只标记未记录。
+        try:
+            config.mark_nsfw_applied(threshold=config.nsfw_settings()["threshold"], provider=provider)
+        except OSError:
+            counts["applied_recorded"] = False
     return counts
 
 

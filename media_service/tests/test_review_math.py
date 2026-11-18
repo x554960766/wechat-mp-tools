@@ -42,12 +42,14 @@ def _prep_expected(v: float) -> float:
 
 def _patch_logits(logits, captured=None) -> dict:
     review._error = None
-    review._model = FakeSession(logits, captured)
+    # 加载器已按 provider 缓存（_sessions/_errors），注入假会话走同一入口，
+    # 让 review_bytes 与生产路径共用预处理/softmax/阈值判定逻辑。
+    review._sessions["falconsai-vit-b16"] = FakeSession(logits, captured)
     try:
         return review.review_bytes(_png())
     finally:
-        review._model = None
-        review._error = None
+        review._sessions.pop("falconsai-vit-b16", None)
+        review._errors.pop("falconsai-vit-b16", None)
 
 
 def test_softmax_positive_nsfw_logit_score():
@@ -70,13 +72,12 @@ def test_softmax_negative_logit_but_high_nsfw_prob():
 def test_preprocess_normalizes_and_nchw():
     """预处理必须 (v/255-0.5)/0.5 归一化 + NCHW 布局，而不是除完 255 直接喂。"""
     cap: list[np.ndarray] = []
-    review._error = None
-    review._model = FakeSession([0.0, 0.0], captured=cap)
+    review._sessions["falconsai-vit-b16"] = FakeSession([0.0, 0.0], captured=cap)
     try:
         review.review_bytes(_png())
     finally:
-        review._model = None
-        review._error = None
+        review._sessions.pop("falconsai-vit-b16", None)
+        review._errors.pop("falconsai-vit-b16", None)
     x = cap[0]
     assert x.shape == (1, 3, 224, 224)
     assert abs(float(x[0, 0, 0, 0]) - _prep_expected(128)) < 1e-6

@@ -597,6 +597,35 @@ class Store:
         scored = int(row["scored"] or 0)
         return {"total": total, "scored": scored, "pending": total - scored}
 
+    def nsfw_recompute(self, threshold):
+        """按新阈值重算历史机器结论的 label（不改 score、不碰人工复核）。
+
+        分数是模型对图片的度量，与阈值无关：改阈值时唯一要变的是「score 与新阈值
+        比出来是什么标签」，纯 SQL 秒级完成，不必重扫图片。只处理 stage='first'
+        （机器结论）——人工 second 行的 label 是人定的，阈值改不动它。
+
+        skipped 指「参与了判定但结论没变」的行；second 行与没有分数的行不在统计内，
+        它们本来就不属于重算范围。
+        """
+        cutoff = float(threshold)
+        expr = "CASE WHEN score >= ? THEN 'nsfw' ELSE 'safe' END"
+        scope = ("WHERE stage='first' AND status='ok'"
+                 " AND score IS NOT NULL AND label IS NOT NULL")
+        with self.lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                eligible = int(self.conn.execute(
+                    "SELECT COUNT(*) FROM nsfw_results " + scope).fetchone()[0])
+                cursor = self.conn.execute(
+                    "UPDATE nsfw_results SET label=" + expr + " " + scope
+                    + " AND (" + expr + ") <> label", (cutoff, cutoff))
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+        updated = max(int(cursor.rowcount), 0)
+        return {"updated": updated, "skipped": max(eligible - updated, 0)}
+
     # ---- 视频代表帧 -------------------------------------------------------
     def video_record(self, root, relpath):
         """某个视频已入库的抽帧记录；扫描时用它的内容摘要判断是否可跳过。"""

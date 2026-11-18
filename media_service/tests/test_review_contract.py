@@ -30,8 +30,8 @@ def client(monkeypatch):
 @pytest.fixture()
 def review_unavailable(monkeypatch):
     """模拟 NSFW 模型不可用：status 不是 ready，且 _load 抛 RuntimeError。"""
-    review._model = None
-    review._error = None
+    review._sessions.clear()
+    review._errors.clear()
 
     def _boom():
         raise RuntimeError("NSFW 模型不可用")
@@ -39,8 +39,8 @@ def review_unavailable(monkeypatch):
     monkeypatch.setattr(review, "status", lambda: "unloaded")
     monkeypatch.setattr(review, "_load", _boom)
     yield
-    review._model = None
-    review._error = None
+    review._sessions.clear()
+    review._errors.clear()
 
 
 def test_review_disabled_succeeds_without_nsfw_model(client):

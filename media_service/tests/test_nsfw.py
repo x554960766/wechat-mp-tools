@@ -95,7 +95,7 @@ def test_scan_persists_first_stage(monkeypatch, tmp_path):
     monkeypatch.setattr(media, "read_bytes", lambda root_id, path: data)
     monkeypatch.setattr(media, "stat_entry", lambda root_id, path: media.MediaEntry(root_id, path, len(data), 2))
     monkeypatch.setattr(media, "list_entries", lambda root: ([media.MediaEntry(root, "a.png", len(data), 2)], True))
-    monkeypatch.setattr(review, "score_image", lambda raw: {"score": 0.88, "label": "nsfw", "status": "ok"})
+    monkeypatch.setattr(review, "score_image", lambda raw, provider=None: {"score": 0.88, "label": "nsfw", "status": "ok"})
     counts = scan.scan_root("r")
     assert counts["status"] == "completed"
     assert counts["nsfw_first"] == 1 and counts["nsfw_flagged"] == 1
@@ -109,7 +109,7 @@ def test_scan_without_model_still_completes(monkeypatch, tmp_path):
     monkeypatch.setattr(media, "read_bytes", lambda root_id, path: data)
     monkeypatch.setattr(media, "stat_entry", lambda root_id, path: media.MediaEntry(root_id, path, len(data), 2))
     monkeypatch.setattr(media, "list_entries", lambda root: ([media.MediaEntry(root, "a.png", len(data), 2)], True))
-    monkeypatch.setattr(review, "score_image", lambda raw: None)
+    monkeypatch.setattr(review, "score_image", lambda raw, provider=None: None)
     counts = scan.scan_root("r")
     assert counts["status"] == "completed"
     assert "nsfw_first" not in counts
@@ -123,7 +123,7 @@ def test_review_exception_does_not_break_scan(monkeypatch, tmp_path):
     monkeypatch.setattr(media, "stat_entry", lambda root_id, path: media.MediaEntry(root_id, path, len(data), 2))
     monkeypatch.setattr(media, "list_entries", lambda root: ([media.MediaEntry(root, "a.png", len(data), 2)], True))
 
-    def boom(raw):
+    def boom(raw, provider=None):
         raise RuntimeError("onnx 崩了")
 
     monkeypatch.setattr(review, "score_image", boom)
@@ -164,7 +164,7 @@ def test_checked_search_reuses_persisted_score(monkeypatch):
     monkeypatch.setattr(media_routes, "_decorate_items", lambda items: items)
     monkeypatch.setattr(media_routes.review, "status", lambda: "ready")
 
-    def boom(data):
+    def boom(data, provider=None):
         raise AssertionError("命中缓存时不应重新推理")
 
     monkeypatch.setattr(media_routes.review, "review_bytes", boom)

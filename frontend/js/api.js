@@ -377,6 +377,10 @@ const API = {
         nsfwScan(payload) { return API.post('/media/api/nsfw/scan', payload); },
         nsfwScanStatus(jobId) { return API.get(`/media/api/nsfw/scans/${jobId}`, { showError: false }); },
         cancelNsfwScan(jobId) { return API.post(`/media/api/nsfw/scans/${jobId}/cancel`); },
+        // 配置面：阈值/开关/鉴黄方案。改阈值可 SQL 重算历史结论，换方案必须重扫
+        nsfwSettings(opts) { return API.get('/media/api/settings/nsfw', opts); },
+        nsfwSettingsSave(payload) { return API.put('/media/api/settings/nsfw', payload); },
+        nsfwRecompute() { return API.post('/media/api/nsfw/recompute'); },
         // 标签：文件标签挂在内容摘要上（同内容副本共享），作品标签挂在 work_key 上
         tags(opts) { return API.get('/media/api/tags', opts); },
         imagesByTag(tag, params = {}, opts) {

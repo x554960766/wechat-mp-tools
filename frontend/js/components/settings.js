@@ -244,6 +244,59 @@ const SettingsPage = {
                 </div>
             </div>
 
+            <!-- NSFW 内容审核配置 -->
+            <div class="card" id="nsfw-settings-card" style="margin-top: var(--spacing-lg);">
+                <div class="card-header">
+                    <h3 class="card-title">🛡️ 内容审核（NSFW）</h3>
+                </div>
+                <div class="card-body">
+                    <div id="nsfw-stale-banner" style="display: none; margin-bottom: var(--spacing-md); padding: 10px 14px; border-radius: 8px; background: rgba(255,170,60,.12); color: var(--warning, #c98a1d); font-size: 0.88rem; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;">
+                        <span id="nsfw-stale-text"></span>
+                        <button class="btn btn-secondary" style="padding: 4px 12px;" onclick="SettingsPage.recomputeNsfw()">按新阈值重算</button>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-checkbox-label" style="display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none;">
+                            <input type="checkbox" id="nsfw-auto-scan" style="width: 18px; height: 18px; accent-color: var(--primary);" />
+                            <span>自动初筛（新入库图片自动过模型打分）</span>
+                        </label>
+                        <div class="form-hint">关闭后扫描不再跑模型；已有结论保留，只是不再新增</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label">敏感阈值</label>
+                        <div style="display: flex; gap: 16px; flex-wrap: wrap; margin: 6px 0;">
+                            <label class="form-checkbox-label" style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="radio" name="nsfw-threshold-preset" value="loose" onchange="SettingsPage.onNsfwThresholdPreset(this)" /> <span>宽松 (0.65)</span>
+                            </label>
+                            <label class="form-checkbox-label" style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="radio" name="nsfw-threshold-preset" value="standard" onchange="SettingsPage.onNsfwThresholdPreset(this)" /> <span>标准 (0.5)</span>
+                            </label>
+                            <label class="form-checkbox-label" style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="radio" name="nsfw-threshold-preset" value="strict" onchange="SettingsPage.onNsfwThresholdPreset(this)" /> <span>严格 (0.35)</span>
+                            </label>
+                            <label class="form-checkbox-label" style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+                                <input type="radio" name="nsfw-threshold-preset" value="custom" onchange="SettingsPage.onNsfwThresholdPreset(this)" /> <span>自定义</span>
+                            </label>
+                            <input type="number" class="form-input" id="nsfw-threshold-input" min="0" max="1" step="0.01" style="width: 100px;" onchange="SettingsPage.onNsfwThresholdInput()" />
+                        </div>
+                        <div class="form-hint">score ≥ 阈值判敏感。宽松漏网少误伤多，严格反之；调整只影响新扫描，历史结论可一键重算</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label class="form-label" for="nsfw-provider-select">鉴黄方案</label>
+                        <select class="form-input" id="nsfw-provider-select" onchange="SettingsPage.onNsfwProviderChange()" style="max-width: 320px;"></select>
+                        <div class="form-hint" id="nsfw-provider-hint"></div>
+                    </div>
+
+                    <div class="form-group" id="nsfw-coverage-line" style="color: var(--text-muted); font-size: 0.88rem;"></div>
+
+                    <div style="display: flex; justify-content: flex-end; margin-top: var(--spacing-md);">
+                        <button class="btn btn-primary" onclick="SettingsPage.saveNsfwSettings()">保存并应用</button>
+                    </div>
+                </div>
+            </div>
+
             <div class="card" style="margin-top: var(--spacing-lg);">
                 <div class="card-body" style="display: flex; justify-content: space-between; align-items: center;">
                     <div style="color: var(--text-muted); font-size: 0.88rem;">
@@ -260,11 +313,13 @@ const SettingsPage = {
 
     async init() {
         await this.loadSettings();
+        await this.loadNsfwSettings();
     },
 
     /** SPA 路由复用缓存页时调用，重新从后端拉取最新设置 */
     async onShow() {
         await this.loadSettings();
+        await this.loadNsfwSettings();
     },
 
     destroy() {
@@ -475,5 +530,138 @@ const SettingsPage = {
                 // error handled
             }
         });
+    },
+
+    // ── NSFW 配置管理 ─────────────────────────────────
+
+    nsfwSettingsCache: null,
+    /** 三档预设值，与后端 NSFW_THRESHOLD_PRESETS 一致，radio value → 阈值 */
+    nsfwPresetValues: { loose: 0.65, standard: 0.5, strict: 0.35 },
+
+    async loadNsfwSettings() {
+        try {
+            const data = await API.media.nsfwSettings({ showError: false });
+            this.nsfwSettingsCache = data;
+            this.renderNsfwSettings(data);
+        } catch (err) {
+            const line = document.getElementById('nsfw-coverage-line');
+            if (line) line.textContent = '⚠️ 媒体服务不可用，无法加载 NSFW 配置';
+        }
+    },
+
+    renderNsfwSettings(data) {
+        const autoScan = document.getElementById('nsfw-auto-scan');
+        const thresholdInput = document.getElementById('nsfw-threshold-input');
+        const providerSelect = document.getElementById('nsfw-provider-select');
+        const providerHint = document.getElementById('nsfw-provider-hint');
+        const banner = document.getElementById('nsfw-stale-banner');
+        const staleText = document.getElementById('nsfw-stale-text');
+        const coverageLine = document.getElementById('nsfw-coverage-line');
+        if (!autoScan || !providerSelect) return;   // 渲染时机：卡片还在页面上才填 DOM
+
+        // 锁定字段（部署环境变量覆盖时）置灰并注明来源
+        autoScan.disabled = !!data.locked.auto_scan;
+        thresholdInput.disabled = !!data.locked.threshold;
+        document.querySelectorAll('input[name="nsfw-threshold-preset"]').forEach(el => {
+            el.disabled = !!data.locked.threshold;
+        });
+
+        autoScan.checked = !!data.auto_scan;
+        thresholdInput.value = data.threshold;
+
+        const matchedPreset = Object.entries(this.nsfwPresetValues)
+            .find(([, value]) => Math.abs(value - data.threshold) < 1e-6);
+        document.querySelectorAll('input[name="nsfw-threshold-preset"]').forEach(el => {
+            el.checked = el.value === (matchedPreset ? matchedPreset[0] : 'custom');
+        });
+
+        providerSelect.innerHTML = (data.providers || []).map(p => {
+            const mark = p.installed ? '' : '（未安装）';
+            return `<option value="${p.id}">${p.label}${mark}</option>`;
+        }).join('');
+        providerSelect.value = data.provider;
+        const current = (data.providers || []).find(p => p.id === data.provider);
+        providerHint.textContent = current ? current.score_desc + (current.installed ? '' : ' · 权重未安装，保存后将无法扫描，直到权重就位') : '';
+
+        if (data.stale && (data.stale.threshold || data.stale.provider)) {
+            banner.style.display = 'flex';
+            const reasons = [];
+            if (data.stale.threshold) reasons.push(`阈值已从 ${data.applied_threshold} 调整为 ${data.threshold}`);
+            if (data.stale.provider) reasons.push('鉴黄方案已更换');
+            let text = `${reasons.join('，')}：已有 ${data.stale.pending} 张图片的结论仍按旧口径`;
+            if (data.stale.provider) {
+                text += '。换方案后分数语义不同，只能重扫、不能重算（文件页 → 全局检测）';
+                banner.querySelector('button').style.display = 'none';
+            } else {
+                text += '。可按已存分数秒级重算，无需重扫';
+                banner.querySelector('button').style.display = '';
+            }
+            staleText.textContent = text;
+        } else {
+            banner.style.display = 'none';
+        }
+
+        coverageLine.textContent = `已初筛 ${data.coverage.scored}/${data.coverage.total} 张图片` +
+            (data.coverage.pending ? `，待筛 ${data.coverage.pending} 张` : '，全部完成');
+    },
+
+    onNsfwThresholdPreset(el) {
+        if (el.value !== 'custom') {
+            document.getElementById('nsfw-threshold-input').value = this.nsfwPresetValues[el.value];
+        }
+    },
+
+    onNsfwThresholdInput() {
+        // 手改数字后如果不在预设档位上，radio 回到自定义
+        const raw = parseFloat(document.getElementById('nsfw-threshold-input').value);
+        const matched = Object.values(this.nsfwPresetValues).some(v => Math.abs(v - raw) < 1e-6);
+        document.querySelectorAll('input[name="nsfw-threshold-preset"]').forEach(el => {
+            el.checked = matched ? el.value !== 'custom' && Math.abs(this.nsfwPresetValues[el.value] - raw) < 1e-6 : el.value === 'custom';
+        });
+    },
+
+    onNsfwProviderChange() {
+        const data = this.nsfwSettingsCache;
+        if (!data) return;
+        const current = (data.providers || []).find(p => p.id === document.getElementById('nsfw-provider-select').value);
+        const hint = document.getElementById('nsfw-provider-hint');
+        if (current) hint.textContent = current.score_desc + (current.installed ? '' : ' · 权重未安装，保存后将无法扫描，直到权重就位');
+    },
+
+    async saveNsfwSettings() {
+        const data = this.nsfwSettingsCache;
+        const payload = {};
+        // 锁定字段由部署环境变量决定，PUT 会被 409 拒绝，直接不发
+        if (data && !data.locked.auto_scan) {
+            payload.auto_scan = document.getElementById('nsfw-auto-scan').checked;
+        }
+        if (data && !data.locked.threshold) {
+            const raw = parseFloat(document.getElementById('nsfw-threshold-input').value);
+            if (!Number.isFinite(raw) || raw < 0 || raw > 1) {
+                Toast.error('阈值必须在 0–1 之间');
+                return;
+            }
+            payload.threshold = raw;
+        }
+        payload.provider = document.getElementById('nsfw-provider-select').value;
+
+        try {
+            const updated = await API.media.nsfwSettingsSave(payload);
+            this.nsfwSettingsCache = updated;
+            this.renderNsfwSettings(updated);
+            Toast.success('NSFW 配置已保存，从下一次扫描开始生效');
+        } catch (err) {
+            // 错误提示由 API wrapper 统一弹出（含 409 锁定、422 校验失败）
+        }
+    },
+
+    async recomputeNsfw() {
+        try {
+            const result = await API.media.nsfwRecompute();
+            Toast.success(`重算完成：${result.updated} 条结论更新，${result.skipped} 条不变`);
+            await this.loadNsfwSettings();
+        } catch (err) {
+            // 错误提示由 API wrapper 统一弹出
+        }
     },
 };

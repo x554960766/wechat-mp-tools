@@ -64,7 +64,7 @@ def _score_nsfw(monkeypatch):
     """把模型推理替换成固定分数，避免测试依赖权重文件。"""
     monkeypatch.setattr(review, "available", lambda: True)
     monkeypatch.setattr(review, "review_bytes",
-                        lambda data: {"score": 0.91, "label": "nsfw", "status": "ok"})
+                        lambda data, provider=None: {"score": 0.91, "label": "nsfw", "status": "ok"})
 
 
 def test_targets_default_skips_scored_and_force_includes_all(tmp_path, monkeypatch):

@@ -138,10 +138,12 @@ def _checked_search(items,enabled,query_data=None):
     items=_decorate_items(items)
     qreview=None
     if enabled:
+        nsfw_provider=review.current_provider()
+        nsfw_model_version=review.PROVIDERS[nsfw_provider]["model_version"]
         if review.status()!="ready":
             try: review._load()
             except RuntimeError: raise HTTPException(503,detail={"error":{"code":"review_unavailable","message":"NSFW 模型不可用"}})
-        if query_data is not None: qreview=review.review_bytes(query_data)
+        if query_data is not None: qreview=review.review_bytes(query_data,nsfw_provider)
         for item in items:
             cached=item.get("nsfw")
             if cached and cached.get("status")=="ok" and cached.get("score") is not None:
@@ -156,11 +158,11 @@ def _checked_search(items,enabled,query_data=None):
                 valid=(row["content_version"]==item["version"] and (before.size,before.mtime)==(after.size,after.mtime)==(row["size"],row["mtime"]) and (not row["content_sha256"] or hashlib.sha256(data).hexdigest()==row["content_sha256"]))
                 if not valid: item["review"]={"score":None,"label":None,"status":"failed"}
                 else:
-                    item["review"]=review.review_bytes(data)
+                    item["review"]=review.review_bytes(data,nsfw_provider)
                     if item["review"].get("status")=="ok" and row["content_sha256"]:
                         # 现算的结论回写，下次扫描/检索不必重复推理
                         try:
-                            STORE.set_nsfw(item["root"],item["relpath"],row["content_sha256"],score=item["review"]["score"],label=item["review"]["label"],model_version=config.NSFW_MODEL_SOURCE)
+                            STORE.set_nsfw(item["root"],item["relpath"],row["content_sha256"],score=item["review"]["score"],label=item["review"]["label"],model_version=nsfw_model_version)
                             item["nsfw"]=STORE.nsfw_summary(item["root"],item["relpath"])
                         except Exception: pass
             except Exception: item["review"]={"score":None,"label":None,"status":"failed"}
@@ -281,7 +283,7 @@ def nsfw_review(body:NsfwReviewRequest):
     previous=STORE.nsfw_summary(body.root,body.relpath)
     score=previous.get("score") if previous else None
     STORE.set_nsfw(body.root,body.relpath,row["content_sha256"],score=score,label=body.label,
-                   status="ok",stage="second",model_version=config.NSFW_MODEL_SOURCE,
+                   status="ok",stage="second",model_version=review.PROVIDERS[review.current_provider()]["model_version"],
                    nsfw_type=nsfw_type,reviewed_by=reviewed_by,
                    reviewed_at=datetime.now(timezone.utc).isoformat())
     return {"nsfw":STORE.nsfw_summary(body.root,body.relpath),"stage":"second"}
@@ -290,6 +292,110 @@ def nsfw_review(body:NsfwReviewRequest):
 class NsfwScanRequest(BaseModel):
     roots: list[str] = Field(default_factory=list)   # 空 = 全部媒体根
     force: bool = False                              # False 只补未判定的，True 全部重检
+
+
+# —— NSFW 配置面（阈值 / 开关 / 鉴黄方案）——
+# 阈值档位只是产品预设：UI 负责把档位换算成数字，后端永远按数字存储，
+# 避免「档位」和「自定义值」两套真相，也避免以后改档位口径时迁移数据。
+NSFW_THRESHOLD_PRESETS = (
+    {"id": "loose", "label": "宽松", "threshold": 0.65},
+    {"id": "standard", "label": "标准", "threshold": 0.5},
+    {"id": "strict", "label": "严格", "threshold": 0.35},
+)
+
+
+def _nsfw_settings_payload():
+    settings = config.nsfw_settings()
+    coverage = STORE.nsfw_coverage()
+    providers = [{
+        "id": pid,
+        "label": spec["label"],
+        "model_version": spec["model_version"],
+        "weight": spec["weight"],
+        "installed": review.weight_path(pid).is_file(),
+        "score_desc": spec["score_desc"],
+        "sha256": spec["sha256"],
+    } for pid, spec in review.PROVIDERS.items()]
+    return {
+        **settings,
+        "locked": config.nsfw_locked_fields(),   # 被部署环境变量锁定的字段（UI 置灰）
+        "providers": providers,
+        "presets": list(NSFW_THRESHOLD_PRESETS),
+        # pending 是「已有机器结论、等着按新口径对齐」的图片数：
+        # 阈值变了可 SQL 重算，方案变了只能重扫（分数语义不同）。
+        "stale": {
+            "threshold": settings["threshold"] != settings["applied_threshold"],
+            "provider": settings["provider"] != settings["applied_provider"],
+            "pending": coverage["scored"],
+        },
+        "coverage": coverage,   # {total, scored, pending}：面板展示「已判多少张」
+    }
+
+
+class NsfwSettingsRequest(BaseModel):
+    threshold: float | None = None
+    auto_scan: bool | None = None
+    provider: str | None = None
+
+    # pydantic 的宽松模式会把 True 当 1.0、把 "yes" 当 True：非法输入被静默接受，
+    # 用户以为改了阈值实际改成了 1.0。在转换前拦掉，让类型错误显式 422。
+    @field_validator("threshold", mode="before")
+    @classmethod
+    def _reject_bool_threshold(cls, value):
+        if isinstance(value, bool):
+            raise ValueError("threshold 必须是 0.0–1.0 的数字")
+        return value
+
+    @field_validator("auto_scan", mode="before")
+    @classmethod
+    def _require_bool_auto_scan(cls, value):
+        if value is not None and not isinstance(value, bool):
+            raise ValueError("auto_scan 必须是布尔值")
+        return value
+
+
+@router.get("/api/settings/nsfw")
+def nsfw_settings_get():
+    """当前 NSFW 配置、可选方案、预设档位与 stale 状态，供设置页渲染。"""
+    return _nsfw_settings_payload()
+
+
+@router.put("/api/settings/nsfw")
+def nsfw_settings_put(body: NsfwSettingsRequest):
+    """保存 NSFW 配置（部分更新）。改动只影响后续扫描，历史结论按 stale 提示对齐。"""
+    patch = body.model_dump(exclude_none=True)
+    if not patch:
+        raise HTTPException(422, "至少要提供一个字段")
+    locked = config.nsfw_locked_fields()
+    for field in ("threshold", "auto_scan"):
+        if field in patch and locked[field]:
+            # 部署级 env 优先：让界面改一个「改了也不生效」的值，比直接拒绝更糟。
+            raise HTTPException(409, detail={"error": {
+                "code": "setting_locked",
+                "message": f"{field} 由部署环境变量锁定，无法在界面修改"}})
+    if "provider" in patch and patch["provider"] not in review.PROVIDERS:
+        raise HTTPException(422, f"未知鉴黄方案：{patch['provider']}")
+    try:
+        config.save_nsfw_settings(patch)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return _nsfw_settings_payload()
+
+
+@router.post("/api/nsfw/recompute")
+def nsfw_recompute():
+    """按当前阈值重算历史机器结论的 label；不重扫图片、不碰人工复核。"""
+    settings = config.nsfw_settings()
+    if settings["provider"] != settings["applied_provider"]:
+        raise HTTPException(409, detail={"error": {
+            "code": "provider_changed",
+            "message": "鉴黄方案已更换，两个方案的分数量纲不同，只能重扫，不能重算"}})
+    result = STORE.nsfw_recompute(settings["threshold"])
+    try:
+        config.mark_nsfw_applied(threshold=settings["threshold"])
+    except OSError:
+        pass  # 回写失败只影响 stale 提示，重算本身已经落库
+    return {**result, "threshold": settings["threshold"]}
 
 
 @router.get("/api/nsfw/status")
