@@ -1,5 +1,6 @@
 """图片下载：Referer、重试与小图过滤。"""
 import http.server
+import os
 import sys
 import threading
 import unittest
@@ -120,40 +121,76 @@ except ImportError:
     HAS_PIL = False
 
 
-class TinyImageTests(unittest.TestCase):
-    @unittest.skipUnless(HAS_PIL, "需要 Pillow")
-    def test_small_icon_is_tiny(self):
-        from io import BytesIO
+class SavedImageJudgeTests(unittest.TestCase):
+    """G1：下载落盘后复用 ai-media 的 inspect/judge 口径。
 
-        buffer = BytesIO()
-        _Image.new("RGB", (32, 32), "red").save(buffer, "PNG")
-        path = Path("tiny_test.png")
-        path.write_bytes(buffer.getvalue())
-        try:
-            self.assertTrue(downloader._is_tiny_image(path))
-        finally:
+    判定实现在 media_service/app/filter.py，宿主与归档侧必须共用同一函数，
+    否则会出现两套阈值。
+    """
+
+    def setUp(self):
+        self.tmp = Path(self.id().replace(".", "_") + ".tmp")
+        self.tmp.mkdir(exist_ok=True)
+        self.seen = []
+
+    def tearDown(self):
+        for path in self.tmp.glob("*"):
             path.unlink()
+        self.tmp.rmdir()
+
+    def _save(self, name, image):
+        path = self.tmp / name
+        image.save(path)
+        return path
 
     @unittest.skipUnless(HAS_PIL, "需要 Pillow")
-    def test_normal_photo_is_not_tiny(self):
-        from io import BytesIO
+    def test_icon_is_rejected_as_tiny(self):
+        path = self._save("tiny.png", _Image.new("RGB", (32, 32), "red"))
+        self.assertEqual(downloader._judge_saved_image(path, self.seen), "tiny")
+        self.assertEqual(self.seen, [])
 
-        buffer = BytesIO()
-        _Image.new("RGB", (640, 480), "blue").save(buffer, "PNG")
-        path = Path("big_test.png")
-        path.write_bytes(buffer.getvalue())
-        try:
-            self.assertFalse(downloader._is_tiny_image(path))
-        finally:
-            path.unlink()
+    @unittest.skipUnless(HAS_PIL, "需要 Pillow")
+    def test_solid_photo_is_rejected_as_flat(self):
+        path = self._save("flat.png", _Image.new("RGB", (640, 480), "blue"))
+        self.assertEqual(downloader._judge_saved_image(path, self.seen), "flat")
 
-    def test_unreadable_file_is_not_judged(self):
-        path = Path("broken_test.png")
+    @unittest.skipUnless(HAS_PIL, "需要 Pillow")
+    def test_extreme_strip_is_rejected(self):
+        path = self._save("strip.png", _Image.new("RGB", (3000, 200), "gray"))
+        self.assertEqual(downloader._judge_saved_image(path, self.seen), "strip")
+
+    @unittest.skipUnless(HAS_PIL, "需要 Pillow")
+    def test_mostly_transparent_layer_is_rejected(self):
+        image = _Image.frombytes("RGBA", (640, 480), os.urandom(640 * 480 * 4))
+        image.putalpha(0)
+        path = self._save("alpha.png", image)
+        self.assertEqual(downloader._judge_saved_image(path, self.seen), "transparent")
+
+    @unittest.skipUnless(HAS_PIL, "需要 Pillow")
+    def test_normal_photo_is_kept_and_registered(self):
+        image = _Image.frombytes("RGB", (640, 480), os.urandom(640 * 480 * 3))
+        path = self._save("photo.png", image)
+        self.assertEqual(downloader._judge_saved_image(path, self.seen), "")
+        self.assertEqual(len(self.seen), 1)
+
+    @unittest.skipUnless(HAS_PIL, "需要 Pillow")
+    def test_duplicate_is_rejected_by_content_hash(self):
+        image = _Image.frombytes("RGB", (640, 480), os.urandom(640 * 480 * 3))
+        first = self._save("a.png", image)
+        second = self._save("b.png", image)
+        self.assertEqual(downloader._judge_saved_image(first, self.seen), "")
+        self.assertEqual(downloader._judge_saved_image(second, self.seen), "dup")
+
+    def test_broken_file_is_rejected(self):
+        path = self.tmp / "broken.png"
         path.write_bytes(b"not an image")
-        try:
-            self.assertFalse(downloader._is_tiny_image(path))
-        finally:
-            path.unlink()
+        self.assertEqual(downloader._judge_saved_image(path, self.seen), "broken")
+
+    @unittest.skipUnless(HAS_PIL, "需要 Pillow")
+    def test_switch_off_keeps_everything(self):
+        path = self._save("tiny.png", _Image.new("RGB", (32, 32), "red"))
+        with mock.patch.dict(os.environ, {"WX_DOWNLOAD_IMAGE_FILTER": "0"}):
+            self.assertEqual(downloader._judge_saved_image(path, self.seen), "")
 
 
 if __name__ == "__main__":

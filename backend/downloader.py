@@ -41,24 +41,41 @@ IMAGE_CONCURRENCY = 4
 IMAGE_TIMEOUT = 15.0
 IMAGE_RETRIES = 2
 IMAGE_REFERER = "https://mp.weixin.qq.com/"
-MIN_BODY_IMAGE_SIDE = 80
+# 下载落盘筛选：复用 media_service/app/filter.py 的 inspect/judge 口径，
+# 宿主与归档侧共用同一套阈值（WX_FILTER_* 环境变量可调）。
 
 
-def _is_tiny_image(path: Path) -> bool:
-    """短边小于阈值的小图视为图标/分隔线，不参与归档。
+DOWNLOAD_IMAGE_FILTER = "WX_DOWNLOAD_IMAGE_FILTER"
 
-    Pillow 不可用时不做判断（宁可多收一张图，也不让主链路依赖可选包）。
+
+def _download_filter_enabled() -> bool:
+    """下载落盘筛选开关，默认开；显式设为 0/false/off/no 时关闭。"""
+    value = os.environ.get(DOWNLOAD_IMAGE_FILTER, "1").strip().lower()
+    return value not in {"0", "false", "off", "no"}
+
+
+def _judge_saved_image(path: Path, seen: list) -> str:
+    """用 ai-media 的 inspect/judge 口径判定一张已落盘的正文图。
+
+    返回空串表示保留，否则返回原因码（broken/tiny/strip/flat/transparent/dup）。
+    `seen` 是同篇已保留图的指标，用于按内容 SHA-256 去重。
+
+    判定实现在 media_service/app/filter.py，宿主与归档侧共用同一函数与阈值，
+    不在这里复制规则。过滤链路出错时按保留处理——不能让可选能力打断下载主链路。
     """
+    if not _download_filter_enabled():
+        return ""
     try:
-        from PIL import Image
-    except ImportError:
-        return False
-    try:
-        with Image.open(path) as image:
-            width, height = image.size
-    except Exception:  # noqa: BLE001 - 打不开的交由后续流程当作坏图
-        return False
-    return min(width, height) < MIN_BODY_IMAGE_SIDE
+        from media_service.app import filter as image_filter
+
+        info = image_filter.inspect(path)
+        reason = image_filter.judge(info, seen)
+    except Exception as exc:  # noqa: BLE001 - 过滤失败不该让整篇下载失败
+        logger.debug("图片判定失败，按保留处理: %s", exc)
+        return ""
+    if not reason:
+        seen.append(info)
+    return reason
 
 
 MPVIDEO_RE = re.compile(r'(?:https?:)?//mpvideo\.qpic\.cn/[^"\'\s<>]+?\.mp4(?:\?[^"\'\s<>]+)?', re.I)
@@ -1349,9 +1366,17 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "", _redi
 
     # 下载图片
     url_map = {}
-    image_stats = {"expected": 0, "saved": 0, "failed": 0, "skipped": 0}
+    image_stats = {
+        "expected": 0,
+        "saved": 0,
+        "failed": 0,
+        "skipped": 0,
+        "filtered_reasons": {},
+        "filtered_files": [],
+    }
     if save_images:
         img_urls = set()
+        kept_images: list = []
 
         # 优先下载封面图
         if cover_url:
@@ -1396,7 +1421,8 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "", _redi
             return img_url, real
 
         # 并发 4 路下载：批量归档时逐张串行会把单篇耗时拉成几十秒。
-        # 单张失败只计数，不影响整篇落盘；<80px 的小图落地后剔除，不写进 HTML。
+        # 单张失败只计数，不影响整篇落盘；落盘后过一遍 inspect/judge 口径，
+        # 坏图/图标/长条/纯色/透明/同篇重复直接剔除，不写进 HTML 与 Markdown。
         if ordered:
             with ThreadPoolExecutor(
                 max_workers=IMAGE_CONCURRENCY, thread_name_prefix="img-dl"
@@ -1405,12 +1431,16 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "", _redi
                     if not real_img:
                         image_stats["failed"] += 1
                         continue
-                    if _is_tiny_image(media_dir / real_img):
+                    reason = _judge_saved_image(media_dir / real_img, kept_images)
+                    if reason:
                         try:
                             (media_dir / real_img).unlink()
                         except OSError:
                             pass
                         image_stats["skipped"] += 1
+                        reasons = image_stats["filtered_reasons"]
+                        reasons[reason] = reasons.get(reason, 0) + 1
+                        image_stats["filtered_files"].append({"file": real_img, "reason": reason})
                         continue
                     url_map[img_url] = f"media/{real_img}"
                     image_stats["saved"] += 1
