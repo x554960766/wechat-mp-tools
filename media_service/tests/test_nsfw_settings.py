@@ -44,7 +44,7 @@ def test_get_returns_defaults_presets_and_providers(setup):
     assert [p["id"] for p in body["presets"]] == ["loose", "standard", "strict"]
     assert [p["threshold"] for p in body["presets"]] == [0.65, 0.5, 0.35]
     ids = {p["id"] for p in body["providers"]}
-    assert ids == {"falconsai-vit-b16", "nsfwjs-mobilenet-v2"}
+    assert ids == {"falconsai-vit-b16", "freepik-eva02", "nsfwjs-mobilenet-v2"}
     assert body["stale"] == {"threshold": False, "provider": False, "pending": 0}
 
 

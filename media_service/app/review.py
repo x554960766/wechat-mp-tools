@@ -1,27 +1,39 @@
 """可选 NSFW 审查：多方案注册表 + 按需加载，不影响普通检索。
 
-口径与来源实现 nas-image-search/review.py 一致，并与官方预处理逐项核对过：
-- 预处理 resize N（bilinear）-> /255 -> (x-0.5)/0.5 -> NCHW
+默认方案（falconsai）的口径与来源实现 nas-image-search/review.py 一致，并与官方
+预处理逐项核对过：
+- 预处理 resize N（bilinear）-> /255 -> (x-mean)/std -> NCHW
 - 模型图内无 Softmax，必须调用方 softmax 后再取分数
 - 阈值来自 config.nsfw_settings()["threshold"]（settings.json 可热更，env 可覆盖），
   只有 score >= 阈值判 nsfw（不能把 logit 当概率比阈值）
 
-「鉴黄方案」在这里抽象成 PROVIDERS 注册表。两个方案的分数语义完全不同：
+「鉴黄方案」在这里抽象成 PROVIDERS 注册表。三个方案的分数语义完全不同：
 - falconsai-vit-b16：2 类 [normal, nsfw]，score = probs[1]
 - nsfwjs-mobilenet-v2：5 类 [Drawing, Hentai, Neutral, Porn, Sexy]，
   score = probs[1]+probs[3]+probs[4]（三类露骨内容求和）
+- freepik-eva02：4 档有序 [neutral, low, medium, high]，
+  score = probs[1]+probs[2]+probs[3] = 1 − probs[0]（中性越强分越低）
 所以换方案只能重扫，不能拿旧分数按新阈值重算——这是 Spec 定下的硬约束。
+
+预处理差异全部落在 spec 字段里（input_size / interp / mean / std / layout /
+softmax），review_bytes 只按字段执行、不写 if provider == ... 分支：三个方案的
+插值方式（bilinear vs bicubic）、归一化（±1 vs CLIP mean/std vs 仅 /255）、
+张量布局（NCHW vs NHWC）、输出是否已含 softmax 都不同，硬编码一种就会把另外
+两种喂成垃圾分。
 
 权重文件按 provider 分名放在 <DATA_DIR> 下（AI_MEDIA_NSFW_MODEL 只覆盖默认方案，
 用于宿主指定自定义路径）。加载失败按「权重文件 mtime」记忆：文件被替换后自动重试，
 避免一次坏文件就让进程内该方案永久不可用。
 """
 from __future__ import annotations
-import os
 from pathlib import Path
 from . import config
 
 DEFAULT_PROVIDER = "falconsai-vit-b16"
+
+# CLIP ViT-B/16 的图像归一化常量（EVA02 基于同一套视觉编码器）。
+_CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
+_CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 
 PROVIDERS = {
     "falconsai-vit-b16": {
@@ -30,17 +42,43 @@ PROVIDERS = {
         "weight": "nsfw.onnx",
         "sha256": "d9afb1e057104e6cc8616d174f0f6a8b8b0389c839eea7d5efa4bdf1a77efd27",
         "input_size": 224,
+        "interp": "bilinear",
+        "mean": (0.5, 0.5, 0.5),
+        "std": (0.5, 0.5, 0.5),
+        "layout": "NCHW",
+        "softmax": True,
         "score_index": 1,
         "nsfw_indices": None,
         "labels": ("normal", "nsfw"),
         "score_desc": "softmax 后的 nsfw 概率（2 类：normal / nsfw）",
     },
+    "freepik-eva02": {
+        "label": "Freepik EVA02",
+        "model_version": "Freepik/nsfw_image_detector@refs/pr/4",
+        "weight": "nsfw-freepik-eva02.onnx",
+        "sha256": "3e4b381b77d0a711e1f61fdab973c3a04fccfff5697e074f465f4c49674e455d",
+        "input_size": 448,
+        "interp": "bicubic",
+        "mean": _CLIP_MEAN,
+        "std": _CLIP_STD,
+        "layout": "NCHW",
+        "softmax": True,
+        "score_index": None,
+        "nsfw_indices": (1, 2, 3),
+        "labels": ("neutral", "low", "medium", "high"),
+        "score_desc": "low + medium + high 概率之和 = 1 − neutral（4 档有序，越低越可信）",
+    },
     "nsfwjs-mobilenet-v2": {
         "label": "NSFW.js MobileNetV2",
         "model_version": "nsfwjs/mobilenet_v2",
         "weight": "nsfwjs-mobilenet-v2.onnx",
-        "sha256": None,  # 待核实：权重尚未随仓库分发，UI 会显示「未安装」
+        "sha256": "c8c96945be2a009993e8b5bb470379931f51f859a17830ec5cf92cd456954501",
         "input_size": 224,
+        "interp": "bilinear",
+        "mean": (0.0, 0.0, 0.0),
+        "std": (1.0, 1.0, 1.0),
+        "layout": "NHWC",
+        "softmax": False,  # 图内已含 Softmax，再 softmax 会二次压缩分布
         "score_index": None,
         "nsfw_indices": (1, 3, 4),
         "labels": ("Drawing", "Hentai", "Neutral", "Porn", "Sexy"),
@@ -67,13 +105,16 @@ def current_provider() -> str:
 
 
 def weight_path(provider: str | None = None) -> Path:
-    """方案权重路径。默认方案沿用 config.NSFW_MODEL_PATH（含 AI_MEDIA_NSFW_MODEL 覆盖）。"""
+    """方案权重路径。默认方案沿用 config.NSFW_MODEL_PATH（含 AI_MEDIA_NSFW_MODEL 覆盖）。
+
+    AI_MEDIA_NSFW_MODEL 只对默认方案生效：它是给宿主指定「另一个 falconsai 权重
+    副本」用的。若让它对其它方案也生效，切到 EVA02 时会拿 falconsai 的权重配
+    EVA02 的 448×448 预处理——shape 不匹配时直接报错，若尺寸恰好兼容则会静默
+    产出无意义的分数，比报错更难发现。
+    """
     pid = provider or current_provider()
     if pid == DEFAULT_PROVIDER:
         return config.NSFW_MODEL_PATH
-    override = os.environ.get("AI_MEDIA_NSFW_MODEL")
-    if override:
-        return Path(override)
     return config.DATA_DIR / PROVIDERS[pid]["weight"]
 
 
@@ -157,6 +198,26 @@ def _nsfw_score(probs, spec: dict) -> float:
     return total
 
 
+def _prepare(im, spec: dict):
+    """按 spec 做预处理，返回可直接喂给 session.run 的张量。
+
+    三个方案的差异全部由字段驱动：尺寸、插值、归一化、布局。
+    """
+    import numpy as np
+    from PIL import Image
+
+    size = spec["input_size"]
+    resample = Image.BICUBIC if spec.get("interp") == "bicubic" else Image.BILINEAR
+    im = im.convert("RGB").resize((size, size), resample)
+    x = np.asarray(im, dtype=np.float32) / 255.0
+    mean = np.asarray(spec["mean"], dtype=np.float32)
+    std = np.asarray(spec["std"], dtype=np.float32)
+    x = (x - mean) / std
+    if spec.get("layout") == "NHWC":
+        return x[None, ...]
+    return np.transpose(x, (2, 0, 1))[None, ...]
+
+
 def review_bytes(data, provider: str | None = None):
     pid = provider or current_provider()
     spec = PROVIDERS[pid]
@@ -164,16 +225,15 @@ def review_bytes(data, provider: str | None = None):
         import numpy as np
         from PIL import Image
         from io import BytesIO
+
         model = _load(pid)
         input_meta = model.get_inputs()[0]
-        size = spec["input_size"]
         with Image.open(BytesIO(data)) as im:
-            im = im.convert("RGB").resize((size, size), Image.BILINEAR)
-            x = np.asarray(im, dtype=np.float32) / 255.0
-        x = (x - 0.5) / 0.5
-        x = np.transpose(x, (2, 0, 1))[None, ...]
+            x = _prepare(im, spec)
         result = model.run(None, {input_meta.name: x})[0].reshape(-1)
-        probs = _softmax_probs(result)
+        # 图内已含 Softmax 的方案不能再算一次：softmax 会二次压缩分布，
+        # 「低危 0.917」这类中间刻度会被推向两端，阈值语义随之失真。
+        probs = _softmax_probs(result) if spec["softmax"] else np.asarray(result, dtype=np.float32)
         score = _nsfw_score(probs, spec)
         threshold = config.nsfw_settings()["threshold"]
         return {
