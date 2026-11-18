@@ -404,8 +404,14 @@ def nsfw_recompute():
 
 @router.get("/api/nsfw/status")
 def nsfw_status():
-    """发起全局检测前的口径：模型可用性 + 覆盖率 + 疑似/待复核计数。"""
-    data = {**nsfw_scan.available(), **STORE.nsfw_coverage()}
+    """发起全局检测前的口径：模型可用性 + 覆盖率 + 疑似/待复核计数。
+
+    覆盖率与设置页同口径：只把「已生效方案产出的结论」算作已覆盖，换方案后重扫
+    完成前不报满格（两个入口说法必须一致，否则面板与实际待办对不上）。
+    """
+    applied_mv = review.PROVIDERS.get(
+        config.nsfw_settings()["applied_provider"], {}).get("model_version")
+    data = {**nsfw_scan.available(), **STORE.nsfw_coverage(model_version=applied_mv)}
     data["flagged"] = STORE.nsfw_flagged(limit=1, include_reviewed=True)["total"]
     data["unreviewed"] = STORE.nsfw_flagged(limit=1, include_reviewed=False)["total"]
     return data
