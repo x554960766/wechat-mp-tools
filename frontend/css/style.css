@@ -526,6 +526,48 @@ body {
     color: var(--text-primary);
 }
 
+/* 卡片折叠：头部左侧一个小三角，点击切换 .is-collapsed；标题与按钮包成一行 */
+.card-head-main {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+.card-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    padding: 0;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+}
+.card-toggle:hover,
+.card-toggle:focus-visible {
+    color: var(--text-primary);
+    background: var(--bg-subtle, #f6f8fb);
+}
+.card-toggle-icon {
+    display: inline-block;
+    font-size: 0.7rem;
+    line-height: 1;
+    transition: transform 0.15s;
+}
+.card-toggle[aria-expanded="true"] .card-toggle-icon {
+    transform: rotate(90deg);
+}
+.card.is-collapsed .card-header {
+    margin-bottom: 0;
+}
+.card-body[hidden] {
+    display: none;
+}
+
 .card-subtitle {
     font-size: 0.85rem;
     color: var(--text-muted);

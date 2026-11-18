@@ -129,7 +129,34 @@ def test_stats_click_clears_filters_and_scrolls(source):
     assert "set('files-kind', act.dataset.kind)" in drill
     assert "set('files-root', act.dataset.root)" in drill
     assert "this._search();" in drill
-    assert "scrollIntoView" in drill
+    # 清单默认折叠，跳过去之前必须先展开，否则用户只看到一张卡片标题
+    assert "this._setCardExpanded('list', true);" in drill
+    assert "this._scrollToCard('list');" in drill
+
+
+def test_every_card_has_a_collapse_toggle(source):
+    # 卡片折叠是统一入口：每张卡都带 data-card，init 时装按钮并包一层 body
+    for key in ("stats", "dupStats", "filters", "index", "probe", "review", "list", "dupGroups"):
+        assert f'data-card="{key}"' in source, f"卡片 {key} 缺 data-card 标记"
+    init = _between(source, "async init() {", "destroy() {")
+    assert "this._initCards();" in init
+    cards = _between(source, "_initCards() {", "_readCardState() {")
+    assert "querySelectorAll('[data-card]')" in cards
+    assert "btn.dataset.cardToggle = key" in cards
+    assert "body.dataset.cardBody = key" in cards
+    # 头部是 space-between，按钮与标题必须包成一组，否则右侧按钮会被挤到中间
+    assert "card-head-main" in cards
+
+
+def test_list_card_collapsed_by_default_and_state_persisted(source):
+    # 一进页面摊开 50 行太长，清单默认折叠；其余卡片默认展开
+    assert "_collapsedByDefault: ['list']" in source
+    toggle = _between(source, "_setCardExpanded(key, expanded, persist = true) {", "_scrollToCard(key) {")
+    assert "classList.toggle('is-collapsed', !expanded)" in toggle
+    assert "body.hidden = !expanded" in toggle
+    assert "setAttribute('aria-expanded'" in toggle
+    # 折叠状态落在 localStorage，切页回来不重置
+    assert "files:cardState" in source
 
 
 def test_stats_click_delegated_on_stable_container(source):

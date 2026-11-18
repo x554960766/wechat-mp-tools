@@ -34,6 +34,9 @@ const FilesPage = {
     _probeFlaggedOnly: false,
     _probeCheck: null,
     _probeBusy: false,
+    // 卡片折叠：默认只折清单（一进页面就摊开 50 行太长）；状态存 localStorage，切页回来不重置
+    _cardState: null,
+    _collapsedByDefault: ['list'],
 
     esc(value) {
         return String(value == null ? '' : value)
@@ -121,17 +124,17 @@ const FilesPage = {
             </div>
 
             <div class="files-grid">
-                <div class="card">
+                <div class="card" data-card="stats">
                     <div class="card-header"><h3 class="card-title">清单概览</h3></div>
                     <div id="files-stats-body"><p class="form-hint">加载中…</p></div>
                 </div>
-                <div class="card">
+                <div class="card" data-card="dupStats">
                     <div class="card-header"><h3 class="card-title">重复情况</h3></div>
                     <div id="files-dups-body"><p class="form-hint">加载中…</p></div>
                 </div>
             </div>
 
-            <div class="card">
+            <div class="card" data-card="filters">
                 <div class="card-header"><h3 class="card-title">检索条件</h3></div>
                 <div class="files-grid">
                     <div class="form-group">
@@ -182,7 +185,7 @@ const FilesPage = {
                 </div>
             </div>
 
-            <div class="card">
+            <div class="card" data-card="index">
                 <div class="card-header"><h3 class="card-title">索引管理</h3></div>
                 <div class="files-grid">
                     <div class="form-group">
@@ -231,7 +234,7 @@ const FilesPage = {
                 }
             </style>
 
-            <div class="card">
+            <div class="card" data-card="probe">
                 <div class="card-header">
                     <h3 class="card-title">内容审核（NSFW）</h3>
                     <div class="btn-group" id="files-probe-scope">
@@ -320,7 +323,7 @@ const FilesPage = {
                 <div id="files-probe-items"></div>
             </div>
 
-            <div class="card">
+            <div class="card" data-card="review">
                 <div class="card-header">
                     <h3 class="card-title">待复核（媒体库）</h3>
                     <button class="btn btn-secondary btn-sm" id="files-nsfw-load">加载待复核</button>
@@ -328,7 +331,7 @@ const FilesPage = {
                 <div id="files-nsfw-panel"><p class="form-hint">点击「加载待复核」查看已入库、仍判疑似敏感的图片，可直接确认敏感或标为误报。</p></div>
             </div>
 
-            <div class="card">
+            <div class="card" data-card="list">
                 <div class="card-header">
                     <h3 class="card-title">文件清单</h3>
                     <span class="form-hint" id="files-count">—</span>
@@ -341,7 +344,7 @@ const FilesPage = {
                 </div>
             </div>
 
-            <div class="card">
+            <div class="card" data-card="dupGroups">
                 <div class="card-header">
                     <h3 class="card-title">重复内容组</h3>
                     <button class="btn btn-secondary btn-sm" id="files-load-dups">刷新重复组</button>
@@ -357,6 +360,8 @@ const FilesPage = {
         this._items = [];
         this._dupGroups = [];
         this._viewer = new MediaViewer('fv');
+        // 先装折叠：后续 _load* 写入的内容都落在 card-body 里，收起时一起隐藏。
+        this._initCards();
 
         const searchBtn = document.getElementById('files-search');
         if (searchBtn) searchBtn.addEventListener('click', () => this._search());
@@ -532,6 +537,88 @@ const FilesPage = {
      * 概览下钻：按点中的数字/标签把筛选条件写进检索表单，再滚到文件清单。
      * 每次都先清空全部条件，避免和上一次下钻叠加成空结果。
      */
+    // ── 卡片折叠 ────────────────────────────────────────────
+    /** 给每张卡片装一个折叠按钮，并把内容包进 .card-body 以便整块收起。 */
+    _initCards() {
+        this._cardState = this._readCardState();
+        document.querySelectorAll('[data-card]').forEach((card) => {
+            const key = card.dataset.card;
+            const header = card.querySelector(':scope > .card-header');
+            // 重复进入（例如页面重挂载）时不要套两层 body
+            if (!header || card.querySelector(':scope > .card-body')) return;
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'card-toggle';
+            btn.dataset.cardToggle = key;
+            btn.setAttribute('aria-expanded', 'true');
+            btn.innerHTML = '<span class="card-toggle-icon" aria-hidden="true">▸</span>';
+            btn.addEventListener('click', () => this._toggleCard(key));
+            // 头部是 space-between：按钮和标题包成一组，右侧的额外按钮才不会被推到中间。
+            const main = document.createElement('div');
+            main.className = 'card-head-main';
+            main.appendChild(btn);
+            const title = header.querySelector('.card-title');
+            if (title) main.appendChild(title);
+            header.prepend(main);
+            // 卡片外壳不会被整体重渲染（只有内部列表换 innerHTML），所以包一层就够。
+            const body = document.createElement('div');
+            body.className = 'card-body';
+            body.dataset.cardBody = key;
+            while (header.nextSibling) body.appendChild(header.nextSibling);
+            card.appendChild(body);
+            const remembered = this._cardState[key];
+            const expanded = typeof remembered === 'boolean'
+                ? remembered
+                : this._collapsedByDefault.indexOf(key) === -1;
+            this._setCardExpanded(key, expanded, false);
+        });
+    },
+
+    _readCardState() {
+        try {
+            return JSON.parse(window.localStorage.getItem('files:cardState') || '{}') || {};
+        } catch (err) {
+            return {};
+        }
+    },
+
+    _saveCardState() {
+        try {
+            window.localStorage.setItem('files:cardState', JSON.stringify(this._cardState || {}));
+        } catch (err) {
+            // 隐私模式或配额满时折叠状态不入库，不影响功能
+        }
+    },
+
+    _toggleCard(key) {
+        const card = document.querySelector(`[data-card="${key}"]`);
+        const collapsed = !!(card && card.classList.contains('is-collapsed'));
+        this._setCardExpanded(key, collapsed);
+    },
+
+    /** 展开/折叠单张卡片；persist=false 时只改 DOM（初始化用）。 */
+    _setCardExpanded(key, expanded, persist = true) {
+        const card = document.querySelector(`[data-card="${key}"]`);
+        if (!card) return;
+        card.classList.toggle('is-collapsed', !expanded);
+        const body = card.querySelector(`[data-card-body="${key}"]`);
+        if (body) body.hidden = !expanded;
+        const btn = card.querySelector(`[data-card-toggle="${key}"]`);
+        if (btn) {
+            btn.setAttribute('aria-expanded', String(expanded));
+            btn.title = expanded ? '折叠' : '展开';
+        }
+        if (persist) {
+            this._cardState = Object.assign({}, this._cardState, { [key]: expanded });
+            this._saveCardState();
+        }
+    },
+
+    _scrollToCard(key) {
+        const card = document.querySelector(`[data-card="${key}"]`);
+        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    },
+
     _onStatsClick(event) {
         const act = event.target.closest('[data-stat], [data-kind], [data-root]');
         if (!act) return;
@@ -552,11 +639,10 @@ const FilesPage = {
         else if (act.dataset.kind) set('files-kind', act.dataset.kind);
         else if (act.dataset.root) set('files-root', act.dataset.root);
         this._search();
-        // 清单在页面下方，不滚过去用户会以为点了没反应。
+        // 清单默认折叠：先展开再滚过去，否则跳过去只看得见一张卡片标题。
         if (typeof act.blur === 'function') act.blur();
-        const listEl = document.getElementById('files-list');
-        const card = listEl && listEl.closest('.card');
-        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        this._setCardExpanded('list', true);
+        this._scrollToCard('list');
     },
 
     async _loadList() {
