@@ -508,7 +508,7 @@ const MediaSearchPage = {
                         <span class="ms-dl-log-title">${this.esc(t.platform_label || t.platform)} · ${this.esc(t.account_name || t.account_id || '未知账号')}</span>
                         <span class="ms-dl-log-count">${Number(t.completed || 0)}/${Number(t.requested || 0)}</span>
                         <span class="ms-dl-log-scan">${scan}</span>
-                        <span class="ms-dl-log-date">${this.esc(this.fmtTs(t.created_at))}</span>
+                        <span class="ms-dl-log-date">${this.esc(this.fmtDateTime(t.created_at))}</span>
                     </div>
                     <div class="ms-dl-log-body" hidden>
                         <div class="form-hint">请求 ${Number(t.requested || 0)} 篇 · 成功 ${Number(t.completed || 0)} · 失败 ${Number(t.failed || 0)}${Number(t.skipped) ? ` · 跳过 ${t.skipped}` : ''}${t.current ? ' · 当前：' + this.esc(t.current) : ''}</div>
@@ -541,7 +541,9 @@ const MediaSearchPage = {
         tick();
     },
 
-    fmtTs(ts) {
+    // 台账时间戳是 epoch 秒（浮点），这里格式化成「YYYY-MM-DD HH:MM」。
+    // 注意：不能叫 fmtTs——本对象里已有 fmtTs(seconds) 做「分:秒」，同名会被后者覆盖。
+    fmtDateTime(ts) {
         if (!ts) return '';
         const d = new Date(Number(ts) * 1000);
         if (Number.isNaN(d.getTime())) return '';
