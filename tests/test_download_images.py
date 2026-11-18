@@ -1,7 +1,10 @@
-"""图片下载：Referer、重试与小图过滤。"""
+"""图片下载：Referer、重试、并发落盘、质量过滤与统计。"""
 import http.server
+import io
+import json
 import os
 import sys
+import tempfile
 import threading
 import unittest
 from pathlib import Path
@@ -18,14 +21,32 @@ PNG_1PX = (
     b"\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
 )
 
+try:
+    from PIL import Image as _Image
+
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
+
 
 class _Handler(http.server.BaseHTTPRequestHandler):
     hits = []
     fail_first = False
     body = PNG_1PX
+    routes = {}
 
     def do_GET(self):  # noqa: N802
-        type(self).hits.append({k.lower(): v for k, v in self.headers.items()})
+        type(self).hits.append({
+            "path": self.path,
+            **{k.lower(): v for k, v in self.headers.items()},
+        })
+        if self.path in type(self).routes:
+            payload = type(self).routes[self.path]
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         if type(self).fail_first and len(type(self).hits) == 1:
             self.send_response(500)
             self.end_headers()
@@ -56,19 +77,18 @@ class DownloadResourceTests(unittest.TestCase):
         _Handler.hits = []
         _Handler.fail_first = False
         _Handler.body = PNG_1PX
+        _Handler.routes = {}
         self.patch = mock.patch.object(downloader, "get_proxies_dict", lambda: {})
         self.patch.start()
-        self.tmp = Path(self.id().replace(".", "_") + ".tmp")
-        self.tmp.mkdir(exist_ok=True)
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmpdir.name)
 
     def tearDown(self):
         self.patch.stop()
-        for path in self.tmp.glob("*"):
-            path.unlink()
-        self.tmp.rmdir()
+        self._tmpdir.cleanup()
 
-    def _url(self):
-        return f"http://127.0.0.1:{self.port}/img_001.jpg"
+    def _url(self, path="/img_001.jpg"):
+        return f"http://127.0.0.1:{self.port}{path}"
 
     def test_sends_referer_when_asked(self):
         name = downloader.download_resource(
@@ -112,31 +132,74 @@ class DownloadResourceTests(unittest.TestCase):
         self.assertIsNone(downloader.download_resource(self._url(), self.tmp / "img_001.jpg"))
         self.assertEqual(list(self.tmp.glob("*.part")), [])
 
+    @unittest.skipUnless(HAS_PIL, "需要 Pillow")
+    def test_article_downloads_concurrently_and_filters_body_images(self):
+        def _png_bytes(image):
+            buf = io.BytesIO()
+            image.save(buf, format="PNG")
+            return buf.getvalue()
 
-try:  # 小图判定依赖 Pillow；wmp 主环境不装，缺失时按「不判定」降级
-    from PIL import Image as _Image
+        good_bytes = _png_bytes(_Image.frombytes("RGB", (640, 480), os.urandom(640 * 480 * 3)))
+        tiny_bytes = _png_bytes(_Image.new("RGB", (32, 32), "red"))
 
-    HAS_PIL = True
-except ImportError:
-    HAS_PIL = False
+        _Handler.routes = {
+            "/mmbiz_good_1.png": good_bytes,
+            "/mmbiz_good_2.png": good_bytes,  # 内容重复，应被 dup 过滤
+            "/mmbiz_tiny.png": tiny_bytes,    # 小图标，应被 tiny 过滤
+        }
+        article_html = (
+            '<!DOCTYPE html><html><head>'
+            '<meta property="og:title" content="配图并发与过滤测试">'
+            '</head><body>'
+            '<div id="js_content">'
+            f'<img data-src="{self._url("/mmbiz_good_1.png")}" />'
+            f'<img data-src="{self._url("/mmbiz_good_2.png")}" />'
+            f'<img data-src="{self._url("/mmbiz_tiny.png")}" />'
+            '</div></body></html>'
+        )
+        out_dir = self.tmp / "out"
+        with mock.patch.object(
+            downloader, "fetch_wechat_article_html",
+            return_value=(article_html, "https://mp.weixin.qq.com/s/test_img_filter", ""),
+        ), mock.patch.object(
+            downloader, "get_settings",
+            return_value={
+                "auto_save_images": True,
+                "auto_save_videos": False,
+                "save_markdown": False,
+                "save_pdf": False,
+            },
+        ), mock.patch.object(downloader, "report_proxy_status"):
+            result = downloader.download_single_article(
+                "https://mp.weixin.qq.com/s/test_img_filter", out_dir
+            )
+
+        self.assertTrue(result["success"])
+        stats = result["images"]
+        self.assertEqual(stats["expected"], 3)
+        self.assertEqual(stats["saved"], 1)
+        self.assertEqual(stats["skipped"], 2)
+        self.assertEqual(stats["failed"], 0)
+        self.assertEqual(stats["filtered_reasons"], {"dup": 1, "tiny": 1})
+
+        art_dir = Path(result["path"])
+        media_files = sorted(p.name for p in (art_dir / "media").iterdir())
+        self.assertEqual(media_files, ["img_001.png"])
+
+        meta = json.loads((art_dir / "metadata.json").read_text(encoding="utf-8"))
+        self.assertEqual(meta["images"], stats)
 
 
 class SavedImageJudgeTests(unittest.TestCase):
-    """G1：下载落盘后复用 ai-media 的 inspect/judge 口径。
-
-    判定实现在 media_service/app/filter.py，宿主与归档侧必须共用同一函数，
-    否则会出现两套阈值。
-    """
+    """下载落盘后按保守口径筛选无用图片（坏图/图标/长条/纯色/透明/重复）。"""
 
     def setUp(self):
-        self.tmp = Path(self.id().replace(".", "_") + ".tmp")
-        self.tmp.mkdir(exist_ok=True)
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmpdir.name)
         self.seen = []
 
     def tearDown(self):
-        for path in self.tmp.glob("*"):
-            path.unlink()
-        self.tmp.rmdir()
+        self._tmpdir.cleanup()
 
     def _save(self, name, image):
         path = self.tmp / name
@@ -181,6 +244,7 @@ class SavedImageJudgeTests(unittest.TestCase):
         self.assertEqual(downloader._judge_saved_image(first, self.seen), "")
         self.assertEqual(downloader._judge_saved_image(second, self.seen), "dup")
 
+    @unittest.skipUnless(HAS_PIL, "需要 Pillow")
     def test_broken_file_is_rejected(self):
         path = self.tmp / "broken.png"
         path.write_bytes(b"not an image")
