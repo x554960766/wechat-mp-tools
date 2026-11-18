@@ -19,7 +19,7 @@ uv run --extra test python -m pytest tests/
 uv run python -m compileall app
 ```
 
-首次扫描与模型推理会花时间。三个来源项目（wx-archiver、nas-image-search、zspace-photo-search）已于 2026-11-08 整合完成后删除；其旧索引（13,043 条）在 `/Users/yaobinsun/IdeaProjects/ai-media/data/media/legacy-import/index.sqlite`，**不在本仓 `data/` 下**。服务仅监听本机地址。
+首次扫描与模型推理会花时间。本项目的三个前身（wx-archiver、nas-image-search、zspace-photo-search）已整合完毕，旧索引（13,043 条）以 `legacy-import/index.sqlite` 的形式保存在数据目录之外，**不在本仓 `data/` 下**，迁移时用 `--source` 指向实际位置。服务仅监听本机地址。
 
 旧索引迁移走 `migrate_legacy`，默认只出预案、不写库也不跑模型：
 

@@ -36,7 +36,8 @@ from pathlib import Path
 
 from media_service.app import config
 
-DEFAULT_SOURCE = Path("/Users/yaobinsun/IdeaProjects/ai-media/data/media/legacy-import/index.sqlite")
+# 旧索引默认位置：相对当前工作目录；实际路径用 --source 指定
+DEFAULT_SOURCE = Path("data/media/legacy-import/index.sqlite")
 SAMPLE_LIMIT = 5
 
 
