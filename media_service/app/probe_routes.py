@@ -8,15 +8,17 @@
 """
 from __future__ import annotations
 
+import mimetypes
 import shutil
 from pathlib import Path
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
-from . import config, nsfw_probe, nsfw_scan, review
+from . import config, media, nsfw_probe, nsfw_scan, review, thumbs
+from .files_routes import delete_file_record
 from .jobs import JOBS
 
 router = APIRouter()
@@ -42,6 +44,10 @@ class ImportRequest(BaseModel):
     index: int = Field(ge=0)
     root: str
     target_dir: str = ""
+
+
+class UnimportRequest(BaseModel):
+    index: int = Field(ge=0)
 
 
 def _ensure_model() -> dict:
@@ -206,3 +212,60 @@ async def probe_import(job_id: str, body: ImportRequest):
     except OSError as exc:
         raise HTTPException(502, f"写入媒体根失败：{exc}") from exc
     return data
+
+
+@router.get("/api/nsfw/probes/{job_id}/file/{index}")
+def probe_file(job_id: str, index: int):
+    """查看已入库的副本（图片 / 视频）。
+
+    刻意不复用 ``/api/media/file``：那个端点靠索引行做版本校验，而入库之后到增量
+    扫描跑完之间索引还不存在（队列满时扫描根本没提交），用户刚入库就点查看会拿到
+    404。这里直接按 results.json 记的副本路径读，语义是「看我刚入库的那个文件」。
+    """
+    _probe_job(job_id)
+    row = nsfw_probe.find_item(job_id, index)
+    if row is None:
+        raise HTTPException(404, "检测结果不存在")
+    imported = row.get("imported") or {}
+    root_id = imported.get("root")
+    relpath = imported.get("relpath")
+    if not root_id or not relpath:
+        raise HTTPException(409, "该结果还没有入库，没有可查看的副本")
+    if row.get("kind") == "video":
+        try:
+            path = media.local_path(root_id, relpath)
+        except ValueError as exc:
+            # 远端根没有本地路径，无法按 Range 播放；先明确拒绝而不是整段下载到内存。
+            raise HTTPException(503, str(exc)) from exc
+        if not path.is_file():
+            raise HTTPException(404, "已入库副本不存在，可能已被删除")
+        return FileResponse(path, media_type=mimetypes.guess_type(relpath)[0] or "application/octet-stream")
+    try:
+        data = media.read_bytes(root_id, relpath)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, "已入库副本不存在，可能已被删除") from exc
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    except (OSError, TimeoutError) as exc:
+        raise HTTPException(503, f"读取副本失败：{exc}") from exc
+    payload, mime = thumbs.render_display(data)
+    return Response(payload, media_type=mime, headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/nsfw/probes/{job_id}/unimport")
+async def probe_unimport(job_id: str, body: UnimportRequest):
+    """撤销入库：删掉媒体根里的副本并清索引，检测结果保留（可以重新入库）。
+
+    先删副本再清标记：反过来的话中途失败会留下「标记已清、副本还在」的孤儿文件，
+    而且用户看不出它还占着空间。
+    """
+    _probe_job(job_id)
+    row = nsfw_probe.find_item(job_id, body.index)
+    if row is None:
+        raise HTTPException(404, "检测结果不存在")
+    imported = row.get("imported") or {}
+    if not imported.get("root") or not imported.get("relpath"):
+        raise HTTPException(409, "该结果还没有入库")
+    deleted = await run_in_threadpool(delete_file_record, imported["root"], imported["relpath"])
+    nsfw_probe.drop_imported(job_id, body.index)
+    return {"root": deleted["root"], "relpath": deleted["relpath"], "removed": deleted["removed"]}

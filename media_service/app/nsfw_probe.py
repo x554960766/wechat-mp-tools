@@ -519,6 +519,27 @@ def import_item(job: dict, index: int, root_id: str, target_dir: str = "") -> di
     return {"root": root_id, "relpath": relpath, "scan_job_id": scan_job_id}
 
 
+def find_item(job_id: str, index: int) -> dict | None:
+    """按 index 取一条结果行；返回的是进程内缓存里的 dict，调用方不要原地改。"""
+    return next((row for row in load_results(job_id) if row.get("index") == index), None)
+
+
+def drop_imported(job_id: str, index: int) -> dict | None:
+    """清掉某条结果的入库标记并落盘；返回被清掉的标记（None 表示本来就没入库）。
+
+    副本已经删掉却留着标记时，刷新页面卡片仍是「已入库」并指向不存在的文件，
+    所以撤销入库必须回写 results.json，不能只删文件。
+    """
+    rows = load_results(job_id)
+    row = next((item for item in rows if item.get("index") == index), None)
+    if row is None:
+        return None
+    imported = row.pop("imported", None)
+    if imported is not None:
+        _write_results(job_id, rows)
+    return imported
+
+
 def cleanup(max_age_seconds: int = RETENTION_SECONDS) -> int:
     """删掉过期任务目录（缩略图与上传原件）。由 JobManager 的每日清理顺带调用。"""
     if not PROBE_DIR.is_dir():

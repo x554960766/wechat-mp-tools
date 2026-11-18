@@ -346,3 +346,102 @@ def test_import_endpoint_maps_errors(monkeypatch):
                                                           "scan_job_id": "s1"})
     ok = client.post("/api/nsfw/probes/j1/import", json={"index": 0, "root": "r"}).json()
     assert ok["scan_job_id"] == "s1"
+
+
+# ── 已入库副本：查看与撤销入库 ─────────────────────────────
+
+from app.store import Store  # noqa: E402  （只在下面几例里用到）
+
+
+def _completed_job(monkeypatch):
+    monkeypatch.setattr(JOBS, "get_job",
+                        lambda job_id: {"id": job_id, "kind": "nsfw_probe", "status": "completed"})
+
+
+def _imported_row(root_id, relpath, kind="image", index=0, imported=True):
+    row = {"index": index, "path": "/nowhere/a.png", "name": "a.png", "kind": kind,
+           "size": 1, "mtime": 0.0, "status": "ok", "score": 0.1, "label": "safe",
+           "thumb": None}
+    if imported:
+        row["imported"] = {"root": root_id, "relpath": relpath}
+    return row
+
+
+def test_file_endpoint_serves_imported_copy(tmp_path, monkeypatch):
+    root = _media_root(tmp_path, monkeypatch)
+    (root / "NSFW").mkdir()
+    payload = _png("blue")
+    (root / "NSFW" / "a.png").write_bytes(payload)
+    _completed_job(monkeypatch)
+    nsfw_probe._write_results("j1", [_imported_row("r", "NSFW/a.png")])
+
+    resp = _client().get("/api/nsfw/probes/j1/file/0")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("image/png")
+    assert resp.content == payload
+
+
+def test_file_endpoint_serves_video_and_supports_range(tmp_path, monkeypatch):
+    root = _media_root(tmp_path, monkeypatch)
+    (root / "NSFW").mkdir()
+    (root / "NSFW" / "v.mp4").write_bytes(b"0123456789")
+    _completed_job(monkeypatch)
+    nsfw_probe._write_results("j1", [_imported_row("r", "NSFW/v.mp4", kind="video")])
+
+    resp = _client().get("/api/nsfw/probes/j1/file/0")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"] == "video/mp4"
+    part = _client().get("/api/nsfw/probes/j1/file/0", headers={"Range": "bytes=2-5"})
+    assert part.status_code == 206
+    assert part.content == b"2345"
+
+
+def test_file_endpoint_rejects_unimported_and_missing_copy(tmp_path, monkeypatch):
+    root = _media_root(tmp_path, monkeypatch)
+    (root / "NSFW").mkdir()
+    _completed_job(monkeypatch)
+    client = _client()
+    nsfw_probe._write_results("j1", [_imported_row("r", "NSFW/a.png", imported=False)])
+    assert client.get("/api/nsfw/probes/j1/file/0").status_code == 409
+    assert client.get("/api/nsfw/probes/j1/file/7").status_code == 404
+    nsfw_probe._write_results("j1", [_imported_row("r", "NSFW/gone.png")])
+    assert client.get("/api/nsfw/probes/j1/file/0").status_code == 404
+
+
+def test_unimport_deletes_copy_and_clears_marker(tmp_path, monkeypatch):
+    root = _media_root(tmp_path, monkeypatch)
+    (root / "NSFW").mkdir()
+    (root / "NSFW" / "a.png").write_bytes(_png())
+    monkeypatch.setattr("app.files_routes.STORE", Store(tmp_path / "index.sqlite"))
+    _completed_job(monkeypatch)
+    nsfw_probe._write_results("j1", [_imported_row("r", "NSFW/a.png")])
+    client = _client()
+
+    resp = client.post("/api/nsfw/probes/j1/unimport", json={"index": 0})
+    assert resp.status_code == 200
+    assert resp.json()["removed"] is True
+    assert not (root / "NSFW" / "a.png").exists()
+    assert "imported" not in nsfw_probe.load_results("j1")[0]
+    # 再撤一次：标记已清，报「还没有入库」而不是当成成功。
+    assert client.post("/api/nsfw/probes/j1/unimport", json={"index": 0}).status_code == 409
+
+
+def test_unimport_refuses_readonly_root_and_keeps_marker(tmp_path, monkeypatch):
+    root = _media_root(tmp_path, monkeypatch, writable=False)
+    (root / "NSFW").mkdir()
+    (root / "NSFW" / "a.png").write_bytes(_png())
+    monkeypatch.setattr("app.files_routes.STORE", Store(tmp_path / "index.sqlite"))
+    _completed_job(monkeypatch)
+    nsfw_probe._write_results("j1", [_imported_row("r", "NSFW/a.png")])
+
+    resp = _client().post("/api/nsfw/probes/j1/unimport", json={"index": 0})
+    assert resp.status_code == 403
+    assert (root / "NSFW" / "a.png").exists()
+    assert nsfw_probe.load_results("j1")[0]["imported"]["relpath"] == "NSFW/a.png"
+
+
+def test_unimport_unknown_index_is_404(tmp_path, monkeypatch):
+    _media_root(tmp_path, monkeypatch)
+    _completed_job(monkeypatch)
+    nsfw_probe._write_results("j1", [_imported_row("r", "NSFW/a.png")])
+    assert _client().post("/api/nsfw/probes/j1/unimport", json={"index": 3}).status_code == 404

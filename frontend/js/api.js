@@ -401,6 +401,17 @@ const API = {
         },
         nsfwProbeCancel(jobId) { return API.post(`/media/api/nsfw/probes/${jobId}/cancel`); },
         nsfwProbeImport(jobId, payload) { return API.post(`/media/api/nsfw/probes/${jobId}/import`, payload); },
+        /**
+         * 已入库副本的查看地址：入库后到增量扫描建好索引之间，/api/media/file 一定 404，
+         * 所以按 probe 结果直读副本，不走索引。视频同址按 Range 播放。
+         */
+        nsfwProbeFile(jobId, index) {
+            return `/media/api/nsfw/probes/${encodeURIComponent(jobId)}/file/${Number(index)}`;
+        },
+        /** 撤销入库：删掉媒体根里的副本并清索引；检测结果保留，之后可重新入库。 */
+        nsfwProbeUnimport(jobId, index) {
+            return API.post(`/media/api/nsfw/probes/${jobId}/unimport`, { index });
+        },
         // 标签：文件标签挂在内容摘要上（同内容副本共享），作品标签挂在 work_key 上
         tags(opts) { return API.get('/media/api/tags', opts); },
         imagesByTag(tag, params = {}, opts) {

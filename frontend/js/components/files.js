@@ -1223,7 +1223,9 @@ const FilesPage = {
         }
         const imported = item.imported;
         const importBtn = imported
-            ? `<span class="form-hint">已入库：${this.esc(imported.root)} / ${this.esc(imported.relpath)}</span>`
+            ? `<span class="form-hint">已入库：${this.esc(imported.root)} / ${this.esc(imported.relpath)}</span>
+               <button class="btn btn-secondary btn-sm" data-act="view" data-index="${index}">查看</button>
+               <button class="btn btn-danger btn-sm" data-act="unimport" data-index="${index}">删除</button>`
             : (status === 'ok' || status === 'skipped')
                 ? `<button class="btn btn-secondary btn-sm" data-act="import" data-index="${index}">入库</button>`
                 : '';
@@ -1298,8 +1300,59 @@ const FilesPage = {
     async _onProbeItemsClick(event) {
         const act = event.target.closest('[data-act]');
         if (!act) return;
+        const index = Number(act.dataset.index);
+        if (act.dataset.act === 'view') { this._viewProbeItem(index); return; }
+        if (act.dataset.act === 'unimport') { await this._unimportProbeItem(index, act); return; }
         if (act.dataset.act !== 'import') return;
-        await this._importProbeItem(Number(act.dataset.index), act);
+        await this._importProbeItem(index, act);
+    },
+
+    /**
+     * 查看已入库副本：图片走灯箱、视频新窗口。
+     * 不能改用 /api/media/file —— 那个地址要求索引行，刚入库还没扫描完必然 404。
+     */
+    _viewProbeItem(index) {
+        const jobId = this._probeJobId;
+        const item = this._probeItems.find((row) => Number(row.index) === index);
+        if (!jobId || !item || !item.imported) return;
+        const url = API.media.nsfwProbeFile(jobId, index);
+        if (item.kind === 'video') {
+            const link = document.createElement('a');
+            link.href = url;
+            link.target = '_blank';
+            link.rel = 'noopener';
+            link.click();
+            return;
+        }
+        // 传 file 让查看器直接用后端地址，不再按 root/relpath 拼版本参数。
+        if (this._viewer) this._viewer.open([{ file: url, name: item.name }], 0, {});
+    },
+
+    // 撤销入库：删副本 + 清索引 + 清结果里的入库标记；检测结果保留，可重新入库。
+    async _unimportProbeItem(index, btn) {
+        const jobId = this._probeJobId;
+        const item = this._probeItems.find((row) => Number(row.index) === index);
+        if (!jobId || !item || !item.imported) return;
+        const { root, relpath } = item.imported;
+        Modal.confirm(
+            '删除已入库副本',
+            `将从媒体根删除：<br><code>${this.esc(root)} / ${this.esc(relpath)}</code><br><br>`
+            + '磁盘文件与索引记录一并删除，检测结果保留，之后可以重新入库。',
+            async () => {
+                if (btn) { btn.disabled = true; btn.textContent = '删除中…'; }
+                try {
+                    await API.media.nsfwProbeUnimport(jobId, index);
+                    const row = this._probeItems.find((entry) => Number(entry.index) === index);
+                    if (row) delete row.imported;
+                    this._renderProbeItems();
+                    Toast.success(`已删除 ${root} / ${relpath}`);
+                    await Promise.allSettled([this._loadStats(), this._loadList()]);
+                } catch (err) {
+                    Toast.error('删除失败：' + (err.message || err));
+                    if (btn) { btn.disabled = false; btn.textContent = '删除'; }
+                }
+            },
+        );
     },
 
     /** 入库 = 复制进媒体根 + 入队一次增量扫描；索引由扫描任务统一建，前端不假设已生效。 */

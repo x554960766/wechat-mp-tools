@@ -63,6 +63,18 @@ def thumbnail(root,relpath,version,size=360):
         if os.path.exists(temp): os.unlink(temp)
     return output.getvalue(),False
 
+def render_display(data):
+    """原始字节转浏览器可显示的内容：HEIC/HEIF 转 JPEG，其余原样返回并给出 MIME。
+
+    不依赖索引，供「已入库副本」这类还没有索引行的场景复用同一套解码口径。
+    """
+    media.register_heif()
+    with Image.open(BytesIO(data)) as im:
+        if im.format and im.format.upper() in ("HEIC","HEIF"):
+            out=BytesIO(); im.convert("RGB").save(out,"JPEG",quality=92); return out.getvalue(),"image/jpeg"
+        return data,Image.MIME.get(im.format,"application/octet-stream")
+
+
 def display_image(root,relpath,version):
     from .store import STORE
     row=STORE.get(root,media.validate_relpath(relpath))
@@ -72,8 +84,4 @@ def display_image(root,relpath,version):
     if (before.size,before.mtime)!=(row["size"],row["mtime"]): raise RuntimeError("source_changed")
     data=media.read_bytes(root,relpath); after=media.stat_entry(root,relpath)
     if (before.size,before.mtime)!=(after.size,after.mtime) or (row["content_sha256"] and hashlib.sha256(data).hexdigest()!=row["content_sha256"]): raise RuntimeError("source_changed")
-    media.register_heif()
-    with Image.open(BytesIO(data)) as im:
-        if im.format and im.format.upper() in ("HEIC","HEIF"): 
-            out=BytesIO(); im.convert("RGB").save(out,"JPEG",quality=92); return out.getvalue(),"image/jpeg"
-    return data,Image.MIME.get(Image.open(BytesIO(data)).format,"application/octet-stream")
+    return render_display(data)

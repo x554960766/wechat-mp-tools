@@ -70,16 +70,15 @@ def files_stats():
     return STORE.files_stats()
 
 
-@router.post("/api/files/delete")
-def delete_file(payload: dict = Body(...)):
-    """删除单个文件：物理文件 + 索引记录，仅限可写媒体根。
+def delete_file_record(root: str, relpath: str) -> dict:
+    """校验可写根后删除物理文件与索引记录；单文件删除与「撤销入库」共用。
 
     只删索引不删文件会留下「看不见但占空间」的幽灵数据；只删文件不删索引则会让
     清单残留、缩略图破图。因此顺序固定为：先物理删除，成功后再清索引。
     物理删除失败时索引保持不动，用户可修复后重试。
     """
-    root = str(payload.get("root") or "").strip()
-    relpath = str(payload.get("relpath") or "").strip()
+    root = str(root or "").strip()
+    relpath = str(relpath or "").strip()
     if not root or not relpath:
         raise HTTPException(422, "root 与 relpath 均为必填")
     try:
@@ -105,3 +104,9 @@ def delete_file(payload: dict = Body(...)):
         "index": index,
         "removed": physical["existed"] or index["removed"] > 0,
     }
+
+
+@router.post("/api/files/delete")
+def delete_file(payload: dict = Body(...)):
+    """删除单个文件：物理文件 + 索引记录，仅限可写媒体根。"""
+    return delete_file_record(str(payload.get("root") or ""), str(payload.get("relpath") or ""))

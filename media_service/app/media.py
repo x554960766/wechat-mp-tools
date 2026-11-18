@@ -167,6 +167,18 @@ def read_bytes(root_id, relpath):
         _run({"path":remote,"local_path":local,"overwrite":True},"download",["--local-root",d,"--yes"])
         return Path(local).read_bytes()
 
+def local_path(root_id, relpath):
+    """本地根的绝对路径，越界即拒绝；远端根没有可直接读的本地路径。
+
+    给需要交给 FileResponse（视频播放、Range 请求）的场景用：``read_bytes`` 会把
+    整个文件读进内存，大视频走不通。
+    """
+    relpath=validate_relpath(relpath); root=config.get_root(root_id)
+    if root["type"]!="local": raise ValueError("远端媒体根暂不支持直接读取文件")
+    base=Path(root["path"]).resolve(); target=(base/relpath).resolve()
+    if not target.is_relative_to(base): raise ValueError("路径越过媒体根")
+    return target
+
 def write_new(root_id, relpath, local_file):
     root=config.get_root(root_id); relpath=validate_relpath(relpath)
     if not root.get("writable"): raise PermissionError("媒体根只读")
