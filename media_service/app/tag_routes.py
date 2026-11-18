@@ -65,6 +65,11 @@ class TagImageRequest(BaseModel):
     mode: str = "add"
 
 
+class RenameTagRequest(BaseModel):
+    old: str
+    new: str
+
+
 class TagContentRequest(BaseModel):
     content_id: str
     tag: str
@@ -147,3 +152,22 @@ def tag_content(body: TagContentRequest):
     except ValueError as exc:
         raise HTTPException(422, detail={"error": {"code": "invalid_tag", "message": str(exc)}})
     return {"content_id": body.content_id, "tags": tags}
+
+
+@router.post("/api/tags/rename")
+def rename_tag(body: RenameTagRequest):
+    """把标签整体改名，文件标签与作品标签一起改；新名字已存在时合并成一个。
+
+    改的是词汇表而不是某一条记录：标签是用户自己的分类法，改名意味着「我之前
+    叫它的那个名字，从今往后都叫这个」，所以不做「只改这一张图」的选项。
+    """
+    old = _normalize_tag(body.old)
+    new = _normalize_tag(body.new)
+    try:
+        result = STORE.rename_tag(old, new)
+    except KeyError:
+        raise HTTPException(404, detail={"error": {"code": "not_found",
+                                                 "message": "该标签不存在，可能已被改名或删除"}})
+    except ValueError as exc:
+        raise _invalid(str(exc))
+    return result

@@ -157,6 +157,77 @@ def test_tag_image_rejects_bad_input(tmp_path, monkeypatch, client, payload, sta
     assert client.post("/api/tags/image", json=payload).status_code == status
 
 
+def test_rename_tag_moves_file_tags_via_http(tmp_path, monkeypatch, client):
+    """改名改的是词汇表：同一内容的所有副本一起改，旧名不残留。"""
+    store, dirs = _setup(tmp_path, monkeypatch)
+    data = _png()
+    _add(store, LOCAL, dirs[LOCAL] / "img.png", data=data)
+    _add(store, NAS, dirs[NAS] / "img.png", data=data)
+    client.post("/api/tags/image", json={"root": LOCAL, "relpath": "img.png", "tag": "精选"})
+
+    renamed = client.post("/api/tags/rename", json={"old": "精选", "new": "精选集"})
+    assert renamed.status_code == 200
+    body = renamed.json()
+    assert body["new"] == "精选集" and body["merged"] is False
+    # 两行（两个副本）都被改名，行数在改名之前统计
+    assert body["images"] == 2 and body["contents"] == 0
+
+    assert client.get("/api/tags").json()["items"] == [{"tag": "精选集", "count": 2}]
+    assert client.get("/api/tags/image", params={"root": NAS, "relpath": "img.png"}).json()["tags"] == ["精选集"]
+    # 旧名已经不存在，不能再按它列出内容
+    assert client.get("/api/tags/images", params={"tag": "精选"}).json()["items"] == []
+    assert len(client.get("/api/tags/images", params={"tag": "精选集"}).json()["items"]) == 2
+
+
+def test_rename_tag_merges_into_existing_name(tmp_path, monkeypatch, client):
+    """新名字已被占用时合并成一个标签，不能出现「同一张图两行同名标签」。"""
+    store, dirs = _setup(tmp_path, monkeypatch)
+    _add(store, LOCAL, dirs[LOCAL] / "a.png", data=_png("white"))
+    _add(store, LOCAL, dirs[LOCAL] / "b.png", data=_png("black"))
+    client.post("/api/tags/image", json={"root": LOCAL, "relpath": "a.png", "tag": "旧名"})
+    client.post("/api/tags/image", json={"root": LOCAL, "relpath": "b.png", "tag": "新名"})
+    # 让 a.png 同时拥有两个标签，制造主键冲突：改名时必须合并而不是插入重复行
+    client.post("/api/tags/image", json={"root": LOCAL, "relpath": "a.png", "tag": "新名"})
+
+    merged = client.post("/api/tags/rename", json={"old": "旧名", "new": "新名"}).json()
+    assert merged["merged"] is True and merged["images"] == 1
+
+    assert client.get("/api/tags").json()["items"] == [{"tag": "新名", "count": 2}]
+    assert client.get("/api/tags/image", params={"root": LOCAL, "relpath": "a.png"}).json()["tags"] == ["新名"]
+    assert len(client.get("/api/tags/images", params={"tag": "新名"}).json()["items"]) == 2
+
+
+def test_rename_tag_covers_content_tags(tmp_path, monkeypatch, client):
+    """作品标签同样按 work_key 生效：改名后两份归档副本都只看到新名。"""
+    store, dirs = _setup(tmp_path, monkeypatch)
+    _wechat(dirs[LOCAL], "半夏Floom", "手机壁纸｜翰墨修心")
+    _wechat(dirs[NAS], "半夏Floom", "手机壁纸｜翰墨修心")
+    for root_id in (LOCAL, NAS):
+        files, _ = media.list_files(root_id)
+        store.sync_contents(contents.discover(root_id, files))
+    local_id = store.search_contents("翰墨修心")[0][0]["content_id"]
+    client.post("/api/tags/content", json={"content_id": local_id, "tag": "精选"})
+
+    assert client.post("/api/tags/rename", json={"old": "精选", "new": "精选集"}).json()["contents"] >= 1
+    listed = client.get("/api/tags/contents", params={"tag": "精选集"}).json()
+    assert listed["items"][0]["title"] == "手机壁纸｜翰墨修心"
+    assert client.get("/api/tags/content", params={"content_id": local_id}).json()["tags"] == ["精选集"]
+
+
+@pytest.mark.parametrize("payload, status", [
+    ({"old": "不存在", "new": "随便"}, 404),
+    ({"old": "精选", "new": "精选"}, 422),
+    ({"old": "精选", "new": "   "}, 422),
+    ({"old": "   ", "new": "随便"}, 422),
+    ({"old": "精选", "new": "x" * 33}, 422),
+])
+def test_rename_tag_rejects_bad_input(tmp_path, monkeypatch, client, payload, status):
+    store, dirs = _setup(tmp_path, monkeypatch)
+    _add(store, LOCAL, dirs[LOCAL] / "a.png")
+    client.post("/api/tags/image", json={"root": LOCAL, "relpath": "a.png", "tag": "精选"})
+    assert client.post("/api/tags/rename", json=payload).status_code == status
+
+
 def test_content_tag_round_trip_and_listing(tmp_path, monkeypatch, client):
     store, dirs = _setup(tmp_path, monkeypatch)
     _wechat(dirs[LOCAL], "半夏Floom", "手机壁纸｜翰墨修心")

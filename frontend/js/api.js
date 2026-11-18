@@ -393,6 +393,7 @@ const API = {
             return API.get(`/media/api/tags/content?content_id=${encodeURIComponent(contentId)}`, opts);
         },
         tagContent(payload) { return API.post('/media/api/tags/content', payload); },
+        renameTag(oldTag, newTag, opts) { return API.post('/media/api/tags/rename', { old: oldTag, new: newTag }, opts); },
         contentsSearch(params, opts) {
             const query = new URLSearchParams();
             Object.entries(params || {}).forEach(([key, value]) => {
