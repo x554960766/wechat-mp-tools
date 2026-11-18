@@ -2559,6 +2559,21 @@ body {
     margin: 0 4px;
     background: rgba(255, 255, 255, 0.14);
 }
+/* 镜片大小单选：基础 180px 为 100%，150%/200% 在 JS 里按同一比例改直径 */
+.ms-lens-sizes {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    padding-left: 2px;
+}
+/* 作者样式的 display 会压过 UA 的 [hidden]，必须显式补一条 */
+.ms-lens-sizes[hidden] { display: none; }
+.ms-lens-size {
+    min-width: 44px;
+    padding: 0 6px;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+}
 /* 局部放大镜：光标下的图内点放大后落进这个圆里 */
 .ms-viewer-lens {
     position: absolute;

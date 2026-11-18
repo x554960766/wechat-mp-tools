@@ -123,6 +123,28 @@ def test_lens_zoom_is_wheel_adjustable_and_locks_the_image(source):
     assert "Math.max(1.5, Math.min(8, next))" in lens_zoom
 
 
+def test_lens_size_options_resize_by_radius(source, styles):
+    """镜片大小：基础 180px，可选 100%/150%/200%，切换后圆与 margin 必须同步。"""
+    markup = _between(source, "box.innerHTML = `", "document.body.appendChild(box);")
+    for size in ("1", "1.5", "2"):
+        assert f'data-act="lens-size" data-size="{size}"' in markup
+    sync = _between(source, "_syncLensSize() {", "setLensSize(factor) {")
+    assert "Math.round(180 * view.lensSize)" in sync
+    assert "lens.style.width = `${size}px`;" in sync
+    assert "lens.style.height = `${size}px`;" in sync
+    # margin 必须跟着半径一起改，否则圆的左上角锚点会把取样点挤偏
+    assert "lens.style.marginLeft = `${-size / 2}px`;" in sync
+    assert "lens.style.marginTop = `${-size / 2}px`;" in sync
+    set_size = _between(source, "setLensSize(factor) {", "toggleLens() {")
+    assert "Math.max(1, Math.min(2, factor))" in set_size
+    chrome = _between(source, "_syncViewChrome() {", "zoomTo(nextScale, clientX, clientY) {")
+    assert "sizes.hidden = !view.lens;" in chrome
+    sizes_css = _between(styles, ".ms-lens-sizes {", ".ms-lens-size {")
+    assert "display: inline-flex;" in sizes_css
+    assert ".ms-lens-sizes[hidden] { display: none; }" in styles
+    assert "width: 180px;" in _between(styles, ".ms-viewer-lens {", ".ms-viewer-lens[hidden]")
+
+
 def test_fullscreen_uses_viewer_box_and_guards_escape(source, styles):
     """全屏挂在查看器根节点上；Esc 先退全屏再关窗；close 要摘监听并主动退出全屏。"""
     markup = _between(source, "box.innerHTML = `", "document.body.appendChild(box);")

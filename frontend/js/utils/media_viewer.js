@@ -73,6 +73,11 @@ class MediaViewer {
                     <button type="button" class="ms-zoom-btn" data-act="rotate-left" title="逆时针旋转（Shift+R）" aria-label="逆时针旋转">⟲</button>
                     <button type="button" class="ms-zoom-btn" data-act="rotate-right" title="顺时针旋转（R）" aria-label="顺时针旋转">⟳</button>
                     <button type="button" class="ms-zoom-btn" data-act="lens" id="${this._id('zoom-lens')}" title="局部放大镜（M）" aria-label="局部放大镜" aria-pressed="false">放大镜</button>
+                    <span class="ms-lens-sizes" id="${this._id('lens-sizes')}" hidden>
+                        <button type="button" class="ms-zoom-btn ms-lens-size" data-act="lens-size" data-size="1" title="镜片半径 100%" aria-pressed="true">100%</button>
+                        <button type="button" class="ms-zoom-btn ms-lens-size" data-act="lens-size" data-size="1.5" title="镜片半径 150%" aria-pressed="false">150%</button>
+                        <button type="button" class="ms-zoom-btn ms-lens-size" data-act="lens-size" data-size="2" title="镜片半径 200%" aria-pressed="false">200%</button>
+                    </span>
                     <span class="ms-zoom-sep" aria-hidden="true"></span>
                     <button type="button" class="ms-zoom-btn" data-act="fullscreen" id="${this._id('zoom-full')}" title="全屏（F）" aria-label="全屏" aria-pressed="false">⛶</button>
                 </div>
@@ -89,10 +94,11 @@ class MediaViewer {
         // 缩放不改变布局尺寸，只改 transform，舞台大小才不会跟着图片抖。
         this._viewer = {
             box, images, index: 0, seq: 0, pano: null,
-            view: { scale: 1, rotate: 0, tx: 0, ty: 0, lens: false, lensZoom: 2, baseW: 0, baseH: 0 },
+            view: { scale: 1, rotate: 0, tx: 0, ty: 0, lens: false, lensZoom: 2, lensSize: 1, baseW: 0, baseH: 0 },
         };
 
         this._bindStage();
+        this._syncLensSize();
         this._onResize = () => this.layout();
         window.addEventListener('resize', this._onResize);
         const viewerImg = this._el('viewer-img');
@@ -120,6 +126,7 @@ class MediaViewer {
             else if (name === 'rotate-left') this.rotateBy(-1);
             else if (name === 'rotate-right') this.rotateBy(1);
             else if (name === 'lens') this.toggleLens();
+            else if (name === 'lens-size') this.setLensSize(parseFloat(act.dataset.size));
             else if (name === 'fullscreen') this.toggleFullscreen();
         });
 
@@ -439,6 +446,8 @@ class MediaViewer {
             lensBtn.setAttribute('aria-pressed', view.lens ? 'true' : 'false');
             lensBtn.title = view.lens ? '局部放大镜（滚轮调倍率）' : '局部放大镜（M）';
         }
+        const sizes = this._el('lens-sizes');
+        if (sizes) sizes.hidden = !view.lens;
         if (!view.lens) this.hideLens();
     }
 
@@ -557,6 +566,35 @@ class MediaViewer {
         this.hideLens();
     }
 
+    /**
+     * 镜片大小：基础直径 180px（100%），150%/200% 按半径等比放大。
+     * 只改镜片这个圆的尺寸，取样倍率不动——镜片变大只是看到更多内容。
+     */
+    _syncLensSize() {
+        const view = this._viewState();
+        const lens = this._el('lens');
+        if (!view || !lens) return;
+        const size = Math.round(180 * view.lensSize);
+        lens.style.width = `${size}px`;
+        lens.style.height = `${size}px`;
+        lens.style.marginLeft = `${-size / 2}px`;
+        lens.style.marginTop = `${-size / 2}px`;
+        const sizes = this._el('lens-sizes');
+        if (!sizes) return;
+        sizes.querySelectorAll('[data-size]').forEach((btn) => {
+            btn.setAttribute('aria-pressed', Number(btn.dataset.size) === view.lensSize ? 'true' : 'false');
+        });
+    }
+
+    setLensSize(factor) {
+        const view = this._viewState();
+        if (!view || !Number.isFinite(factor)) return;
+        view.lensSize = Math.max(1, Math.min(2, factor));
+        this._syncLensSize();
+        // 镜片开着时立即按新尺寸重画，不用等下一次鼠标移动
+        if (view.lens && this._pointer) this.updateLensAt(this._pointer.x, this._pointer.y);
+    }
+
     toggleLens() {
         const view = this._viewState();
         const stage = this._el('stage');
@@ -577,7 +615,7 @@ class MediaViewer {
     }
 
     /**
-     * 局部放大镜：镜片是 180px 的圆，内容按「当前缩放 × 2、2–8 倍封顶」重画。
+     * 局部放大镜：镜片基础直径 180px（可切 150%/200%），内容按「当前缩放 × 镜内倍率、1.5–8 倍」重画。
      * 镜内图用与舞台相同的基准尺寸再放大，浏览器会从原图采样，不会把已缩小的位图二次放大。
      */
     updateLensAt(clientX, clientY) {
