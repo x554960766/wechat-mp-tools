@@ -2485,6 +2485,9 @@ body {
     align-items: center;
     gap: 8px;
 }
+/* 作者样式的 display 会压过 UA 的 [hidden]{display:none}，必须显式补一条，
+   否则非全景模式下这组控件也一直露在顶栏里 */
+.ms-viewer-pano-controls[hidden] { display: none; }
 .ms-viewer-pano-controls .form-input {
     width: auto;
     min-width: 9rem; /* 不写最小宽度时「上下立体（取上半幅）」会被挤成一个省略号 */
@@ -2571,6 +2574,20 @@ body {
     pointer-events: none;
 }
 .ms-viewer-lens[hidden] { display: none; }
+/* 镜内倍率读数：滚轮调倍率时唯一的即时反馈 */
+.ms-lens-zoom {
+    position: absolute;
+    left: 50%;
+    bottom: 12px;
+    transform: translateX(-50%);
+    padding: 1px 8px;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.6);
+    color: #fff;
+    font-size: 11px;
+    line-height: 16px;
+    font-variant-numeric: tabular-nums;
+}
 .ms-viewer-lens img {
     position: absolute;
     left: 50%;
@@ -2578,6 +2595,25 @@ body {
     max-width: none;
     max-height: none;
     transform-origin: center center;
+}
+/* 全屏态：面板铺满屏幕，舞台高度跟着 100vh 走，其余层级照旧 */
+.ms-viewer.is-fullscreen {
+    padding: 0;
+    background: #04080c;
+}
+.ms-viewer.is-fullscreen .ms-viewer-panel {
+    width: 100%;
+    max-height: 100%;
+    height: 100%;
+    border: 0;
+    border-radius: 0;
+}
+.ms-viewer.is-fullscreen .ms-viewer-stage {
+    /* 全屏时舞台吃掉剩余高度（顶部按钮/缩放栏/标签行可能有无不定），
+       比按窗口高度写死余量稳，切换页面或标签行显隐都不会溢出 */
+    flex: 1 1 auto;
+    height: auto;
+    min-height: 0;
 }
 .ms-viewer-pano {
     position: absolute;

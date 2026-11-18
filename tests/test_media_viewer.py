@@ -105,15 +105,53 @@ def test_lens_geometry_matches_styles(styles, source):
     assert "height: 180px;" in lens
     assert "margin: -90px 0 0 -90px;" in lens
     body = _between(source, "updateLensAt(clientX, clientY) {", "async panorama() {")
-    assert "const zoom = Math.min(8, Math.max(2, view.scale * 2));" in body
+    assert "const zoom = Math.min(8, Math.max(1, view.scale * view.lensZoom));" in body
+    # 镜内倍率读数要跟镜片一起出现，否则滚轮调倍率时没有反馈
+    assert "badge.textContent = `×${zoom.toFixed(1)}`;" in body
 
 
-def test_panorama_hides_planar_zoom_chrome(source):
+def test_lens_zoom_is_wheel_adjustable_and_locks_the_image(source):
+    """放大镜开启时滚轮只调镜内倍率：画面整体锁定，不许缩放、不许拖动。"""
+    assert "lens: false, lensZoom: 2," in source
+    wheel = _between(source, "stage.addEventListener('wheel'", "stage.addEventListener('dblclick'")
+    branch = wheel[wheel.index("if (view.lens) {"):wheel.index("this.zoomTo(")]
+    assert "this.setLensZoom(view.lensZoom * Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY);" in branch
+    assert "return;" in branch  # 命中镜内倍率后必须早退，不能落回整图缩放
+    down = _between(source, "stage.addEventListener('pointerdown'", "stage.addEventListener('pointermove'")
+    assert "if (view.lens) return; // 放大镜开启时画面整体锁定，指针只移动镜片" in down
+    lens_zoom = _between(source, "setLensZoom(next, clientX, clientY) {", "/** 标准与 webkit")
+    assert "Math.max(1.5, Math.min(8, next))" in lens_zoom
+
+
+def test_fullscreen_uses_viewer_box_and_guards_escape(source, styles):
+    """全屏挂在查看器根节点上；Esc 先退全屏再关窗；close 要摘监听并主动退出全屏。"""
+    markup = _between(source, "box.innerHTML = `", "document.body.appendChild(box);")
+    assert 'data-act="fullscreen"' in markup
+    assert "viewer.box.requestFullscreen || viewer.box.webkitRequestFullscreen" in source
+    keys = _between(source, "this._keys = (event) => {", "document.addEventListener('keydown', this._keys);")
+    assert "if (this._fullscreenEl()) return;" in keys  # 全屏时 Esc 先交还浏览器
+    assert "if (event.key === 'f' || event.key === 'F') this.toggleFullscreen();" in keys
+    fs = _between(source, "this._onFsChange = () => {", "this._keys = (event) => {")
+    assert "classList.toggle('is-fullscreen', on);" in fs
+    assert "this.layout();" in fs  # 舞台尺寸变了必须重算适配尺寸
+    close = _between(source, "close() {", "window.MediaViewer")
+    assert "document.removeEventListener('fullscreenchange', this._onFsChange);" in close
+    assert "document.removeEventListener('webkitfullscreenchange', this._onFsChange);" in close
+    assert "if (this._fullscreenEl() === viewer.box) this.exitFullscreen();" in close
+    # 全屏舞台靠 flex 吃剩余高度，标签行有无都不会溢出
+    fs_stage = _between(styles, ".ms-viewer.is-fullscreen .ms-viewer-stage {", ".ms-viewer-pano {")
+    assert "flex: 1 1 auto;" in fs_stage
+    assert "min-height: 0;" in fs_stage
+
+
+def test_panorama_hides_planar_zoom_chrome(source, styles):
     build = _between(source, "buildPano(THREE, image, viewer) {", "applyPanoMode() {")
     assert "zoomBar.hidden = true;" in build
     assert "this.hideLens();" in build
     exit_pano = _between(source, "exitPano() {", "disposePano(pano) {")
     assert "zoomBar.hidden = false;" in exit_pano
+    # 作者样式的 display 会压过 UA 的 [hidden]：全景控件必须显式补一条隐藏规则
+    assert ".ms-viewer-pano-controls[hidden] { display: none; }" in styles
 
 
 def test_close_removes_zoom_listeners(source):

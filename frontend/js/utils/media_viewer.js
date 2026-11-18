@@ -63,7 +63,7 @@ class MediaViewer {
                 <div class="ms-viewer-stage" id="${this._id('stage')}">
                     <img id="${this._id('viewer-img')}" alt="" draggable="false">
                     <div class="ms-viewer-pano" id="${this._id('viewer-pano')}" hidden></div>
-                    <div class="ms-viewer-lens" id="${this._id('lens')}" hidden><img alt="" draggable="false"></div>
+                    <div class="ms-viewer-lens" id="${this._id('lens')}" hidden><img alt="" draggable="false"><span class="ms-lens-zoom" id="${this._id('lens-zoom')}"></span></div>
                 </div>
                 <div class="ms-viewer-zoom" id="${this._id('zoom-bar')}" role="toolbar" aria-label="缩放与旋转">
                     <button type="button" class="ms-zoom-btn" data-act="zoom-out" title="缩小（-）" aria-label="缩小">−</button>
@@ -73,6 +73,8 @@ class MediaViewer {
                     <button type="button" class="ms-zoom-btn" data-act="rotate-left" title="逆时针旋转（Shift+R）" aria-label="逆时针旋转">⟲</button>
                     <button type="button" class="ms-zoom-btn" data-act="rotate-right" title="顺时针旋转（R）" aria-label="顺时针旋转">⟳</button>
                     <button type="button" class="ms-zoom-btn" data-act="lens" id="${this._id('zoom-lens')}" title="局部放大镜（M）" aria-label="局部放大镜" aria-pressed="false">放大镜</button>
+                    <span class="ms-zoom-sep" aria-hidden="true"></span>
+                    <button type="button" class="ms-zoom-btn" data-act="fullscreen" id="${this._id('zoom-full')}" title="全屏（F）" aria-label="全屏" aria-pressed="false">⛶</button>
                 </div>
                 ${withTags ? `<div class="ms-viewer-tags" id="${this._id('viewer-tags')}">
                     <span class="ms-tag-chips" id="${this._id('tag-chips')}"></span>
@@ -87,7 +89,7 @@ class MediaViewer {
         // 缩放不改变布局尺寸，只改 transform，舞台大小才不会跟着图片抖。
         this._viewer = {
             box, images, index: 0, seq: 0, pano: null,
-            view: { scale: 1, rotate: 0, tx: 0, ty: 0, lens: false, baseW: 0, baseH: 0 },
+            view: { scale: 1, rotate: 0, tx: 0, ty: 0, lens: false, lensZoom: 2, baseW: 0, baseH: 0 },
         };
 
         this._bindStage();
@@ -118,6 +120,7 @@ class MediaViewer {
             else if (name === 'rotate-left') this.rotateBy(-1);
             else if (name === 'rotate-right') this.rotateBy(1);
             else if (name === 'lens') this.toggleLens();
+            else if (name === 'fullscreen') this.toggleFullscreen();
         });
 
         const mode = document.getElementById(this._id('pano-mode'));
@@ -129,15 +132,33 @@ class MediaViewer {
             this.editTag(tagInput.value, 'add');
         });
 
+        // 全屏状态变化：舞台尺寸随之改变，必须重算适配尺寸；离开时同步按钮态
+        this._onFsChange = () => {
+            if (!this._viewer) return;
+            const on = this._fullscreenEl() === this._viewer.box;
+            this._viewer.box.classList.toggle('is-fullscreen', on);
+            const btn = this._el('zoom-full');
+            if (btn) {
+                btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+                btn.title = on ? '退出全屏（F）' : '全屏（F）';
+            }
+            this.layout();
+        };
+        document.addEventListener('fullscreenchange', this._onFsChange);
+        document.addEventListener('webkitfullscreenchange', this._onFsChange);
+
         this._keys = (event) => {
             if (!this._viewer) return;
             if (event.key === 'Escape') {
+                // 全屏时 Esc 先交还浏览器退出全屏，再按一次才关查看器
+                if (this._fullscreenEl()) return;
                 this.close();
                 return;
             }
             // 标签输入框里敲 r/0/- 不该触发旋转或缩放
             const tag = event.target && event.target.tagName;
             if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (event.target && event.target.isContentEditable)) return;
+            if (event.key === 'f' || event.key === 'F') this.toggleFullscreen();
             if (this._viewer.pano) return; // 全景下方向键留给场景拖动
             if (event.key === 'ArrowLeft') this.step(-1);
             if (event.key === 'ArrowRight') this.step(1);
@@ -299,6 +320,7 @@ class MediaViewer {
             const view = this._viewState();
             if (!view || !this._viewer || this._viewer.pano || event.button !== 0) return;
             if (event.target.closest('[data-act]')) return; // 控件上的按下不当作拖动
+            if (view.lens) return; // 放大镜开启时画面整体锁定，指针只移动镜片
             if (view.scale <= 1.001) return; // 未放大时画面没有可拖动的余量
             drag = { id: event.pointerId, x: event.clientX, y: event.clientY, tx: view.tx, ty: view.ty };
             if (stage.setPointerCapture) stage.setPointerCapture(event.pointerId);
@@ -333,6 +355,11 @@ class MediaViewer {
             const view = this._viewState();
             if (!view || !this._viewer || this._viewer.pano) return;
             event.preventDefault();
+            if (view.lens) {
+                // 放大镜开启时滚轮只调镜内倍率，画面整体锁定：不缩放、不平移
+                this.setLensZoom(view.lensZoom * Math.exp(-event.deltaY * 0.0015), event.clientX, event.clientY);
+                return;
+            }
             // 指数缩放：触控板的细碎 deltaY 也能平滑跟手
             this.zoomTo(view.scale * Math.exp(-event.deltaY * 0.002), event.clientX, event.clientY);
         }, { passive: false });
@@ -408,7 +435,10 @@ class MediaViewer {
             stage.classList.toggle('is-lens', !!view.lens);
         }
         const lensBtn = this._el('zoom-lens');
-        if (lensBtn) lensBtn.setAttribute('aria-pressed', view.lens ? 'true' : 'false');
+        if (lensBtn) {
+            lensBtn.setAttribute('aria-pressed', view.lens ? 'true' : 'false');
+            lensBtn.title = view.lens ? '局部放大镜（滚轮调倍率）' : '局部放大镜（M）';
+        }
         if (!view.lens) this.hideLens();
     }
 
@@ -452,6 +482,48 @@ class MediaViewer {
         const view = this._viewState();
         if (!view) return;
         this.zoomTo(view.scale * factor, null, null);
+    }
+
+    /**
+     * 放大镜开启时滚轮调节的倍率（相对当前画面），画面本身不缩放也不平移。
+     * 1.5–8 倍：低于 1.5 和主画面几乎没差别，高于 8 只剩马赛克。
+     */
+    setLensZoom(next, clientX, clientY) {
+        const view = this._viewState();
+        if (!view) return;
+        view.lensZoom = Math.max(1.5, Math.min(8, next));
+        const pointer = clientX == null ? this._pointer : { x: clientX, y: clientY };
+        if (pointer) this.updateLensAt(pointer.x, pointer.y);
+        this._syncViewChrome();
+    }
+
+    /** 标准与 webkit 前缀双读：Safari 旧版只认 webkitFullscreenElement。 */
+    _fullscreenEl() {
+        return document.fullscreenElement || document.webkitFullscreenElement || null;
+    }
+
+    toggleFullscreen() {
+        const viewer = this._viewer;
+        if (!viewer) return;
+        if (this._fullscreenEl() === viewer.box) {
+            this.exitFullscreen();
+            return;
+        }
+        const request = viewer.box.requestFullscreen || viewer.box.webkitRequestFullscreen;
+        if (!request) {
+            this.status('当前浏览器不支持全屏');
+            return;
+        }
+        const result = request.call(viewer.box);
+        if (result && result.catch) result.catch(() => this.status('进入全屏失败'));
+    }
+
+    exitFullscreen() {
+        if (!this._fullscreenEl()) return;
+        const exit = document.exitFullscreen || document.webkitExitFullscreen;
+        if (!exit) return;
+        const result = exit.call(document);
+        if (result && result.catch) result.catch(() => {});
     }
 
     resetView() {
@@ -534,7 +606,9 @@ class MediaViewer {
         const dy = qy - view.ty;
         const px = (dx * cos + dy * sin) / view.scale;
         const py = (-dx * sin + dy * cos) / view.scale;
-        const zoom = Math.min(8, Math.max(2, view.scale * 2));
+        const zoom = Math.min(8, Math.max(1, view.scale * view.lensZoom));
+        const badge = this._el('lens-zoom');
+        if (badge) badge.textContent = `×${zoom.toFixed(1)}`;
         const inner = lens.querySelector('img');
         const src = this._el('viewer-img');
         if (inner) {
@@ -761,6 +835,13 @@ class MediaViewer {
             window.removeEventListener('resize', this._onResize);
             this._onResize = null;
         }
+        if (this._onFsChange) {
+            document.removeEventListener('fullscreenchange', this._onFsChange);
+            document.removeEventListener('webkitfullscreenchange', this._onFsChange);
+            this._onFsChange = null;
+        }
+        // 退出全屏必须发生在 DOM 摘除之前，否则浏览器会把页面留在全屏态
+        if (this._fullscreenEl() === viewer.box) this.exitFullscreen();
         const pano = viewer.pano;
         viewer.pano = null;
         this.disposePano(pano);
