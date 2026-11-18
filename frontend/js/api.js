@@ -368,6 +368,31 @@ const API = {
             return API.get(`/media/api/nsfw/flagged${qs ? '?' + qs : ''}`, opts);
         },
         nsfwReview(payload) { return API.post('/media/api/nsfw/review', payload); },
+        // 标签：文件标签挂在内容摘要上（同内容副本共享），作品标签挂在 work_key 上
+        tags(opts) { return API.get('/media/api/tags', opts); },
+        imagesByTag(tag, params = {}, opts) {
+            const query = new URLSearchParams({ tag });
+            Object.entries(params).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') query.set(key, value);
+            });
+            return API.get(`/media/api/tags/images?${query.toString()}`, opts);
+        },
+        contentsByTag(tag, params = {}, opts) {
+            const query = new URLSearchParams({ tag });
+            Object.entries(params).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') query.set(key, value);
+            });
+            return API.get(`/media/api/tags/contents?${query.toString()}`, opts);
+        },
+        imageTags(root, relpath, opts) {
+            const query = new URLSearchParams({ root, relpath });
+            return API.get(`/media/api/tags/image?${query.toString()}`, opts);
+        },
+        tagImage(payload) { return API.post('/media/api/tags/image', payload); },
+        contentTags(contentId, opts) {
+            return API.get(`/media/api/tags/content?content_id=${encodeURIComponent(contentId)}`, opts);
+        },
+        tagContent(payload) { return API.post('/media/api/tags/content', payload); },
         contentsSearch(params, opts) {
             const query = new URLSearchParams();
             Object.entries(params || {}).forEach(([key, value]) => {

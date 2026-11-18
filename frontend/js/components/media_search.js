@@ -23,6 +23,7 @@ const MediaSearchPage = {
     _images: [],
     _viewer: null,
     _viewerKeys: null,
+    _tagSeq: 0,
     _three: null,
     _threePromise: null,
 
@@ -87,6 +88,10 @@ const MediaSearchPage = {
                         </label>
                         <button class="btn btn-secondary btn-sm" id="ms-nsfw-review"
                                 title="列出仍判疑似敏感的图片；打开大图后可确认敏感或标为误报">待复核</button>
+                        <select class="form-input ms-tag-filter" id="ms-tag-filter"
+                                title="按标签浏览图片；标签挂在内容摘要上，同内容副本共享">
+                            <option value="">按标签浏览</option>
+                        </select>
                         <span class="form-hint" id="ms-scan-state"></span>
                         <button class="btn btn-secondary btn-sm" id="ms-scan">扫描选中来源</button>
                     </span>
@@ -145,6 +150,11 @@ const MediaSearchPage = {
         }
         const nsfwReview = document.getElementById('ms-nsfw-review');
         if (nsfwReview) nsfwReview.addEventListener('click', () => this.loadNsfwFlagged());
+        const tagFilter = document.getElementById('ms-tag-filter');
+        if (tagFilter) tagFilter.addEventListener('change', () => {
+            if (tagFilter.value) this.loadImagesByTag(tagFilter.value);
+            else this.search(true); // 清空选择回到常规检索结果
+        });
         const account = document.getElementById('ms-account');
         if (account) {
             account.addEventListener('change', () => {
@@ -167,6 +177,7 @@ const MediaSearchPage = {
         this.bindImageDrop();
         await this.loadFacets();
         await this.loadRoots();
+        this.loadTagFilter();
         this.loadStats();
         await this.search(true);
     },
@@ -523,14 +534,22 @@ const MediaSearchPage = {
                 </div>`;
             return;
         }
-        const esc = (v) => this.esc(v);
-        box.innerHTML = `<div class="content-grid">${this._images.map((item, i) => {
+        this.renderImageCards(box, this._images, (item) => {
             const score = item.nsfw && item.nsfw.score != null ? Number(item.nsfw.score).toFixed(2) : '—';
+            return { cls: 'is-warn', text: `疑似 ${score}` };
+        });
+    },
+
+    /** 一批图片卡片（待复核 / 按标签浏览共用）：缩略图 + 角标 + 路径，点击打开查看器。 */
+    renderImageCards(box, items, badgeFor) {
+        const esc = (v) => this.esc(v);
+        box.innerHTML = `<div class="content-grid">${items.map((item, i) => {
+            const badge = badgeFor ? badgeFor(item) : null;
             return `<button type="button" class="content-card ms-image-card" data-index="${i}">
                         <span class="content-cover">
                             <img src="${esc('/media' + (item.thumb || ''))}" loading="lazy" alt=""
                                  onerror="this.closest('.content-cover').classList.add('is-broken')">
-                            <span class="media-badge is-warn">疑似 ${esc(score)}</span>
+                            ${badge ? `<span class="media-badge ${esc(badge.cls)}">${esc(badge.text)}</span>` : ''}
                         </span>
                         <span class="content-meta">
                             <span class="content-title">${esc(item.relpath || '')}</span>
@@ -540,6 +559,68 @@ const MediaSearchPage = {
         }).join('')}</div>`;
         box.querySelectorAll('.ms-image-card').forEach((card) => {
             card.addEventListener('click', () => this.openImage(Number(card.dataset.index)));
+        });
+    },
+
+    /** 标签下拉：字典来自 /api/tags（文件行 + 作品行的使用次数）。读不到不影响检索。 */
+    async loadTagFilter() {
+        const select = document.getElementById('ms-tag-filter');
+        if (!select) return;
+        const esc = (v) => this.esc(v);
+        try {
+            const data = await API.media.tags({ showError: false });
+            const rows = data && data.items ? data.items : [];
+            const current = select.value;
+            select.innerHTML = '<option value="">按标签浏览</option>' + rows.map((row) => (
+                `<option value="${esc(row.tag)}">${esc(row.tag)}（${esc(row.count)}）</option>`
+            )).join('');
+            // 重新读取后保留用户已选的标签，避免刚打完标签下拉就跳回「按标签浏览」
+            if (current && rows.some((row) => row.tag === current)) select.value = current;
+        } catch (err) {
+            select.innerHTML = '<option value="">按标签浏览</option>';
+        }
+    },
+
+    /** 按标签列图片：行结构与搜索结果同构，可直接喂给同一个查看器。 */
+    async loadImagesByTag(tag) {
+        const status = document.getElementById('ms-image-status');
+        if (status) status.textContent = `正在读取「${tag}」的图片…`;
+        try {
+            const data = await API.media.imagesByTag(tag, { limit: 60 });
+            this._images = data && data.items ? data.items : [];
+            this._flaggedMode = false;
+            this.renderTagResults(tag, data || {});
+        } catch (err) {
+            if (status) status.textContent = '';
+            Toast.error('按标签读取图片失败：' + (err && err.message ? err.message : '请求失败'));
+        }
+    },
+
+    renderTagResults(tag, data) {
+        const box = document.getElementById('ms-image-hits');
+        if (!box) return;
+        const status = document.getElementById('ms-image-status');
+        const items = this._images;
+        box.hidden = false;
+        if (status) {
+            status.textContent = items.length
+                ? `标签「${tag}」共 ${items.length} 张${data.has_more ? '（仅显示前 ' + items.length + ' 张）' : ''}`
+                : '';
+        }
+        if (!items.length) {
+            box.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">🏷️</div>
+                    <h3 class="empty-state-title">这个标签下还没有图片</h3>
+                    <p class="empty-state-desc">打开任意图片的查看器输入标签，即可把图片归到这里。</p>
+                </div>`;
+            return;
+        }
+        this.renderImageCards(box, items, (item) => {
+            const nsfw = this.nsfwOf(item);
+            if (!nsfw || nsfw.label !== 'nsfw') return null;
+            const score = nsfw.score != null ? Number(nsfw.score).toFixed(2) : '—';
+            return { cls: 'is-warn', text: `疑似 ${score}` };
         });
     },
 
@@ -834,6 +915,11 @@ const MediaSearchPage = {
                     <img id="ms-viewer-img" alt="">
                     <div class="ms-viewer-pano" id="ms-viewer-pano" hidden></div>
                 </div>
+                <div class="ms-viewer-tags" id="ms-viewer-tags">
+                    <span class="ms-tag-chips" id="ms-tag-chips"></span>
+                    <input class="form-input ms-tag-input" id="ms-tag-input" type="text"
+                           maxlength="32" placeholder="加标签后回车" autocomplete="off">
+                </div>
                 <p class="form-hint" id="ms-viewer-status" role="status" hidden></p>
             </div>`;
         document.body.appendChild(box);
@@ -853,9 +939,16 @@ const MediaSearchPage = {
             else if (name === 'pano-exit') this.viewerExitPano();
             else if (name === 'review-nsfw') this.viewerReview('nsfw');
             else if (name === 'review-safe') this.viewerReview('safe');
+            else if (name === 'tag-remove') this.viewerEditTag(act.dataset.tag, 'remove');
         });
         const mode = document.getElementById('ms-pano-mode');
         if (mode) mode.addEventListener('change', () => this.viewerApplyPanoMode());
+        const tagInput = document.getElementById('ms-tag-input');
+        if (tagInput) tagInput.addEventListener('keydown', (event) => {
+            if (event.key !== 'Enter') return;
+            event.preventDefault(); // 回车只提交标签，别冒泡出去触发别的提交
+            this.viewerEditTag(tagInput.value, 'add');
+        });
         this._viewerKeys = (event) => {
             if (!this._viewer) return;
             if (event.key === 'Escape') {
@@ -895,6 +988,7 @@ const MediaSearchPage = {
         // 有机器初筛结论才提供复核入口：没有证据的图不该被随手标记
         const reviewBox = document.getElementById('ms-viewer-review');
         if (reviewBox) reviewBox.hidden = !nsfw;
+        this.viewerLoadTags(image);
     },
 
     /** 人工复核当前大图：写 second 级结论，机器重扫只动 first 行，不会覆盖它。 */
@@ -918,6 +1012,75 @@ const MediaSearchPage = {
             Toast.error('复核失败：' + (err && err.message ? err.message : '请求失败'));
         } finally {
             buttons.forEach((button) => { button.disabled = false; });
+        }
+    },
+
+    /**
+     * 当前大图的标签。标签挂在内容摘要上——同一内容归档到 NAS 后摘要相同，
+     * 所以这里可能显示在别的副本上打的标签；一处标注、处处生效是刻意的。
+     */
+    async viewerLoadTags(image) {
+        const chips = document.getElementById('ms-tag-chips');
+        if (!chips) return;
+        const seq = ++this._tagSeq;
+        this.renderTags([]);
+        if (!image || !image.root || !image.relpath) return;
+        try {
+            const data = await API.media.imageTags(image.root, image.relpath, { showError: false });
+            if (seq !== this._tagSeq) return; // 切图之后回来的旧响应不许覆盖新图
+            this.renderTags(data && data.tags);
+        } catch (err) {
+            if (seq === this._tagSeq) this.renderTags([]);
+        }
+    },
+
+    /** 用 DOM 构建而不是拼 HTML：标签是用户输入，拼字符串就得额外做转义。 */
+    renderTags(tags) {
+        const chips = document.getElementById('ms-tag-chips');
+        if (!chips) return;
+        chips.textContent = '';
+        if (!tags || !tags.length) {
+            const hint = document.createElement('span');
+            hint.className = 'form-hint';
+            hint.textContent = '未打标签';
+            chips.appendChild(hint);
+            return;
+        }
+        tags.forEach((tag) => {
+            const chip = document.createElement('span');
+            chip.className = 'ms-tag-chip';
+            chip.textContent = tag;
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.dataset.act = 'tag-remove';
+            remove.dataset.tag = tag;
+            remove.title = '移除标签';
+            remove.textContent = '×';
+            chip.appendChild(remove);
+            chips.appendChild(chip);
+        });
+    },
+
+    /** 打标签 / 去标签；成功后用后端返回的完整列表刷新，不在前端猜增删结果。 */
+    async viewerEditTag(tag, mode) {
+        const viewer = this._viewer;
+        const text = (tag || '').trim();
+        if (!viewer || !text) return;
+        const image = viewer.images[viewer.index];
+        if (!image || !image.root || !image.relpath) return;
+        const input = document.getElementById('ms-tag-input');
+        if (input) input.disabled = true;
+        try {
+            const data = await API.media.tagImage({
+                root: image.root, relpath: image.relpath, tag: text, mode,
+            });
+            if (input && mode === 'add') input.value = '';
+            this.renderTags(data && data.tags);
+            this.loadTagFilter(); // 新标签立刻出现在「按标签浏览」下拉里
+        } catch (err) {
+            Toast.error('标签保存失败：' + (err && err.message ? err.message : '请求失败'));
+        } finally {
+            if (input) { input.disabled = false; input.focus(); }
         }
     },
 

@@ -2449,6 +2449,49 @@ body {
     cursor: grab;
 }
 .ms-viewer-pano canvas:active { cursor: grabbing; }
+.ms-viewer-tags {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 8px 2px 0;
+}
+.ms-tag-chips {
+    display: inline-flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.ms-tag-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.12);
+    font-size: 12px;
+    line-height: 1.6;
+}
+.ms-tag-chip button {
+    padding: 0;
+    border: none;
+    background: none;
+    color: inherit;
+    opacity: 0.6;
+    font-size: 13px;
+    line-height: 1;
+    cursor: pointer;
+}
+.ms-tag-chip button:hover { opacity: 1; }
+.ms-tag-input {
+    width: 12rem;
+    padding: 4px 8px;
+}
+.ms-tag-filter {
+    width: auto;
+    max-width: 12rem;
+    padding: 4px 8px;
+}
 
 .media-task {
     border-top: 1px solid var(--border-color);

@@ -126,8 +126,10 @@ def health():
 from .archive_routes import router as archive_router  # noqa: E402
 from .media_routes import router as media_router  # noqa: E402
 from .mp_routes import router as mp_router  # noqa: E402
+from .tag_routes import router as tag_router  # noqa: E402
 from .work_archive_routes import router as work_archive_router  # noqa: E402
 app.include_router(archive_router)
 app.include_router(media_router)
 app.include_router(mp_router)
+app.include_router(tag_router)
 app.include_router(work_archive_router)
