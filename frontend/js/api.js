@@ -35,7 +35,13 @@ const API = {
             }
 
             if (!resp.ok || !isJson) {
-                const errMsg = data.error || data.message || `HTTP ${resp.status}`;
+                // 媒体服务的错误是 {"error":{"code","message"}}，直接拿 data.error 会把对象塞进
+                // new Error()，Toast 里就变成 [object Object]。这里先摊平成字符串。
+                const nested = data && data.error;
+                const errMsg = (typeof nested === 'string' && nested)
+                    || (nested && typeof nested === 'object' && (nested.message || nested.code))
+                    || data.message
+                    || `HTTP ${resp.status}`;
                 if (data && (data.need_verify || data.waterwall)) {
                     if (window.WaterWall && typeof WaterWall.handleDetection === 'function') {
                         WaterWall.handleDetection(data.waterwall || data);
@@ -44,7 +50,7 @@ const API = {
                 if (showError) Toast.error(errMsg);
                 // 保留结构化错误码，便于调用方区分「未登录」「风控」等可引导的场景
                 const error = new Error(errMsg);
-                error.code = data.code || '';
+                error.code = (nested && typeof nested === 'object' && nested.code) || data.code || '';
                 error.status = resp.status;
                 error.data = data;
                 throw error;
@@ -369,6 +375,25 @@ const API = {
         archiveJobs(limit = 10) { return API.get(`/media/api/archive/jobs?limit=${limit}`, { showError: false }); },
         archiveStatus(jobId) { return API.get(`/media/api/archive/jobs/${jobId}`, { showError: false }); },
         archiveFromMp(payload) { return API.post('/media/api/archive/from-mp', payload); },
+        // 归档任务（/api/archive/jobs）：建任务、上传 txt/csv/zip、验证窗口、导出与恢复
+        archiveCreate(payload) { return API.post('/media/api/archive/jobs', payload); },
+        /**
+         * 上传 txt/csv/zip 建任务。body 必须是 FormData（file + target_root + target_dir），
+         * 后端收 multipart，见 API.request 的 FormData 分支。
+         */
+        archiveUpload(formData) { return API.post('/media/api/archive/jobs/upload', formData); },
+        archiveVerify(jobId, articleIndex) {
+            const qs = articleIndex === undefined || articleIndex === null
+                ? ''
+                : `?article_index=${encodeURIComponent(articleIndex)}`;
+            return API.post(`/media/api/archive/jobs/${encodeURIComponent(jobId)}/verify${qs}`);
+        },
+        archiveRetry(jobId) { return API.post(`/media/api/archive/jobs/${encodeURIComponent(jobId)}/retry`); },
+        archiveExportStatus(exportId) {
+            return API.get(`/media/api/archive/exports/${encodeURIComponent(exportId)}`, { showError: false });
+        },
+        // 导出 ZIP：就绪直接回文件，未就绪回 202 + export_id，所以调用方自己 fetch 判 content-type
+        archiveDownloadUrl(jobId) { return `/media/api/archive/jobs/${encodeURIComponent(jobId)}/download`; },
         // NAS 自动归档是宿主侧队列（backend/nas_archive.py），不在 /media 反代之下
         nasStatus() { return API.get('/api/media/nas-archive/status', { showError: false }); },
         nasJobs(limit = 20) { return API.get(`/api/media/nas-archive/jobs?limit=${limit}`, { showError: false }); },

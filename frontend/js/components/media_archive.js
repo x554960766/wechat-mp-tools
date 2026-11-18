@@ -13,6 +13,8 @@ const MediaArchivePage = {
     _scanTimer: null,
     _archiveTimer: null,
     _nasTimer: null,
+    _jobsTimer: null,
+    _exportTimer: null,
 
     render() {
         return `
@@ -126,6 +128,55 @@ const MediaArchivePage = {
                 <div id="ma-nas-list"></div>
             </div>
 
+            <div class="card" style="margin-bottom: var(--spacing-lg);">
+                <div class="card-header">
+                    <h3 class="card-title">⑤ 链接批量归档</h3>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label" for="ma-batch-text">粘贴链接</label>
+                    <textarea class="form-input" id="ma-batch-text" rows="4"
+                        placeholder="https://mp.weixin.qq.com/s?...（一行一条、或用整段分享文案都行）"></textarea>
+                    <div class="form-hint">从文本里自动抽公众号文章链接，按 __biz/mid/idx 去重；单任务上限 500 条</div>
+                </div>
+
+                <div class="grid grid-2" style="gap: 12px;">
+                    <div class="form-group">
+                        <label class="form-label" for="ma-batch-file">或上传 txt / csv / zip</label>
+                        <input type="file" class="form-input" id="ma-batch-file" accept=".txt,.csv,.zip">
+                        <div class="form-hint">zip 只读里面的 txt/csv，其他条目忽略</div>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="ma-batch-root">目标媒体根</label>
+                        <select class="form-input" id="ma-batch-root"></select>
+                        <div class="form-hint">文章落在该根下的目标子目录里</div>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label class="form-label" for="ma-batch-dir">目标子目录（可空）</label>
+                    <input type="text" class="form-input" id="ma-batch-dir" placeholder="例如 汽车/某号">
+                </div>
+
+                <div class="btn-group">
+                    <button class="btn btn-primary" id="ma-batch-create">📥 用粘贴的链接建任务</button>
+                    <button class="btn btn-secondary" id="ma-batch-upload">📄 上传文件建任务</button>
+                </div>
+                <div class="media-task-detail" id="ma-batch-detail"></div>
+            </div>
+
+            <div class="card" style="margin-bottom: var(--spacing-lg);">
+                <div class="card-header">
+                    <h3 class="card-title">⑥ 最近归档任务</h3>
+                    <span class="media-task-state" id="ma-jobs-summary">读取中…</span>
+                </div>
+                <div class="form-hint" style="margin-bottom: 10px;">
+                    等验证的任务在这里开验证窗口（有头浏览器 180 秒）；窗口结束后任务会转「已中断」，
+                    在窗口里验证通过后点「恢复任务」才会重跑——系统不推断验证成功。
+                </div>
+                <div id="ma-jobs-list"></div>
+            </div>
+
             <div class="card">
                 <details class="media-advanced">
                     <summary>兜底：该号不在 wmp 账号池里</summary>
@@ -161,6 +212,8 @@ const MediaArchivePage = {
         this._scanTimer = null;
         this._archiveTimer = null;
         this._nasTimer = null;
+        this._jobsTimer = null;
+        this._exportTimer = null;
 
         document.getElementById('ma-start')?.addEventListener('click', () => this.startArchive());
         document.getElementById('ma-platform-select')?.addEventListener('change', () => this.onPlatformChange());
@@ -177,8 +230,27 @@ const MediaArchivePage = {
         });
         document.getElementById('ma-fallback')?.addEventListener('click', () => this.startFallback());
 
+        document.getElementById('ma-batch-create')?.addEventListener('click', () => this.createBatchJob());
+        document.getElementById('ma-batch-upload')?.addEventListener('click', () => this.uploadBatchFile());
+        document.getElementById('ma-jobs-list')?.addEventListener('click', (ev) => {
+            const verify = ev.target.closest('[data-verify-job]');
+            if (verify) {
+                this.startVerify(verify.getAttribute('data-verify-job'),
+                    Number(verify.getAttribute('data-verify-index')));
+                return;
+            }
+            const exportBtn = ev.target.closest('[data-export-job]');
+            if (exportBtn) {
+                this.exportZip(exportBtn.getAttribute('data-export-job'), exportBtn);
+                return;
+            }
+            const retry = ev.target.closest('[data-retry-job]');
+            if (retry) this.retryJob(retry.getAttribute('data-retry-job'));
+        });
+
         await Promise.all([this.loadPlatforms(), this.loadRoots()]);
         this.startNasPolling();
+        this.startJobsPolling();
     },
 
     destroy() {
@@ -186,10 +258,14 @@ const MediaArchivePage = {
         clearInterval(this._scanTimer);
         clearInterval(this._archiveTimer);
         clearInterval(this._nasTimer);
+        clearInterval(this._jobsTimer);
+        clearInterval(this._exportTimer);
         this._downloadTimer = null;
         this._scanTimer = null;
         this._archiveTimer = null;
         this._nasTimer = null;
+        this._jobsTimer = null;
+        this._exportTimer = null;
     },
 
     // ── 数据加载 ─────────────────────────────────────
@@ -280,19 +356,23 @@ const MediaArchivePage = {
     },
 
     async loadRoots() {
-        const select = document.getElementById('ma-root');
-        if (!select) return;
+        // 两个入口（兜底 from-mp、⑤ 链接批量归档）共用同一份可写根列表
+        const selects = ['ma-root', 'ma-batch-root']
+            .map((id) => document.getElementById(id))
+            .filter(Boolean);
+        if (!selects.length) return;
+        const fill = (html) => selects.forEach((el) => { el.innerHTML = html; });
         try {
             const data = await API.media.roots();
             this._roots = (data && data.items) || [];
         } catch (err) {
-            select.innerHTML = '<option value="wx-archive">wx-archive（媒体服务不可用）</option>';
+            fill('<option value="wx-archive">wx-archive（媒体服务不可用）</option>');
             return;
         }
         const writable = this._roots.filter((r) => r.writable);
-        select.innerHTML = writable.length
+        fill(writable.length
             ? writable.map((r) => `<option value="${this.esc(r.id)}">${this.esc(r.label || r.id)}</option>`).join('')
-            : '<option value="wx-archive">wx-archive</option>';
+            : '<option value="wx-archive">wx-archive</option>');
     },
 
     // ── 归档流程 ─────────────────────────────────────
@@ -464,7 +544,11 @@ const MediaArchivePage = {
                 return;
             }
             if (detail) {
-                detail.textContent = `状态 ${job.status}　已归档 ${job.saved || 0}　失败 ${job.failed || 0}${job.message ? '　' + job.message : ''}`;
+                const counts = this.jobCounts(job);
+                const label = this._jobStatusLabels[job.status] || job.status;
+                detail.textContent = `状态 ${label}　链接 ${counts.total} 条　成功 ${counts.done}　失败 ${counts.failed}`
+                    + `${counts.pendingVerify.length ? `　待验证 ${counts.pendingVerify.length}（到 ⑥ 开验证窗口）` : ''}`
+                    + `${job.message ? '　' + job.message : ''}`;
             }
             if (['completed', 'partial', 'failed', 'cancelled', 'interrupted'].includes(job.status)) {
                 clearInterval(this._archiveTimer);
@@ -579,6 +663,261 @@ const MediaArchivePage = {
             Toast.error(`重试失败: ${err.message}`);
         }
         this.loadNasArchive();
+    },
+
+    // ── 链接批量归档与归档任务（媒体服务 /api/archive/jobs）────
+    _jobStatusLabels: {
+        queued: '排队中',
+        running: '归档中',
+        waiting_verification: '等待验证',
+        cancelling: '取消中',
+        cancelled: '已取消',
+        completed: '已完成',
+        partial: '部分完成',
+        failed: '失败',
+        interrupted: '已中断',
+    },
+
+    batchTarget() {
+        return {
+            target_root: document.getElementById('ma-batch-root')?.value || 'wx-archive',
+            target_dir: (document.getElementById('ma-batch-dir')?.value || '').trim(),
+        };
+    },
+
+    setBatchDetail(text) {
+        const box = document.getElementById('ma-batch-detail');
+        if (box) box.textContent = text || '';
+    },
+
+    async createBatchJob() {
+        const text = (document.getElementById('ma-batch-text')?.value || '').trim();
+        if (!text) {
+            Toast.error('先粘贴至少一条文章链接');
+            return;
+        }
+        this.setBatchDetail('正在建任务…');
+        try {
+            const job = await API.media.archiveCreate({ text, ...this.batchTarget() });
+            this.setBatchDetail(`已建任务 ${String(job.id).slice(0, 8)}：${this.esc(job.status)}`);
+            Toast.success('归档任务已接单');
+            document.getElementById('ma-batch-text').value = '';
+        } catch (err) {
+            this.setBatchDetail(`建任务失败：${err.message || ''}`);
+        }
+        this.refreshJobs();
+    },
+
+    async uploadBatchFile() {
+        const input = document.getElementById('ma-batch-file');
+        const file = input && input.files && input.files[0];
+        if (!file) {
+            Toast.error('先选一个 txt / csv / zip');
+            return;
+        }
+        const fd = new FormData();
+        fd.append('file', file);
+        const target = this.batchTarget();
+        fd.append('target_root', target.target_root);
+        fd.append('target_dir', target.target_dir);
+        this.setBatchDetail(`正在上传 ${file.name}…`);
+        try {
+            const job = await API.media.archiveUpload(fd);
+            this.setBatchDetail(`已建任务 ${String(job.id).slice(0, 8)}：${this.esc(job.status)}`);
+            Toast.success(`${file.name} 已提交`);
+            input.value = '';
+        } catch (err) {
+            this.setBatchDetail(`上传失败：${err.message || ''}`);
+        }
+        this.refreshJobs();
+    },
+
+    // ── 归档任务列表：验证窗口、导出 ZIP、恢复 ────────
+    startJobsPolling() {
+        clearInterval(this._jobsTimer);
+        this.refreshJobs();
+        this._jobsTimer = setInterval(() => this.refreshJobs(), 4000);
+    },
+
+    async refreshJobs() {
+        const box = document.getElementById('ma-jobs-list');
+        if (!box) return;
+        let data;
+        try {
+            data = await API.media.archiveJobs(6);
+        } catch (err) {
+            box.innerHTML = `<div class="media-task-detail">任务列表读取失败：${this.esc(err.message || '')}</div>`;
+            const summary = document.getElementById('ma-jobs-summary');
+            if (summary) summary.textContent = '读取失败';
+            return;
+        }
+        const items = (data && data.items) || [];
+        const summary = document.getElementById('ma-jobs-summary');
+        if (summary) {
+            const active = items.filter((j) => ['queued', 'running', 'waiting_verification', 'cancelling']
+                .includes(j.status)).length;
+            summary.textContent = items.length
+                ? `共 ${data.total || items.length} 个${active ? `　进行中 ${active}` : ''}`
+                : '暂无归档任务';
+        }
+        this.renderJobs(items);
+    },
+
+    /** 任务计数以 articles 为准：后端的 saved/failed 只在部分 runner 上存在 */
+    jobCounts(job) {
+        const articles = (job && job.articles) || [];
+        const total = (job && job.urls && job.urls.length) || articles.length;
+        const done = articles.filter((a) => a.status === 'completed').length;
+        const failed = articles.filter((a) => ['failed', 'partial'].includes(a.status)).length;
+        const pendingVerify = [];
+        articles.forEach((a, index) => {
+            if (a.status === 'verify') pendingVerify.push(index);
+        });
+        return { total, done, failed, pendingVerify };
+    },
+
+    renderJobs(items) {
+        const box = document.getElementById('ma-jobs-list');
+        if (!box) return;
+        if (!items.length) {
+            box.innerHTML = '<div class="media-task-detail">还没有归档任务。可以在 ⑤ 建一个，或从 ① 按号归档。</div>';
+            return;
+        }
+        box.innerHTML = items.map((job) => {
+            const counts = this.jobCounts(job);
+            const label = this._jobStatusLabels[job.status] || job.status || '未知';
+            const bits = [`链接 ${counts.total} 条`];
+            if (counts.done) bits.push(`成功 ${counts.done}`);
+            if (counts.failed) bits.push(`失败 ${counts.failed}`);
+            if (counts.pendingVerify.length) bits.push(`待验证 ${counts.pendingVerify.length}`);
+            if (job.message) bits.push(this.esc(job.message));
+            if (job.errors && job.errors.length) bits.push(this.esc(String(job.errors[0])));
+
+            const actions = [];
+            if (counts.pendingVerify.length) {
+                actions.push(`<button class="btn btn-primary" style="padding:2px 10px;font-size:12px;"`
+                    + ` data-verify-job="${this.esc(job.id)}" data-verify-index="${counts.pendingVerify[0]}">`
+                    + '🔓 打开验证窗口</button>');
+            }
+            if (['completed', 'partial', 'interrupted'].includes(job.status)) {
+                actions.push(`<button class="btn btn-secondary" style="padding:2px 10px;font-size:12px;"`
+                    + ` data-export-job="${this.esc(job.id)}">📦 导出 ZIP</button>`);
+            }
+            if (['interrupted', 'partial', 'failed', 'cancelled'].includes(job.status)) {
+                actions.push(`<button class="btn btn-secondary" style="padding:2px 10px;font-size:12px;"`
+                    + ` data-retry-job="${this.esc(job.id)}">↻ 恢复任务</button>`);
+            }
+            const title = `${this.esc(String(job.id).slice(0, 8))}　${this.esc(job.target_dir || job.target_root || '')}`;
+            return `
+                <div class="media-task">
+                    <div class="media-task-head">
+                        <span class="media-task-name">${title}</span>
+                        <span class="media-task-state">${this.esc(label)}</span>
+                    </div>
+                    <div class="media-task-detail">${bits.join('　')}</div>
+                    ${actions.length ? `<div class="btn-group" style="margin-top:6px;">${actions.join('')}</div>` : ''}
+                </div>`;
+        }).join('');
+    },
+
+    async startVerify(jobId, index) {
+        try {
+            const ctrl = await API.media.archiveVerify(jobId, index);
+            const seconds = ctrl.expires_seconds || 180;
+            Toast.info(`验证窗口已打开，${seconds} 秒内到浏览器里完成验证；窗口结束点「恢复任务」继续`);
+        } catch (err) {
+            // 409（已有验证窗口在跑）等已由 API 层提示
+        }
+        this.refreshJobs();
+    },
+
+    async retryJob(jobId) {
+        try {
+            const item = await API.media.archiveRetry(jobId);
+            Toast.success(`已恢复，新任务 ${String(item.id).slice(0, 8)}`);
+        } catch (err) {
+            // API 层已提示
+        }
+        this.refreshJobs();
+    },
+
+    async exportZip(jobId, btn) {
+        if (btn) btn.disabled = true;
+        try {
+            const settled = await this.tryFetchZip(jobId);
+            if (!settled) Toast.info('正在打包 ZIP，完成后自动下载');
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    },
+
+    /**
+     * 导出 ZIP 的三种响应：200 直接是文件、202 回 export_id（打包中）、409 还没到可导出状态。
+     * 所以这里自己 fetch 判 content-type，不能走 API.request（它只认 JSON）。
+     */
+    async tryFetchZip(jobId) {
+        let resp;
+        try {
+            resp = await fetch(API.media.archiveDownloadUrl(jobId));
+        } catch (err) {
+            Toast.error('下载请求失败，请检查服务是否运行');
+            return true;
+        }
+        const type = resp.headers.get('content-type') || '';
+        if (resp.ok && !type.includes('json')) {
+            const blob = await resp.blob();
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `ai-media-${jobId}.zip`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 10000);
+            Toast.success('ZIP 已开始下载');
+            return true;
+        }
+        let data = {};
+        try {
+            data = await resp.json();
+        } catch (err) {
+            data = {};
+        }
+        if (resp.status === 409) {
+            Toast.error(data.error || '归档尚未就绪');
+            return true;
+        }
+        if (data.export_id) {
+            this.pollExport(data.export_id, jobId);
+            return false;
+        }
+        Toast.error(data.error || `导出失败（HTTP ${resp.status}）`);
+        return true;
+    },
+
+    pollExport(exportId, jobId) {
+        clearInterval(this._exportTimer);
+        const tick = async () => {
+            let status;
+            try {
+                status = await API.media.archiveExportStatus(exportId);
+            } catch (err) {
+                clearInterval(this._exportTimer);
+                this._exportTimer = null;
+                return;
+            }
+            if (status.status === 'completed') {
+                clearInterval(this._exportTimer);
+                this._exportTimer = null;
+                this.tryFetchZip(jobId);
+            } else if (status.status === 'failed') {
+                clearInterval(this._exportTimer);
+                this._exportTimer = null;
+                Toast.error(`打包失败：${status.error || '未知原因'}`);
+            }
+        };
+        this._exportTimer = setInterval(tick, 1500);
+        tick();
     },
 
     // ── UI 小工具 ────────────────────────────────────
