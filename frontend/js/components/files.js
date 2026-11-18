@@ -24,6 +24,16 @@ const FilesPage = {
     _scanJobId: null,
     _scanTimer: null,
     _nsfwTimer: null,
+    // 一次性检测（probe）：不写索引，结果只服务本卡
+    _probeScope: 'library',
+    _probeJobId: null,
+    _probeTimer: null,
+    _probeItems: [],
+    _probeTotal: 0,
+    _probeOffset: 0,
+    _probeFlaggedOnly: false,
+    _probeCheck: null,
+    _probeBusy: false,
 
     esc(value) {
         return String(value == null ? '' : value)
@@ -190,17 +200,132 @@ const FilesPage = {
                 <span class="form-hint" id="files-scan-state"></span>
             </div>
 
+            <style>
+                .files-probe-drop {
+                    border: 2px dashed rgba(102, 126, 234, 0.35);
+                    border-radius: var(--radius-lg);
+                    padding: 24px 16px;
+                    text-align: center;
+                    cursor: pointer;
+                    transition: all var(--transition-normal);
+                    background: var(--bg-card, #fff);
+                }
+                .files-probe-drop.is-over {
+                    border-color: var(--primary);
+                    background: rgba(102, 126, 234, 0.06);
+                }
+                .files-probe-drop-title { font-weight: 600; color: var(--text-primary); }
+                .files-probe-drop-hint { font-size: 0.82rem; color: var(--text-muted); margin-top: 6px; }
+                .files-probe-hits { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+                .files-probe-hit { text-align: center; font-size: 0.72rem; color: var(--text-muted); }
+                .files-probe-hit img {
+                    width: 64px; height: 48px; object-fit: cover;
+                    border-radius: var(--radius-sm, 4px); display: block; margin-bottom: 2px;
+                }
+                .files-probe-hit.is-top img { outline: 2px solid var(--error, #e5484d); }
+                .files-probe-err { color: var(--error); font-size: 0.8rem; }
+                .files-probe-bar {
+                    display: inline-block; height: 4px; border-radius: 2px;
+                    background: var(--primary); vertical-align: middle; margin-right: 6px;
+                    transition: width var(--transition-normal);
+                }
+            </style>
+
             <div class="card">
                 <div class="card-header">
-                    <h3 class="card-title">NSFW 复核</h3>
-                    <div class="btn-group">
-                        <button class="btn btn-secondary btn-sm" id="files-nsfw-scan">检测未判定</button>
-                        <button class="btn btn-secondary btn-sm" id="files-nsfw-rescan">全部重检</button>
-                        <button class="btn btn-secondary btn-sm" id="files-nsfw-load">加载待复核</button>
+                    <h3 class="card-title">内容审核（NSFW）</h3>
+                    <div class="btn-group" id="files-probe-scope">
+                        <button class="btn btn-primary btn-sm" data-scope="library">媒体库</button>
+                        <button class="btn btn-secondary btn-sm" data-scope="path">任意目录</button>
+                        <button class="btn btn-secondary btn-sm" data-scope="upload">单个文件</button>
                     </div>
                 </div>
                 <p class="form-hint" id="files-nsfw-state"></p>
-                <div id="files-nsfw-panel"><p class="form-hint">点击「加载待复核」查看仍判疑似敏感的图片，可直接确认敏感或标为误报。</p></div>
+
+                <div data-panel="library">
+                    <div class="btn-group">
+                        <button class="btn btn-secondary btn-sm" id="files-nsfw-scan">检测未判定</button>
+                        <button class="btn btn-secondary btn-sm" id="files-nsfw-rescan">全部重检</button>
+                    </div>
+                    <p class="form-hint">只扫已入库索引：结论写入索引、计入覆盖率，判疑似的会进入下方「待复核」队列。</p>
+                </div>
+
+                <div data-panel="path" hidden>
+                    <div class="files-grid">
+                        <div class="form-group">
+                            <label class="form-label" for="files-probe-path">目录绝对路径</label>
+                            <input class="form-input" id="files-probe-path" placeholder="/Users/you/Pictures" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label" for="files-probe-kinds">检测类型</label>
+                            <select class="form-input" id="files-probe-kinds">
+                                <option value="">图片 + 视频</option>
+                                <option value="image">仅图片</option>
+                                <option value="video">仅视频</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label" for="files-probe-interval">视频抽帧间隔</label>
+                            <select class="form-input" id="files-probe-interval">
+                                <option value="2">2 秒</option>
+                                <option value="5" selected>5 秒</option>
+                                <option value="10">10 秒</option>
+                            </select>
+                        </div>
+                        <div class="form-group" style="justify-content:flex-end;">
+                            <label class="form-label" style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer;">
+                                <input type="checkbox" id="files-probe-recursive" checked> 含子目录
+                            </label>
+                        </div>
+                    </div>
+                    <div class="btn-group">
+                        <button class="btn btn-secondary btn-sm" id="files-probe-check">预检</button>
+                        <button class="btn btn-primary btn-sm" id="files-probe-start" disabled>开始检测</button>
+                    </div>
+                    <p class="form-hint" id="files-probe-check-state">先预检确认路径可读、能扫到多少文件。该范围只本次有效：结果不入索引、不计覆盖率；需要留档的文件在结果里单独「入库」。</p>
+                </div>
+
+                <div data-panel="upload" hidden>
+                    <div class="files-probe-drop" id="files-probe-drop">
+                        <div class="files-probe-drop-title">把图片或视频拖到这里</div>
+                        <div class="files-probe-drop-hint">也可以点击选择文件。只检测这一个文件，原件会保留到你决定是否入库为止。</div>
+                    </div>
+                    <input type="file" id="files-probe-file" accept="image/*,video/*" hidden>
+                    <p class="form-hint" id="files-probe-upload-state"></p>
+                </div>
+            </div>
+
+            <div class="card" id="files-probe-card" hidden>
+                <div class="card-header">
+                    <h3 class="card-title">本次检测结果</h3>
+                    <div class="btn-group">
+                        <label class="form-hint" style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer;">
+                            <input type="checkbox" id="files-probe-flagged-only"> 只看疑似
+                        </label>
+                        <button class="btn btn-secondary btn-sm" id="files-probe-more" hidden>加载更多</button>
+                        <button class="btn btn-secondary btn-sm" id="files-probe-cancel" hidden>取消检测</button>
+                    </div>
+                </div>
+                <p class="form-hint" id="files-probe-summary"></p>
+                <div class="files-grid" id="files-probe-target" hidden>
+                    <div class="form-group">
+                        <label class="form-label" for="files-probe-root">入库目标媒体根</label>
+                        <select class="form-input" id="files-probe-root"></select>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="files-probe-dir">目标子目录（可空）</label>
+                        <input class="form-input" id="files-probe-dir" placeholder="例如 inbox/2026-11" autocomplete="off">
+                    </div>
+                </div>
+                <div id="files-probe-items"></div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title">待复核（媒体库）</h3>
+                    <button class="btn btn-secondary btn-sm" id="files-nsfw-load">加载待复核</button>
+                </div>
+                <div id="files-nsfw-panel"><p class="form-hint">点击「加载待复核」查看已入库、仍判疑似敏感的图片，可直接确认敏感或标为误报。</p></div>
             </div>
 
             <div class="card">
@@ -280,6 +405,7 @@ const FilesPage = {
         if (nsfwRescanBtn) nsfwRescanBtn.addEventListener('click', () => this._triggerNsfwScan(true));
         const nsfwEl = document.getElementById('files-nsfw-panel');
         if (nsfwEl) nsfwEl.addEventListener('click', (event) => this._onNsfwClick(event));
+        this._bindProbe();
 
         await this._loadRoots();
         // 根列表需先于清单与重复组就绪：删除按钮要按根的可写性渲染，否则首次渲染会漏掉按钮。
@@ -304,6 +430,10 @@ const FilesPage = {
             clearInterval(this._nsfwTimer);
             this._nsfwTimer = null;
         }
+        if (this._probeTimer) {
+            clearInterval(this._probeTimer);
+            this._probeTimer = null;
+        }
         if (this._viewer) {
             this._viewer.close();
             this._viewer = null;
@@ -319,6 +449,7 @@ const FilesPage = {
     async _loadRoots() {
         const sel = document.getElementById('files-root');
         const scanSel = document.getElementById('files-scan-root');
+        const probeSel = document.getElementById('files-probe-root');
         if (!sel || !scanSel) return;
         try {
             const data = await API.media.roots();
@@ -334,6 +465,13 @@ const FilesPage = {
                     opt.textContent = root.label || root.id;
                     target.appendChild(opt);
                 });
+                // 入库目标只列可写根：只读根写不进去，列出来只会让用户白点一次。
+                if (root.writable && probeSel) {
+                    const opt = document.createElement('option');
+                    opt.value = root.id;
+                    opt.textContent = root.label || root.id;
+                    probeSel.appendChild(opt);
+                }
             });
             // 默认选中第一个根，省一次手动选择。
             if (items.length && !this._scanRootId) {
@@ -596,7 +734,13 @@ const FilesPage = {
     /** 读取覆盖率与模型可用性：未装模型时提前提示，避免点了按钮才发现不能跑。 */
     async _refreshNsfwStatus() {
         const state = document.getElementById('files-nsfw-state');
-        if (!state || this._nsfwTimer) return;   // 检测进行中时不覆盖轮询文案
+        // 检测进行中（媒体库或 probe）不覆盖轮询写下的文案。
+        if (!state || this._nsfwTimer || this._probeTimer) return;
+        // 覆盖率只对「媒体库」有意义：另外两个范围是一次性检测，不参与统计。
+        if (this._probeScope !== 'library') {
+            state.textContent = '';
+            return;
+        }
         try {
             const data = await API.media.nsfwStatus({ showError: false });
             if (!data) return;
@@ -683,7 +827,518 @@ const FilesPage = {
         }
     },
 
-    /** 打开查看器。images 显式传入，使清单与 NSFW 待复核两处能各自携带自己的图片集合。 */
+    // ── 一次性检测（任意目录 / 单个文件）──────────────────
+    /**
+     * 与「媒体库」检测的差别只有一个：结果不写索引。
+     * 因此这里不碰 nsfw 表、不动覆盖率，只把 job 作用域的结果文件渲染出来；
+     * 需要留档的文件走「入库」→ 复制进媒体根 → 入队一次增量扫描。
+     */
+    _bindProbe() {
+        const scopeWrap = document.getElementById('files-probe-scope');
+        if (scopeWrap) {
+            scopeWrap.addEventListener('click', (event) => {
+                const btn = event.target.closest('[data-scope]');
+                if (btn) this._setProbeScope(btn.dataset.scope);
+            });
+        }
+        const checkBtn = document.getElementById('files-probe-check');
+        if (checkBtn) checkBtn.addEventListener('click', () => this._probePrecheck());
+        const startBtn = document.getElementById('files-probe-start');
+        if (startBtn) startBtn.addEventListener('click', () => this._startProbePath());
+
+        const pathInput = document.getElementById('files-probe-path');
+        if (pathInput) {
+            // 改了路径或筛选条件，旧预检结果就不再对应当前目录，必须重新预检。
+            pathInput.addEventListener('input', () => this._invalidateProbeCheck());
+            pathInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') this._probePrecheck();
+            });
+            try {
+                const saved = localStorage.getItem('files_probe_path');
+                if (saved) pathInput.value = saved;
+            } catch {
+                // 隐私模式禁用 localStorage，记住路径只是便利，不影响功能
+            }
+        }
+        ['files-probe-recursive', 'files-probe-kinds'].forEach((id) => {
+            const el = document.getElementById(id);
+            if (el) el.addEventListener('change', () => this._invalidateProbeCheck());
+        });
+
+        const drop = document.getElementById('files-probe-drop');
+        const fileInput = document.getElementById('files-probe-file');
+        if (drop && fileInput) {
+            drop.addEventListener('click', () => fileInput.click());
+            ['dragenter', 'dragover'].forEach((type) => {
+                drop.addEventListener(type, (event) => {
+                    event.preventDefault();
+                    drop.classList.add('is-over');
+                });
+            });
+            ['dragleave', 'drop'].forEach((type) => {
+                drop.addEventListener(type, () => drop.classList.remove('is-over'));
+            });
+            drop.addEventListener('drop', (event) => {
+                event.preventDefault();
+                const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+                if (file) this._startProbeUpload(file);
+            });
+            fileInput.addEventListener('change', () => {
+                const file = fileInput.files && fileInput.files[0];
+                fileInput.value = '';   // 允许再次选同一个文件
+                if (file) this._startProbeUpload(file);
+            });
+        }
+
+        const cancelBtn = document.getElementById('files-probe-cancel');
+        if (cancelBtn) cancelBtn.addEventListener('click', () => this._cancelProbe());
+        const moreBtn = document.getElementById('files-probe-more');
+        if (moreBtn) moreBtn.addEventListener('click', () => this._loadProbeItems(false));
+        const flagged = document.getElementById('files-probe-flagged-only');
+        if (flagged) {
+            flagged.addEventListener('change', () => {
+                this._probeFlaggedOnly = !!flagged.checked;
+                this._loadProbeItems(true);
+            });
+        }
+        const itemsEl = document.getElementById('files-probe-items');
+        if (itemsEl) itemsEl.addEventListener('click', (event) => this._onProbeItemsClick(event));
+    },
+
+    _setProbeScope(scope) {
+        if (!['library', 'path', 'upload'].includes(scope)) return;
+        this._probeScope = scope;
+        const wrap = document.getElementById('files-probe-scope');
+        if (wrap) {
+            wrap.querySelectorAll('[data-scope]').forEach((btn) => {
+                const active = btn.dataset.scope === scope;
+                btn.classList.toggle('btn-primary', active);
+                btn.classList.toggle('btn-secondary', !active);
+            });
+            const card = wrap.closest('.card');
+            if (card) {
+                card.querySelectorAll('[data-panel]').forEach((panel) => {
+                    panel.hidden = panel.dataset.panel !== scope;
+                });
+            }
+        }
+        this._refreshNsfwStatus();
+    },
+
+    _invalidateProbeCheck() {
+        if (!this._probeCheck) return;
+        this._probeCheck = null;
+        const startBtn = document.getElementById('files-probe-start');
+        if (startBtn) startBtn.disabled = true;
+        const state = document.getElementById('files-probe-check-state');
+        if (state) state.textContent = '条件已改，请重新预检';
+    },
+
+    /** 预检只读目录元数据：先让用户看到规模再决定扫不扫，避免点下去才发现是几万个文件。 */
+    async _probePrecheck() {
+        const pathInput = document.getElementById('files-probe-path');
+        const state = document.getElementById('files-probe-check-state');
+        const startBtn = document.getElementById('files-probe-start');
+        const raw = pathInput ? pathInput.value.trim() : '';
+        this._probeCheck = null;
+        if (startBtn) startBtn.disabled = true;
+        if (!raw) {
+            if (state) state.textContent = '请先填写目录绝对路径';
+            return;
+        }
+        if (!raw.startsWith('/') && !/^[A-Za-z]:[\\/]/.test(raw)) {
+            // 相对路径相对谁无解，猜一个只会扫错目录。
+            if (state) state.textContent = '请填绝对路径（以 / 开头）';
+            return;
+        }
+        if (state) state.textContent = '预检中…';
+        try {
+            const recursive = !!(document.getElementById('files-probe-recursive') || {}).checked;
+            const check = await API.media.nsfwProbeCheck({ path: raw, recursive, max_files: 5000 });
+            this._probeCheck = check;
+            try {
+                localStorage.setItem('files_probe_path', raw);
+            } catch {
+                // 同 _bindProbe：存不下不影响检测
+            }
+            if (state) state.textContent = this._describeCheck(check);
+            if (startBtn) startBtn.disabled = !(check && check.total > 0 && !check.error);
+        } catch (err) {
+            if (state) state.textContent = '预检失败：' + (err.message || err);
+        }
+    },
+
+    _describeCheck(check) {
+        if (!check) return '';
+        if (check.error) return `无法检测：${check.error}`;
+        if (!check.total) return '这个路径下没有可检测的图片或视频（检查扩展名与「含子目录」选项）';
+        const parts = [`可扫 ${check.total} 个文件（图片 ${check.images}、视频 ${check.videos}）`];
+        if (!check.recursive) parts.push('不含子目录');
+        let text = parts.join('，');
+        if (check.truncated) text += `。已达上限，只检测前 ${check.max_files} 个，其余请分批或换更窄的目录`;
+        if (Array.isArray(check.sample) && check.sample.length) {
+            text += `。示例：${check.sample.slice(0, 3).join('、')}`;
+        }
+        return text;
+    },
+
+    async _startProbePath() {
+        const check = this._probeCheck;
+        if (!check || !check.total || this._probeBusy) return;
+        const kindsSel = (document.getElementById('files-probe-kinds') || {}).value || '';
+        const interval = Number((document.getElementById('files-probe-interval') || {}).value || 5);
+        const run = async () => {
+            this._probeBusy = true;
+            try {
+                // recursive 取预检时的值：用户预检后又改了勾选但没重检，扫的范围会与看到的数字不一致。
+                const job = await API.media.nsfwProbeStart({
+                    path: check.path,
+                    recursive: !!check.recursive,
+                    kinds: kindsSel ? [kindsSel] : ['image', 'video'],
+                    video_interval: interval,
+                    max_files: 5000,
+                });
+                this._beginProbe(job);
+            } catch (err) {
+                Toast.error('检测提交失败：' + (err.message || err));
+            } finally {
+                this._probeBusy = false;
+            }
+        };
+        if (check.truncated) {
+            Modal.confirm('只检测前 5000 个文件',
+                `这个目录里的可检测文件已达上限，本次只会处理前 <strong>${this.esc(check.max_files)}</strong> 个。继续吗？`,
+                run);
+        } else {
+            run();
+        }
+    },
+
+    async _startProbeUpload(file) {
+        if (this._probeBusy) return;
+        const state = document.getElementById('files-probe-upload-state');
+        const interval = Number((document.getElementById('files-probe-interval') || {}).value || 5);
+        const write = (text, percent) => {
+            if (!state) return;
+            const bar = percent == null ? ''
+                : `<span class="files-probe-bar" style="width:${Math.max(0, Math.min(100, percent))}px"></span>`;
+            state.innerHTML = bar + this.esc(text);
+        };
+        this._probeBusy = true;
+        write(`上传中… ${this._formatSize(file.size)}`, 0);
+        try {
+            const job = await new Promise((resolve, reject) => {
+                const form = new FormData();
+                form.append('file', file);
+                form.append('video_interval', String(interval));
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', '/media/api/nsfw/probes/upload');
+                xhr.upload.onprogress = (event) => {
+                    if (!event.lengthComputable) return;
+                    const percent = Math.round((event.loaded / event.total) * 100);
+                    write(`上传中… ${percent}%（${this._formatSize(event.loaded)} / ${this._formatSize(event.total)}）`, percent);
+                };
+                xhr.onload = () => {
+                    let data = {};
+                    try {
+                        data = JSON.parse(xhr.responseText || '{}');
+                    } catch {
+                        data = {};
+                    }
+                    if (xhr.status >= 200 && xhr.status < 300 && data.id) resolve(data);
+                    else {
+                        const nested = data && data.error;
+                        const message = (typeof nested === 'string' && nested)
+                            || (nested && (nested.message || nested.code))
+                            || data.detail
+                            || `HTTP ${xhr.status}`;
+                        reject(new Error(message));
+                    }
+                };
+                xhr.onerror = () => reject(new Error('上传中断，请检查服务是否运行'));
+                xhr.send(form);
+            });
+            write(`已上传：${file.name}`);
+            this._beginProbe(job);
+        } catch (err) {
+            write('上传失败：' + (err.message || err));
+            Toast.error('上传失败：' + (err.message || err));
+        } finally {
+            this._probeBusy = false;
+        }
+    },
+
+    /** 任务起来后统一走「本次检测结果」卡：一次只保留一个任务，避免结果区互相覆盖。 */
+    _beginProbe(job) {
+        if (!job || !job.id) {
+            Toast.error('检测任务创建失败');
+            return;
+        }
+        this._probeJobId = job.id;
+        this._probeItems = [];
+        this._probeTotal = 0;
+        this._probeOffset = 0;
+        this._probeFlaggedOnly = false;
+        const card = document.getElementById('files-probe-card');
+        if (card) card.hidden = false;
+        const flagged = document.getElementById('files-probe-flagged-only');
+        if (flagged) flagged.checked = false;
+        const more = document.getElementById('files-probe-more');
+        if (more) more.hidden = true;
+        const target = document.getElementById('files-probe-target');
+        if (target) target.hidden = true;
+        const itemsEl = document.getElementById('files-probe-items');
+        if (itemsEl) itemsEl.innerHTML = '<p class="form-hint">检测中…</p>';
+        const summary = document.getElementById('files-probe-summary');
+        if (summary) summary.textContent = `任务 ${job.id} 已提交`;
+        this._pollProbe(job.id);
+    },
+
+    _pollProbe(jobId) {
+        if (this._probeTimer) clearInterval(this._probeTimer);
+        const tick = async () => {
+            const summary = document.getElementById('files-probe-summary');
+            const cancelBtn = document.getElementById('files-probe-cancel');
+            try {
+                const job = await API.media.nsfwProbeStatus(jobId);
+                if (!job || this._probeJobId !== jobId) return;
+                const done = ['completed', 'partial', 'failed', 'cancelled', 'interrupted'].includes(job.status);
+                const counts = `已检 ${job.scanned || 0}/${job.total || 0}，判疑似 ${job.flagged || 0}`
+                    + `，跳过 ${job.skipped || 0}，失败 ${job.failed || 0}`
+                    + (job.imported ? `，已入库 ${job.imported}` : '');
+                if (summary) {
+                    summary.textContent = done
+                        ? `${this._probeStatusLabel(job.status)}：${counts}`
+                        : `${job.phase || '检测中'}：${counts}${job.current ? '（' + job.current + '）' : ''}`;
+                }
+                if (cancelBtn) cancelBtn.hidden = done;
+                if (!done) return;
+                if (this._probeTimer) {
+                    clearInterval(this._probeTimer);
+                    this._probeTimer = null;
+                }
+                this._probeTotal = job.total || 0;
+                await this._loadProbeItems(true);
+                if (job.errors && job.errors.length) {
+                    Toast.info(`${job.errors.length} 个文件失败，明细见结果列表`);
+                }
+            } catch (err) {
+                if (this._probeTimer) {
+                    clearInterval(this._probeTimer);
+                    this._probeTimer = null;
+                }
+                if (summary) summary.textContent = '检测状态读取失败';
+            }
+        };
+        this._probeTimer = setInterval(tick, 1200);
+        tick();
+    },
+
+    _probeStatusLabel(status) {
+        if (status === 'completed') return '检测完成';
+        if (status === 'partial') return '检测完成（部分文件失败）';
+        if (status === 'cancelled') return '已取消，已出结果仍可入库';
+        if (status === 'failed') return '检测失败';
+        if (status === 'interrupted') return '检测中断';
+        return status || '结束';
+    },
+
+    async _cancelProbe() {
+        if (!this._probeJobId) return;
+        try {
+            await API.media.nsfwProbeCancel(this._probeJobId);
+            Toast.info('已请求取消检测');
+        } catch (err) {
+            Toast.error('取消失败：' + (err.message || err));
+        }
+    },
+
+    async _loadProbeItems(reset) {
+        const jobId = this._probeJobId;
+        if (!jobId) return;
+        if (reset) {
+            this._probeOffset = 0;
+            this._probeItems = [];
+        }
+        const itemsEl = document.getElementById('files-probe-items');
+        if (reset && itemsEl) itemsEl.innerHTML = '<p class="form-hint">加载结果…</p>';
+        try {
+            const data = await API.media.nsfwProbeItems(jobId, {
+                offset: this._probeOffset,
+                limit: 24,
+                flagged: this._probeFlaggedOnly ? 1 : undefined,
+            }, { showError: false });
+            if (jobId !== this._probeJobId) return;   // 期间换了任务，旧结果丢弃
+            const items = (data && data.items) || [];
+            this._probeTotal = (data && data.total) || 0;
+            this._probeItems = reset ? items : this._probeItems.concat(items);
+            this._probeOffset = this._probeItems.length;
+            this._renderProbeItems();
+        } catch (err) {
+            if (itemsEl) {
+                itemsEl.innerHTML = `<p class="form-hint" style="color:var(--error)">结果加载失败：${this.esc(err.message || err)}</p>`;
+            }
+        }
+    },
+
+    _renderProbeItems() {
+        const wrap = document.getElementById('files-probe-items');
+        const more = document.getElementById('files-probe-more');
+        const target = document.getElementById('files-probe-target');
+        if (!wrap) return;
+        if (!this._probeItems.length) {
+            wrap.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-title">${this._probeFlaggedOnly ? '没有疑似敏感的文件' : '没有结果'}</div>
+                    <p class="empty-state-desc">${this._probeFlaggedOnly
+                        ? '这次检测里没有判定为敏感的文件。取消勾选「只看疑似」可查看全部结果。'
+                        : '这个范围里没有可检测的图片或视频。'}</p>
+                </div>`;
+            if (more) more.hidden = true;
+            return;
+        }
+        if (target) target.hidden = false;
+        wrap.innerHTML = `<div class="files-nsfw-grid">${this._probeItems.map((item) => this._probeCard(item)).join('')}</div>`;
+        if (more) more.hidden = this._probeItems.length >= this._probeTotal;
+    },
+
+    _probeCard(item) {
+        const index = Number(item.index);
+        const kindLabel = this._kindLabel(item.kind);
+        // 缩略图地址由前端拼：后端只回「有没有缩略图」，不知道宿主把它挂在哪个前缀下。
+        const thumb = item.thumb
+            ? `<img class="files-thumb" src="${this.esc(this._probeThumbUrl(index))}" loading="lazy" alt="">`
+            : `<div class="files-thumb files-thumb-icon">${this._kindIcon(item.kind)}</div>`;
+        const status = item.status;
+        let badge;
+        if (status === 'ok') {
+            const score = Number(item.score != null ? item.score : 0).toFixed(2);
+            badge = item.label === 'nsfw'
+                ? `<span class="files-badge files-badge-flagged">疑似 ${this.esc(score)}</span>`
+                : `<span class="files-badge">安全 ${this.esc(score)}</span>`;
+        } else if (status === 'skipped') {
+            badge = '<span class="files-badge">未判定</span>';
+        } else {
+            badge = '<span class="files-badge files-badge-flagged">失败</span>';
+        }
+        const imported = item.imported;
+        const importBtn = imported
+            ? `<span class="form-hint">已入库：${this.esc(imported.root)} / ${this.esc(imported.relpath)}</span>`
+            : (status === 'ok' || status === 'skipped')
+                ? `<button class="btn btn-secondary btn-sm" data-act="import" data-index="${index}">入库</button>`
+                : '';
+        const errorLine = item.error
+            ? `<div class="files-probe-err">${this.esc(item.error)}</div>` : '';
+        const videoLine = item.video ? this._probeVideoInfo(item) : '';
+        return `<div class="files-nsfw-card">
+            ${thumb}
+            <div class="files-nsfw-body">
+                <div class="files-path" title="${this.esc(item.path)}">${this.esc(item.name || item.path)}</div>
+                <div class="files-meta">
+                    ${badge}
+                    <span class="files-meta-item">${this.esc(kindLabel)}</span>
+                    <span class="files-meta-item">${this.esc(this._formatSize(item.size))}</span>
+                </div>
+                ${videoLine}
+                ${errorLine}
+            </div>
+            <div class="files-actions">${importBtn}</div>
+        </div>`;
+    },
+
+    /** 视频结论取最严重帧，所以必须给出命中帧与时间，而不是一个总分。 */
+    _probeVideoInfo(item) {
+        const video = item.video || {};
+        const index = Number(item.index);
+        const frames = Number(video.frames || 0);
+        const scored = Number(video.scored || 0);
+        const interval = Number(video.interval || 0);
+        const duration = Number(video.duration || 0);
+        const head = `<span class="files-meta-item">抽帧 ${this.esc(scored)}/${this.esc(frames)}`
+            + `${interval ? '，每 ' + this.esc(interval) + ' 秒一帧' : ''}`
+            + `${duration ? '，时长 ' + this.esc(this._formatDuration(duration)) : ''}</span>`;
+        const bar = this._probeFramesBar(video.frame_scores);
+        const hits = (video.hits || []).map((hit, rank) => `
+            <div class="files-probe-hit${rank === 0 ? ' is-top' : ''}">
+                ${hit.thumb ? `<img src="${this.esc(API.media.nsfwProbeThumb(this._probeJobId, index, rank))}" loading="lazy" alt="">` : ''}
+                <span>${this.esc(this._formatDuration(hit.ts))}</span>
+            </div>`).join('');
+        return `<div class="files-meta">${head}</div>${bar}
+            ${hits ? `<div class="files-probe-hits">${hits}</div>` : ''}`;
+    },
+
+    _probeThumbUrl(index) {
+        return API.media.nsfwProbeThumb(this._probeJobId, index);
+    },
+
+    /** 抽帧时间条：每帧一格，颜色按分数深浅，让「哪一段有问题」一眼看得出来。 */
+    _probeFramesBar(scores) {
+        if (!Array.isArray(scores) || !scores.length) return '';
+        const MAX_CELLS = 60;
+        // 超过格数就等距抽样，而不是截断：截断会让时间条只覆盖视频前半段。
+        const step = Math.ceil(scores.length / MAX_CELLS);
+        const rows = scores.filter((row, i) => i % step === 0);
+        const cells = rows.map((row) => {
+            const score = Number(row.score || 0);
+            const color = score >= 0.6 ? 'var(--error, #e5484d)'
+                : score >= 0.3 ? '#e09b3d'
+                    : 'rgba(120, 130, 150, 0.35)';
+            return `<span style="flex:1;height:100%;background:${color}" title="${this.esc(this._formatDuration(row.ts))} · ${this.esc(score.toFixed(2))}"></span>`;
+        }).join('');
+        return `<div style="display:flex;gap:1px;height:6px;margin-top:6px;border-radius:3px;overflow:hidden">${cells}</div>`;
+    },
+
+    _formatDuration(seconds) {
+        const total = Math.max(0, Math.round(Number(seconds) || 0));
+        const m = Math.floor(total / 60);
+        const s = total % 60;
+        return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    },
+
+    async _onProbeItemsClick(event) {
+        const act = event.target.closest('[data-act]');
+        if (!act) return;
+        if (act.dataset.act !== 'import') return;
+        await this._importProbeItem(Number(act.dataset.index), act);
+    },
+
+    /** 入库 = 复制进媒体根 + 入队一次增量扫描；索引由扫描任务统一建，前端不假设已生效。 */
+    async _importProbeItem(index, btn) {
+        const jobId = this._probeJobId;
+        const rootSel = document.getElementById('files-probe-root');
+        const dirInput = document.getElementById('files-probe-dir');
+        if (!jobId) return;
+        if (!rootSel || !rootSel.value) {
+            Toast.error('请先选择入库目标媒体根（没有可写根时无法入库）');
+            return;
+        }
+        const rootId = rootSel.value;
+        const targetDir = dirInput ? dirInput.value.trim() : '';
+        if (btn) {
+            btn.disabled = true;
+            btn.textContent = '入库中…';
+        }
+        try {
+            const data = await API.media.nsfwProbeImport(jobId, {
+                index, root: rootId, target_dir: targetDir,
+            });
+            const item = this._probeItems.find((row) => Number(row.index) === index);
+            if (item) item.imported = { root: data.root, relpath: data.relpath };
+            this._renderProbeItems();
+            Toast.success(data.scan_job_id
+                ? `已入库：${data.root} / ${data.relpath}，已提交索引扫描`
+                : `已入库：${data.root} / ${data.relpath}（索引队列已满，请稍后手动「扫描新增」）`);
+            await Promise.allSettled([this._loadStats(), this._loadList()]);
+        } catch (err) {
+            Toast.error('入库失败：' + (err.message || err));
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = '入库';
+            }
+        }
+    },
+
+
     _openViewer(images, index, pano = false) {
         if (!this._viewer || !images || !images.length) return;
         // index 是传入集合的行号；用 root/relpath 定位，避免两处集合行号不一致时选错图。

@@ -75,6 +75,18 @@ class JobManager:
                            scanned=0, scored=0, flagged=0, skipped=0, failed=0,
                            complete=False)
 
+    def enqueue_probe(self, source: str, path: str | None = None, source_path: str | None = None,
+                      recursive: bool = True, kinds: list[str] | None = None,
+                      video_interval: float = 5.0, max_files: int = 5000,
+                      provider: str | None = None, provider_label: str | None = None) -> dict[str, Any]:
+        """一次性检测任务（任意目录 / 上传），与写索引的 scan 任务完全分开。"""
+        return self.create("nsfw_probe", source=source, path=path, source_path=source_path,
+                           recursive=bool(recursive), kinds=list(kinds or ["image", "video"]),
+                           video_interval=float(video_interval), max_files=int(max_files),
+                           provider=provider, provider_label=provider_label,
+                           total=0, scanned=0, images=0, videos=0, flagged=0, skipped=0,
+                           failed=0, imported=0, complete=False, phase="排队中", current=None)
+
     def retry(self, job_id: str) -> dict[str, Any] | None:
         with self.lock:
             old = self.jobs.get(job_id)
@@ -188,6 +200,11 @@ class JobManager:
                     cleanup_expired()
                 except Exception:
                     logging.getLogger(__name__).exception("归档原件清理失败")
+                try:
+                    from .nsfw_probe import cleanup as cleanup_probe
+                    cleanup_probe()
+                except Exception:
+                    logging.getLogger(__name__).exception("一次性检测临时文件清理失败")
                 finally:
                     self.last_cleanup = time.monotonic()
                 continue
@@ -241,6 +258,12 @@ class JobManager:
                                cancel=lambda: bool(item.get("cancel_requested")))
             item.update(result)
             item["status"] = result.get("status", "completed")
+            return
+        if item["kind"] == "nsfw_probe":
+            from .nsfw_probe import scan as scan_probe
+            result = scan_probe(item, progress=lambda p: item.update(p),
+                                cancel=lambda: bool(item.get("cancel_requested")))
+            item.update(result)
             return
         if item["kind"] == "archive":
             from .archive_runner import run_archive

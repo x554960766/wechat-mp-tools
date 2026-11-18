@@ -381,6 +381,26 @@ const API = {
         nsfwSettings(opts) { return API.get('/media/api/settings/nsfw', opts); },
         nsfwSettingsSave(payload) { return API.put('/media/api/settings/nsfw', payload); },
         nsfwRecompute() { return API.post('/media/api/nsfw/recompute'); },
+        // 一次性检测（probe）：任意目录或单个文件，结果不进索引、不计覆盖率。
+        // 与上面 nsfw* 的区别只在落库：probe 只产结果文件，需要「入库」才复制进媒体根。
+        nsfwProbeCheck(payload) { return API.post('/media/api/nsfw/probes/check', payload); },
+        nsfwProbeStart(payload) { return API.post('/media/api/nsfw/probes', payload); },
+        nsfwProbeStatus(jobId) { return API.get(`/media/api/nsfw/probes/${jobId}`, { showError: false }); },
+        nsfwProbeItems(jobId, params = {}, opts) {
+            const query = new URLSearchParams();
+            Object.entries(params).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') query.set(key, value);
+            });
+            const qs = query.toString();
+            return API.get(`/media/api/nsfw/probes/${jobId}/items${qs ? '?' + qs : ''}`, opts);
+        },
+        /** 命中帧缩略图：hit 为空取整段视频的代表帧（最高分帧）。 */
+        nsfwProbeThumb(jobId, index, hit) {
+            return `/media/api/nsfw/probes/${encodeURIComponent(jobId)}/thumb/${Number(index)}`
+                + (hit == null ? '' : `?hit=${Number(hit)}`);
+        },
+        nsfwProbeCancel(jobId) { return API.post(`/media/api/nsfw/probes/${jobId}/cancel`); },
+        nsfwProbeImport(jobId, payload) { return API.post(`/media/api/nsfw/probes/${jobId}/import`, payload); },
         // 标签：文件标签挂在内容摘要上（同内容副本共享），作品标签挂在 work_key 上
         tags(opts) { return API.get('/media/api/tags', opts); },
         imagesByTag(tag, params = {}, opts) {

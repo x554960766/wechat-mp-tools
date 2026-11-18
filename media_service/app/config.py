@@ -191,6 +191,8 @@ MAX_PENDING_JOBS = 100
 MIN_FREE_BYTES = 512 * 1024**2
 MAX_MODEL_WAITING = 16
 MAX_UPLOAD_BYTES = 30 * 1024**2
+# 一次性 NSFW 检测允许上传视频，体积上限单独放宽；超过时在写盘阶段就中断，不进内存。
+PROBE_UPLOAD_BYTES = int(os.environ.get("AI_MEDIA_PROBE_UPLOAD_MAX", str(1024**3)))
 # 以图搜图支持直接贴图片网址：下载超时（秒），复用上传体积上限防超大文件
 URL_DOWNLOAD_TIMEOUT = float(os.environ.get("AI_MEDIA_URL_TIMEOUT", "20"))
 MAX_BODY_BYTES = 32 * 1024**2
