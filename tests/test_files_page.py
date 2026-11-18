@@ -106,12 +106,14 @@ def test_global_nsfw_scan_wired(source):
 
 
 def test_stats_tiles_are_drill_down_entries(source):
-    # 「已入库文件 / 疑似敏感 / 待复核」三个数字必须是可点入口，点完能到清单看这批文件；
-    # 「最大文件」没有排序参数可传，不做成点了没反应的假按钮。
+    # 概览里的四个数字都必须是可点入口，点完能到清单看对应文件。
     stats = _between(source, "_loadStats() {", "_onStatsClick(event)")
     for key in ("total", "flagged", "unreviewed"):
         assert f"data-stat=\"${{key}}\"" in stats or f"stat('{key}'" in stats
-    assert 'data-stat="biggest"' not in source
+    # 最大文件没有排序参数，但 stats 会给出那一个文件的 root/relpath，据此精确定位，
+    # 不能做成点了没反应的假按钮。
+    assert "stat('biggest'" in stats
+    assert "data-relpath=\"${this.esc(biggest.relpath)}\"" in stats
     assert "files-stat-link" in stats
     # 按类型/按媒体根的标签同样可以下钻，否则用户看到「图片 761」却点不进去
     assert 'data-kind="${this.esc(k.kind)}"' in stats
@@ -129,9 +131,14 @@ def test_stats_click_clears_filters_and_scrolls(source):
     assert "set('files-kind', act.dataset.kind)" in drill
     assert "set('files-root', act.dataset.root)" in drill
     assert "this._search();" in drill
+    # 最大文件按 root + 完整相对路径定位（q 是相对路径模糊匹配，整条路径只命中它自己）
+    assert "set('files-root', act.dataset.root || '')" in drill
+    assert "set('files-q', act.dataset.relpath || '')" in drill
     # 清单默认折叠，跳过去之前必须先展开，否则用户只看到一张卡片标题
-    assert "this._setCardExpanded('list', true);" in drill
-    assert "this._scrollToCard('list');" in drill
+    assert "this._jumpToCard('list', token || 'list');" in drill
+    jump = _between(source, "_jumpToCard(key, token = key) {", "async _loadList() {")
+    assert "this._setCardExpanded(key, true);" in jump
+    assert "this._scrollToCard(key);" in jump
 
 
 def test_every_card_has_a_collapse_toggle(source):
@@ -165,3 +172,65 @@ def test_stats_click_delegated_on_stable_container(source):
     assert "getElementById('files-stats-body')" in init
     assert "addEventListener('click'" in init
     assert "this._onStatsClick(event)" in init
+
+
+def test_duplicate_stats_tiles_jump_to_groups(source):
+    # 「重复情况」卡的两个数字以前是死数字，现在都跳到下方分组明细；
+    # 该卡内容整体重渲染，点击同样只能委托到固定容器 #files-dups-body。
+    dups = _between(source, "_loadDuplicates() {", "_renderDuplicates() {")
+    assert 'data-jump="dupGroups"' in dups
+    assert "files-stat-link" in dups
+    init = _between(source, "async init() {", "destroy() {")
+    assert "getElementById('files-dups-body')" in init
+    assert "this._onDupStatsClick(event)" in init
+    jump = _between(source, "_onDupStatsClick(event) {", "_previewDup(sha")
+    assert "this._jumpToCard(act.dataset.jump, 'jump:' + act.dataset.jump);" in jump
+
+
+def test_dup_members_have_preview_thumbnail(source):
+    # 重复组以前只有文字表格，看不出哪两张是一模一样的图；每行加缩略图，点开是灯箱。
+    member = _between(source, "_dupMember(member) {", "_previewDup(sha")
+    assert 'data-act="preview"' in member
+    assert "this._thumbUrl(member)" in member
+    assert "files-thumb-sm" in member
+    # 两个表头都要有预览列，否则列错位
+    assert source.count("<th>预览</th>") == 2
+    # 灯箱里放的是同一摘要的所有副本，翻页即可对比
+    preview = _between(source, "_previewDup(sha", "async _onDupClick(event) {")
+    assert "member.kind === 'image'" in preview
+    assert "this._openViewer(images" in preview
+    # 展开全部加载到的副本必须并进 group.members，否则灯箱漏掉后面这些
+    expand = _between(source, "async _onDupClick(event) {", "};\n\nwindow.FilesPage")
+    assert "group.members = merged;" in expand
+
+
+def test_repeat_click_on_same_entry_collapses_card(source):
+    # 同一个数字连点两次要能收回折叠态，否则下钻是单向的：只会展开，收不回去。
+    jump = _between(source, "_jumpToCard(key, token = key) {", "async _loadList() {")
+    assert "this._lastJumpCard === token" in jump
+    assert "this._setCardExpanded(key, false);" in jump
+    # 「已入库文件」和「疑似敏感」都跳到清单，必须用 token 区分入口，
+    # 否则点第二个会被当成重复点击而把清单收起来。
+    drill = _between(source, "_onStatsClick(event) {", "async _loadList() {")
+    assert "const token = act.dataset.stat" in drill
+    assert "act.dataset.kind ? 'kind:' + act.dataset.kind" in drill
+    # 手动点三角开合之后，重复点击判定必须失效，否则下一次点数字会先收起来
+    toggle = _between(source, "_toggleCard(key) {", "_setCardExpanded(key, expanded")
+    assert "this._lastJumpCard = null;" in toggle
+
+
+def test_pager_accepts_page_number_input(source):
+    # 一页 50 条、共 811 条时有 17 页，只能点「下一页」翻十几下不现实：页码框可直接输入跳转。
+    assert 'id="files-page-input"' in source
+    assert 'type="number"' in source
+    init = _between(source, "async init() {", "destroy() {")
+    assert "getElementById('files-page-input')" in init
+    assert "this._goPage(Number(pageInput.value) - 1)" in init
+    assert "event.key === 'Enter'" in init
+    # 输入框必须跟着真实状态刷新，否则刷新清单后框里还是旧页码，用户会拿着它跳错
+    load = _between(source, "_loadList() {", "    _renderList() {")
+    assert "pageInput.value = String(this._page + 1)" in load
+    assert "pageInput.max = String(totalPages)" in load
+    # 越界钳制在 _goPage 里：输入 999 应该落到最后一页，而不是报错或空白
+    go = _between(source, "_goPage(page) {", "this._loadList();")
+    assert "Math.min(totalPages - 1, page)" in go

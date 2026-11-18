@@ -2913,6 +2913,43 @@ body {
 .files-thumb-icon {
     font-size: 1.6rem;
 }
+/* 重复组成员行的预览缩略图：表格里放紧凑版，点开是灯箱。 */
+.files-thumb-sm {
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+    font-size: 1.1rem;
+}
+.files-dup-thumb {
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: pointer;
+    line-height: 0;
+    border-radius: 6px;
+}
+.files-dup-thumb:hover img,
+.files-dup-thumb:focus-visible img {
+    outline: 2px solid var(--accent-color, #4a9eff);
+    outline-offset: 1px;
+}
+.files-dup-preview {
+    width: 56px;
+}
+/* 分页器的页码输入框：紧挨着「/ 总页数」，窄到不抢上一页/下一页的位置。 */
+.files-pager-jump {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+.files-page-input {
+    width: 64px;
+    padding: 4px 6px;
+    text-align: center;
+}
+.files-page-input:disabled {
+    opacity: .6;
+}
 .files-main {
     flex: 1;
     min-width: 0;

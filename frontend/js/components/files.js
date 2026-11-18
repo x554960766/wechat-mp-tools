@@ -339,7 +339,11 @@ const FilesPage = {
                 <div id="files-list"><div class="empty-state"><p class="form-hint">加载中…</p></div></div>
                 <div class="btn-group" id="files-pager">
                     <button class="btn btn-secondary" id="files-prev">上一页</button>
-                    <span class="form-hint" id="files-page">1 / 1</span>
+                    <span class="files-pager-jump" id="files-page">
+                        <input class="form-input files-page-input" id="files-page-input" type="number" min="1" value="1"
+                               inputmode="numeric" aria-label="跳到指定页，回车确认" title="输入页码后回车跳转">
+                        <span class="form-hint" id="files-page-total">/ 1</span>
+                    </span>
                     <button class="btn btn-secondary" id="files-next">下一页</button>
                 </div>
             </div>
@@ -387,6 +391,15 @@ const FilesPage = {
         if (prevBtn) prevBtn.addEventListener('click', () => this._goPage(this._page - 1));
         const nextBtn = document.getElementById('files-next');
         if (nextBtn) nextBtn.addEventListener('click', () => this._goPage(this._page + 1));
+        // 页码输入：回车直接跳，失焦也跳；值在 _goPage 里统一夹到 [1, 总页数]，输入 999 不会报错。
+        const pageInput = document.getElementById('files-page-input');
+        if (pageInput) {
+            const jump = () => this._goPage(Number(pageInput.value) - 1);
+            pageInput.addEventListener('keydown', (event) => {
+                if (event.key === 'Enter') { event.preventDefault(); jump(); }
+            });
+            pageInput.addEventListener('change', jump);
+        }
 
         // 列表内的查看/播放动作用事件委托：清单每次重渲染，逐个绑定会在 DOM 替换后失效。
         const listEl = document.getElementById('files-list');
@@ -396,6 +409,8 @@ const FilesPage = {
         if (statsBody) statsBody.addEventListener('click', (event) => this._onStatsClick(event));
         const dupsEl = document.getElementById('files-dups');
         if (dupsEl) dupsEl.addEventListener('click', (event) => this._onDupClick(event));
+        const dupsBody = document.getElementById('files-dups-body');
+        if (dupsBody) dupsBody.addEventListener('click', (event) => this._onDupStatsClick(event));
 
         const loadBtn = document.getElementById('files-load-dups');
         if (loadBtn) loadBtn.addEventListener('click', () => this._loadDuplicates());
@@ -499,12 +514,19 @@ const FilesPage = {
         try {
             const s = await API.files.stats();
             // 概览里的数字和标签都是下钻入口：点一下就把对应筛选写进检索条件并滚到清单。
-            // 「最大文件」没有可用的排序参数，保持静态展示，不做成点了没反应的假按钮。
-            const stat = (key, value, label) => `
-                <button type="button" class="files-stat files-stat-link" data-stat="${key}" title="点击查看对应文件清单">
+            const stat = (key, value, label, attrs = '', title = '点击查看对应文件清单') => `
+                <button type="button" class="files-stat files-stat-link" data-stat="${key}" ${attrs} title="${this.esc(title)}">
                     <span class="files-stat-value">${this.esc(value)}</span>
                     <span class="files-stat-label">${label}</span>
                 </button>`;
+            // 最大文件：接口没有排序参数，但 stats 会给出那一个文件的 root/relpath，
+            // 于是把路径写进检索条件精确定位它，而不是做成点了没反应的假按钮。
+            const biggest = s.biggest || {};
+            const biggestStat = biggest.relpath
+                ? stat('biggest', this._formatSize(biggest.size), '最大文件',
+                    `data-root="${this.esc(biggest.root || '')}" data-relpath="${this.esc(biggest.relpath)}"`,
+                    `点击定位：${biggest.relpath}`)
+                : `<div class="files-stat"><span class="files-stat-value">${this.esc(this._formatSize(biggest.size))}</span><span class="files-stat-label">最大文件</span></div>`;
             const kindBits = (s.kinds || [])
                 .map((k) => `<button type="button" class="files-pill files-pill-link" data-kind="${this.esc(k.kind)}" title="只看${this.esc(this._kindLabel(k.kind))}">${this.esc(this._kindLabel(k.kind))} ${this.esc(k.count)}</button>`)
                 .join(' ');
@@ -514,7 +536,7 @@ const FilesPage = {
             body.innerHTML = `
                 <div class="files-stats-rows">
                     ${stat('total', s.total, '已入库文件')}
-                    <div class="files-stat"><span class="files-stat-value">${this.esc(this._formatSize(s.biggest && s.biggest.size))}</span><span class="files-stat-label">最大文件</span></div>
+                    ${biggestStat}
                     ${stat('flagged', s.nsfw_flagged, '疑似敏感')}
                     ${stat('unreviewed', s.nsfw_unreviewed, '待复核')}
                 </div>
@@ -593,6 +615,8 @@ const FilesPage = {
     _toggleCard(key) {
         const card = document.querySelector(`[data-card="${key}"]`);
         const collapsed = !!(card && card.classList.contains('is-collapsed'));
+        // 手动开合之后，上次跳转的「同一入口再点一次就收起」判定失效，否则下一次点数字会先收起来。
+        this._lastJumpCard = null;
         this._setCardExpanded(key, collapsed);
     },
 
@@ -636,20 +660,53 @@ const FilesPage = {
         set('files-nsfw', '');
         if (act.dataset.stat === 'flagged') set('files-nsfw', 'flagged');
         else if (act.dataset.stat === 'unreviewed') set('files-nsfw', 'unreviewed');
+        else if (act.dataset.stat === 'biggest') {
+            // 用 root + 完整相对路径精确定位那一个文件；q 是相对路径模糊匹配，整条路径必然只命中它自己。
+            set('files-root', act.dataset.root || '');
+            set('files-q', act.dataset.relpath || '');
+        }
         else if (act.dataset.kind) set('files-kind', act.dataset.kind);
         else if (act.dataset.root) set('files-root', act.dataset.root);
         this._search();
         // 清单默认折叠：先展开再滚过去，否则跳过去只看得见一张卡片标题。
         if (typeof act.blur === 'function') act.blur();
-        this._setCardExpanded('list', true);
-        this._scrollToCard('list');
+        const token = act.dataset.stat
+            || (act.dataset.kind ? 'kind:' + act.dataset.kind : '')
+            || (act.dataset.root ? 'root:' + act.dataset.root : '');
+        this._jumpToCard('list', token || 'list');
+    },
+
+    /** 「重复情况」卡里的数字：两个都指向下方分组明细，同样先展开再定位。 */
+    _onDupStatsClick(event) {
+        const act = event.target.closest('[data-jump]');
+        if (!act) return;
+        if (typeof act.blur === 'function') act.blur();
+        this._jumpToCard(act.dataset.jump, 'jump:' + act.dataset.jump);
+    },
+
+    /** 跳到目标卡片：折叠时先展开再滚过去，否则只看见一个标题。
+     *  再点同一个入口时反过来收起（token 标识是哪块数字/标签，避免「已入库文件」与
+     *  「疑似敏感」都跳到清单、却被当成同一个入口而互相收起）。 */
+    _jumpToCard(key, token = key) {
+        const card = document.querySelector(`[data-card="${key}"]`);
+        const expanded = !!(card && !card.classList.contains('is-collapsed'));
+        if (expanded && this._lastJumpCard === token) {
+            this._setCardExpanded(key, false);
+            this._scrollToCard(key);
+            this._lastJumpCard = null;
+            return;
+        }
+        this._setCardExpanded(key, true);
+        this._scrollToCard(key);
+        this._lastJumpCard = token;
     },
 
     async _loadList() {
         const listEl = document.getElementById('files-list');
         const countEl = document.getElementById('files-count');
-        const pageEl = document.getElementById('files-page');
         const pagerEl = document.getElementById('files-pager');
+        const prevEl = document.getElementById('files-prev');
+        const nextEl = document.getElementById('files-next');
         if (!listEl) return;
         const params = {
             q: (document.getElementById('files-q') || {}).value || undefined,
@@ -673,7 +730,17 @@ const FilesPage = {
         }
         if (countEl) countEl.textContent = `共 ${this._total} 条`;
         const totalPages = Math.max(1, Math.ceil(this._total / this._limit));
-        if (pageEl) pageEl.textContent = `${this._page + 1} / ${totalPages}`;
+        // 页码框跟着真实状态走：刷新清单后输入框里的数字必须等于当前页，否则用户会拿着旧页码跳错。
+        const pageInput = document.getElementById('files-page-input');
+        const pageTotal = document.getElementById('files-page-total');
+        if (pageInput) {
+            pageInput.value = String(this._page + 1);
+            pageInput.max = String(totalPages);
+            pageInput.disabled = totalPages <= 1;
+        }
+        if (pageTotal) pageTotal.textContent = `/ ${totalPages}`;
+        if (prevEl) prevEl.disabled = this._page <= 0;
+        if (nextEl) nextEl.disabled = this._page >= totalPages - 1;
         if (pagerEl) {
             pagerEl.style.display = this._total > this._limit ? 'flex' : 'none';
         }
@@ -1580,12 +1647,19 @@ const FilesPage = {
         if (body) {
             const s = await API.files.stats().catch(() => null);
             if (s) {
+                // 两个数字都指向下方的「重复内容组」：组数看有多少组，涉及文件看一共几个副本。
                 body.innerHTML = `
                     <div class="files-stats-rows">
-                        <div class="files-stat"><span class="files-stat-value">${this.esc(s.duplicate_groups)}</span><span class="files-stat-label">重复内容组</span></div>
-                        <div class="files-stat"><span class="files-stat-value">${this.esc(s.duplicate_files)}</span><span class="files-stat-label">涉及文件</span></div>
+                        <button type="button" class="files-stat files-stat-link" data-jump="dupGroups" title="点击查看重复内容组">
+                            <span class="files-stat-value">${this.esc(s.duplicate_groups)}</span>
+                            <span class="files-stat-label">重复内容组</span>
+                        </button>
+                        <button type="button" class="files-stat files-stat-link" data-jump="dupGroups" title="点击查看重复内容组">
+                            <span class="files-stat-value">${this.esc(s.duplicate_files)}</span>
+                            <span class="files-stat-label">涉及文件</span>
+                        </button>
                     </div>
-                    <p class="form-hint">内容摘要相同即视为重复，跨媒体根也一并归组。</p>`;
+                    <p class="form-hint">内容摘要相同即视为重复，跨媒体根也一并归组；点数字直达下方分组明细。</p>`;
             }
         }
     },
@@ -1608,7 +1682,7 @@ const FilesPage = {
                 <div class="files-dup-members">
                     <table class="files-dup-table">
                         <thead>
-                            <tr><th>类型</th><th>媒体根</th><th>相对路径</th><th>大小</th><th>修改时间</th><th>操作</th></tr>
+                            <tr><th>预览</th><th>类型</th><th>媒体根</th><th>相对路径</th><th>大小</th><th>修改时间</th><th>操作</th></tr>
                         </thead>
                         <tbody>
                             ${(group.members || []).map((member) => this._dupMember(member)).join('')}
@@ -1626,7 +1700,15 @@ const FilesPage = {
         const delBtn = rootInfo.writable
             ? `<button class="btn btn-danger btn-sm" data-act="delete" data-root="${this.esc(member.root)}" data-relpath="${this.esc(member.relpath)}">删除</button>`
             : '<span class="form-hint">只读</span>';
+        // 预览：缩略图点开灯箱，同一摘要的所有副本都在里面，可以直接左右对比后再决定删哪个。
+        const preview = member.kind === 'image'
+            ? `<button type="button" class="files-dup-thumb" data-act="preview" data-sha="${this.esc(member.content_sha256 || '')}"
+                    data-root="${this.esc(member.root)}" data-relpath="${this.esc(member.relpath)}" title="点开对比同内容副本">
+                    <img class="files-thumb files-thumb-sm" src="${this.esc(this._thumbUrl(member))}" loading="lazy" alt="">
+               </button>`
+            : `<span class="files-thumb files-thumb-sm files-thumb-icon" title="${this.esc(this._kindLabel(member.kind))}">${this._kindIcon(member.kind)}</span>`;
         return `<tr>
+            <td class="files-dup-preview">${preview}</td>
             <td>${this.esc(this._kindLabel(member.kind))}</td>
             <td>${this.esc(rootInfo.label)}</td>
             <td class="files-dup-path" title="${this.esc(member.relpath)}">${this.esc(member.relpath)}</td>
@@ -1636,11 +1718,25 @@ const FilesPage = {
         </tr>`;
     },
 
+    /** 预览一个重复副本：灯箱里放的都是同一摘要的其它副本，方便对比后决定留哪个。 */
+    _previewDup(sha, root, relpath) {
+        const group = (this._dupGroups || []).find((item) => item.sha === sha);
+        if (!group) return;
+        const images = (group.members || []).filter((member) => member.kind === 'image');
+        if (!images.length) return;
+        const index = images.findIndex((member) => member.root === root && member.relpath === relpath);
+        this._openViewer(images, index >= 0 ? index : 0);
+    },
+
     async _onDupClick(event) {
         const act = event.target.closest('[data-act]');
         if (!act) return;
         if (act.dataset.act === 'delete') {
             this._confirmDelete(act.dataset.root, act.dataset.relpath);
+            return;
+        }
+        if (act.dataset.act === 'preview') {
+            this._previewDup(act.dataset.sha, act.dataset.root, act.dataset.relpath);
             return;
         }
         if (act.dataset.act !== 'expand') return;
@@ -1652,8 +1748,14 @@ const FilesPage = {
         try {
             const data = await API.files.group(group.sha, { showError: false });
             const members = (data && data.members) || [];
+            // 并进 group.members：预览灯箱要能左右翻到这些展开后才加载到的副本。
+            const merged = (group.members || []).slice();
+            members.forEach((member) => {
+                if (!merged.some((item) => item.root === member.root && item.relpath === member.relpath)) merged.push(member);
+            });
+            group.members = merged;
             more.innerHTML = '<table class="files-dup-table"><thead><tr>'
-                + '<th>类型</th><th>媒体根</th><th>相对路径</th><th>大小</th><th>修改时间</th><th>操作</th>'
+                + '<th>预览</th><th>类型</th><th>媒体根</th><th>相对路径</th><th>大小</th><th>修改时间</th><th>操作</th>'
                 + '</tr></thead><tbody>'
                 + members.map((member) => this._dupMember(member)).join('')
                 + '</tbody></table>';
