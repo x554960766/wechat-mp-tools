@@ -8,12 +8,17 @@ const API = {
     async request(url, options = {}) {
         const { method = 'GET', body = null, showError = true } = options;
 
-        const fetchOptions = {
-            method,
-            headers: { 'Content-Type': 'application/json' },
-        };
+        // FormData 必须让浏览器自动补 multipart 的 Content-Type（含 boundary）：
+        // 手工写 application/json，服务端收到的既不是合法 JSON 也不是合法 multipart，
+        // 以图搜图这类文件上传会直接 422/400。
+        const isFormData = typeof FormData !== 'undefined' && body instanceof FormData;
+        const fetchOptions = isFormData
+            ? { method }
+            : { method, headers: { 'Content-Type': 'application/json' } };
 
-        if (body) {
+        if (isFormData) {
+            fetchOptions.body = body;
+        } else if (body) {
             fetchOptions.body = JSON.stringify(body);
         }
 
@@ -342,6 +347,11 @@ const API = {
         roots() { return API.get('/media/api/media/roots', { showError: false }); },
         stats() { return API.get('/media/api/search/stats', { showError: false }); },
         searchText(payload, opts) { return API.post('/media/api/search/text', payload, opts); },
+        /**
+         * 以图搜图。body 必须是 FormData（file + roots[] + k/after/before/review/videos），
+         * 后端走 multipart，见 API.request 对 FormData 的分支处理。
+         */
+        searchImage(formData, opts) { return API.post('/media/api/search/image', formData, opts); },
         contentsSearch(params, opts) {
             const query = new URLSearchParams();
             Object.entries(params || {}).forEach(([key, value]) => {

@@ -5,7 +5,7 @@
 - 预处理 resize 224（bilinear）-> /255 -> (x-0.5)/0.5 -> NCHW
 - 模型输出 2 维 logits [normal, nsfw]（id2label 0=normal 1=nsfw），图内无 Softmax，
   必须调用方 softmax 后取 probs[1] 作 nsfw 分数
-- 阈值 0.5，只有 score >= 0.5 判 nsfw（不能把 logit 当概率比阈值）
+- 阈值来自 config.NSFW_THRESHOLD（默认 0.5），只有 score >= 阈值判 nsfw（不能把 logit 当概率比阈值）
 
 权重路径来自 config.NSFW_MODEL_PATH（默认 <DATA_DIR>/nsfw.onnx，由宿主注入的
 AI_MEDIA_DATA_DIR 决定），可用 AI_MEDIA_NSFW_MODEL 覆盖；SHA-256 见 config 常量。
@@ -13,7 +13,6 @@ AI_MEDIA_DATA_DIR 决定），可用 AI_MEDIA_NSFW_MODEL 覆盖；SHA-256 见 co
 from __future__ import annotations
 from . import config
 _model=None; _error=None
-THRESHOLD=0.5
 IMAGE_SIZE=224
 
 def status(): return "ready" if _model is not None else ("failed" if _error else "unloaded")
@@ -67,6 +66,6 @@ def review_bytes(data):
         result=model.run(None,{input_meta.name:x})[0].reshape(-1)
         probs=_softmax_probs(result)
         score=float(probs[1]) if len(probs)>=2 else float(probs[0])
-        return {"score":score,"label":"nsfw" if score>=THRESHOLD else "safe","status":"ok"}
+        return {"score":score,"label":"nsfw" if score>=config.NSFW_THRESHOLD else "safe","status":"ok"}
     except Exception as e:
         return {"score":None,"label":None,"status":"failed","error":str(e)[:200]}

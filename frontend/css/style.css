@@ -1997,6 +1997,55 @@ body {
     flex: 1;
     min-width: 0;
 }
+.ms-image-preview {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: var(--spacing-md);
+    padding: 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-card);
+}
+.ms-image-preview-img {
+    width: 56px;
+    height: 56px;
+    object-fit: cover;
+    border-radius: 8px;
+    background: var(--bg-card-hover);
+    flex: none;
+}
+.ms-image-preview-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+}
+.ms-image-preview-name {
+    font-size: 0.85rem;
+    color: var(--text-secondary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.ms-image-preview-sub {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    opacity: 0.7;
+}
+.ms-image-preview-tag {
+    flex: none;
+    padding: 2px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 999px;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+#ms-search-card.dragover {
+    outline: 2px dashed var(--primary-light);
+    outline-offset: 4px;
+}
 .media-advanced {
     margin: var(--spacing-sm) 0 var(--spacing-md);
     border-top: 1px solid var(--border-color);

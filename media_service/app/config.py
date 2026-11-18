@@ -25,8 +25,9 @@ NSFW_MODEL_PATH = Path(os.environ.get("AI_MEDIA_NSFW_MODEL", DATA_DIR / "nsfw.on
 # 扫描期初筛开关。默认开：入库时顺手跑一遍，检索页才能直接带角标。
 # 关掉只影响「是否写初筛结论」，不影响现有的按需审核路径。
 NSFW_SCAN = os.environ.get("AI_MEDIA_NSFW_SCAN", "1").lower() not in ("0", "false", "no", "off")
-# 判定阈值：与 review.THRESHOLD 同源，这里留一份给扫描期与前端展示对齐。
-NSFW_THRESHOLD = 0.5
+# 判定阈值：review.py 判定时实时读取本值（唯一真源），扫描期与前端展示同此口径。
+# 可用 AI_MEDIA_NSFW_THRESHOLD 覆盖：调小更敏感（更易判 nsfw），调大更宽松。
+NSFW_THRESHOLD = float(os.environ.get("AI_MEDIA_NSFW_THRESHOLD", "0.5"))
 
 # 视频代表帧：抽帧间隔与单视频上限。间隔越密越容易命中情节，但帧图与向量都会线性增长；
 # 默认 10 秒 / 24 帧把一条 4 分钟视频压在 24 帧以内，足够覆盖一个短视频全片。
@@ -41,6 +42,8 @@ MAX_PENDING_JOBS = 100
 MIN_FREE_BYTES = 512 * 1024**2
 MAX_MODEL_WAITING = 16
 MAX_UPLOAD_BYTES = 30 * 1024**2
+# 以图搜图支持直接贴图片网址：下载超时（秒），复用上传体积上限防超大文件
+URL_DOWNLOAD_TIMEOUT = float(os.environ.get("AI_MEDIA_URL_TIMEOUT", "20"))
 MAX_BODY_BYTES = 32 * 1024**2
 MAX_ZIP_TEXT_BYTES = 100 * 1024**2
 MAX_ZIP_ENTRIES = 1000

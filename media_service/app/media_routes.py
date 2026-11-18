@@ -177,9 +177,51 @@ def search_text(body:TextRequest):
     result["videos"]=videos
     return result
 
+async def _fetch_url_image(url: str) -> bytes:
+    """把图片网址下载成字节，供以图搜图使用。
+
+    只放行 http/https，按声明长度与实收字节双重卡住 MAX_UPLOAD_BYTES，避免把远端
+    超大文件整段拉进内存；下载失败按语义区分「地址不对」与「取不到」。
+    """
+    if not url or not url.strip():
+        raise HTTPException(422, "empty url")
+    if not re.match(r"^https?://", url, re.I):
+        raise HTTPException(422, "url 必须是 http/https 地址")
+    import httpx
+    # trust_env=False：本机 all_proxy 是 socks5，而 httpx 未装 socksio 时构造期就抛
+    # ImportError，整个网图检索直接 500；实测直连可出网，故图片下载不读环境代理。
+    try:
+        async with httpx.AsyncClient(trust_env=False, follow_redirects=True,
+                                     timeout=config.URL_DOWNLOAD_TIMEOUT,
+                                     headers={"User-Agent": config.UA}) as client:
+            async with client.stream("GET", url) as resp:
+                if resp.status_code >= 400:
+                    raise HTTPException(502, f"image download failed: HTTP {resp.status_code}")
+                declared = resp.headers.get("content-length")
+                if declared and declared.isdigit() and int(declared) > config.MAX_UPLOAD_BYTES:
+                    raise HTTPException(413, "image too large")
+                chunks = []
+                total = 0
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > config.MAX_UPLOAD_BYTES:
+                        raise HTTPException(413, "image too large")
+                    chunks.append(chunk)
+    except HTTPException:
+        raise
+    except httpx.TimeoutException:
+        raise HTTPException(504, "image download timeout")
+    except httpx.HTTPError as e:
+        raise HTTPException(502, f"image download failed: {e}")
+    return b"".join(chunks)
+
+
 @router.post("/api/search/image")
-async def search_image(file:UploadFile=File(...),k:int=Form(24),roots:list[str]=Form(default=[]),after:str|None=Form(None),before:str|None=Form(None),review_enabled:bool=Form(False,alias="review"),videos:bool=Form(True)):
-    data=await file.read(config.MAX_UPLOAD_BYTES+1)
+async def search_image(file:UploadFile|None=File(None),url:str|None=Form(None),k:int=Form(24),roots:list[str]=Form(default=[]),after:str|None=Form(None),before:str|None=Form(None),review_enabled:bool=Form(False,alias="review"),videos:bool=Form(True)):
+    if file is not None:
+        data=await file.read(config.MAX_UPLOAD_BYTES+1)
+    else:
+        data=await _fetch_url_image(url)
     if len(data)>config.MAX_UPLOAD_BYTES: raise HTTPException(413,"image too large")
     if not data: raise HTTPException(422,"empty image")
     try:

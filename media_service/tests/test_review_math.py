@@ -82,3 +82,18 @@ def test_preprocess_normalizes_and_nchw():
     assert abs(float(x[0, 0, 0, 0]) - _prep_expected(128)) < 1e-6
     assert abs(float(x[0, 1, 0, 0]) - _prep_expected(200)) < 1e-6
     assert abs(float(x[0, 2, 0, 0]) - _prep_expected(7)) < 1e-6
+
+
+def test_threshold_is_wired_to_config(monkeypatch):
+    """阈值必须真读 config.NSFW_THRESHOLD，而不是写死的 0.5。"""
+    # softmax([-5, -0.5]) 的 nsfw 概率约 0.989
+    monkeypatch.setattr(review.config, "NSFW_THRESHOLD", 0.9)
+    r = _patch_logits([-5.0, -0.5])
+    assert r["score"] > 0.9
+    assert r["label"] == "nsfw"
+
+    # 阈值提到 0.99，同一分数翻回 safe：证明判定用的是配置而非模块常量
+    monkeypatch.setattr(review.config, "NSFW_THRESHOLD", 0.99)
+    r2 = _patch_logits([-5.0, -0.5])
+    assert 0.9 < r2["score"] < 0.99
+    assert r2["label"] == "safe"

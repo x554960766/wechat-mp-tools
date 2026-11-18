@@ -20,6 +20,7 @@ const MediaSearchPage = {
     _keyHandler: null,
     _detail: null,
     _nsfwOnly: false,
+    _images: [],
     _viewer: null,
     _viewerKeys: null,
     _three: null,
@@ -32,11 +33,34 @@ const MediaSearchPage = {
                 <p class="page-description">按标题、正文和账号检索已下载的内容：公众号文章、视频号/抖音/快手/B站视频、小红书笔记。留空直接看最近入库。</p>
             </div>
 
-            <div class="card" style="margin-bottom: var(--spacing-lg);">
+            <div class="card" id="ms-search-card" style="margin-bottom: var(--spacing-lg);">
                 <div class="media-search-bar">
                     <input type="text" class="form-input" id="ms-q" autocomplete="off"
                            placeholder="例如：手机壁纸 / 翰墨修心 / 咖啡 手写">
                     <button class="btn btn-primary" id="ms-go">检索</button>
+                </div>
+
+                <div class="media-search-bar">
+                    <input type="file" class="form-input" id="ms-image" accept="image/*,.heic,.heif">
+                    <button class="btn btn-primary" id="ms-image-go">以图搜图</button>
+                    <button class="btn btn-secondary btn-sm" id="ms-image-clear" type="button">清空</button>
+                    <span class="form-hint">也可把图片拖进本页</span>
+                </div>
+
+                <div class="ms-image-preview" id="ms-image-preview" hidden>
+                    <img class="ms-image-preview-img" id="ms-image-preview-img" alt=""
+                         onerror="this.style.visibility='hidden'">
+                    <div class="ms-image-preview-meta">
+                        <span class="ms-image-preview-name" id="ms-image-preview-name"></span>
+                        <span class="ms-image-preview-sub" id="ms-image-preview-sub"></span>
+                    </div>
+                    <span class="ms-image-preview-tag" id="ms-image-preview-tag"></span>
+                </div>
+
+                <div class="media-search-bar">
+                    <input type="url" class="form-input" id="ms-image-url"
+                           placeholder="或粘贴图片网址（http/https）">
+                    <button class="btn btn-secondary" id="ms-image-url-go">搜网图</button>
                 </div>
 
                 <div class="media-roots" id="ms-platforms">
@@ -69,6 +93,9 @@ const MediaSearchPage = {
 
             <div id="ms-video-hits" class="media-video-hits" hidden></div>
 
+            <div id="ms-image-hits" class="media-results" hidden></div>
+            <p id="ms-image-status" class="form-hint" role="status"></p>
+
             <div id="ms-results" class="media-results">
                 <div class="empty-state">
                     <div class="empty-state-icon">🔍</div>
@@ -88,6 +115,7 @@ const MediaSearchPage = {
         this._account = '';
         this._query = '';
         this._nsfwOnly = false;
+        this._images = [];
 
         // 侧栏全局检索跳转携带的关键词：预填输入框，随后的 search() 会读取它
         const q = document.getElementById('ms-q');
@@ -119,6 +147,19 @@ const MediaSearchPage = {
                 this.search(true);
             });
         }
+        const imageGo = document.getElementById('ms-image-go');
+        if (imageGo) imageGo.addEventListener('click', () => this.imageSearch());
+        const imageInput = document.getElementById('ms-image');
+        if (imageInput) {
+            imageInput.addEventListener('change', () => {
+                if (imageInput.files && imageInput.files[0]) this.imageSearch();
+            });
+        }
+        const imageClear = document.getElementById('ms-image-clear');
+        if (imageClear) imageClear.addEventListener('click', () => this.clearImageSource());
+        const imageUrlGo = document.getElementById('ms-image-url-go');
+        if (imageUrlGo) imageUrlGo.addEventListener('click', () => this.imageSearch());
+        this.bindImageDrop();
         await this.loadFacets();
         await this.loadRoots();
         this.loadStats();
@@ -311,6 +352,204 @@ const MediaSearchPage = {
                 </div>
                 <div class="video-hit-list">${cards}</div>
             </div>`;
+    },
+
+    // ── 以图搜图 ──────────────────────────────────────
+    /**
+     * 上传一张图，在当前媒体根里找语义最相近的图片。
+     *
+     * 请求体是 FormData：接口收 multipart，不能走 JSON 序列化（见 API.request 的
+     * FormData 分支）。roots 用当前「媒体来源」选择，未指定时由后端按全部根检索。
+     * 失败只清空图片结果并提示，不影响同页的内容检索。
+     */
+    async imageSearch(file, url) {
+        const hasFile = file !== undefined && file !== null;
+        const hasUrl = url !== undefined && url !== null;
+        const input = document.getElementById('ms-image');
+        const chosen = hasFile ? file : (hasUrl ? null : (input && input.files && input.files[0]));
+        const imageUrl = hasUrl ? url : '';
+        if (!chosen && !imageUrl) {
+            this.imageStatus('请先选择一张图片，或粘贴图片网址');
+            return;
+        }
+        if (chosen && !/^image\//.test(chosen.type) && !/\.(heic|heif)$/i.test(chosen.name)) {
+            this.imageStatus('只支持图片文件');
+            return;
+        }
+        if (!chosen && !/^https?:\/\//i.test(imageUrl)) {
+            this.imageStatus('图片网址需以 http:// 或 https:// 开头');
+            return;
+        }
+        // 回显查询图来源：选文件、拖入、贴网址三种入口都能看到当前实际用的是哪个
+        this.renderImagePreview(chosen, imageUrl);
+        const hits = document.getElementById('ms-image-hits');
+        if (hits) {
+            hits.hidden = false;
+            hits.innerHTML = `<div class="loading-screen"><div class="spinner"></div><p>正在检索相似图片…</p></div>`;
+        }
+        this.imageStatus('正在检索…');
+        try {
+            const fd = new FormData();
+            if (chosen) fd.append('file', chosen);
+            else fd.append('url', imageUrl);
+            if (this._root) fd.append('roots', this._root);
+            fd.append('k', 24);
+            fd.append('review', String(this._nsfwOnly));
+            const data = await API.media.searchImage(fd, { showError: false });
+            this._images = (data && data.items) || [];
+            this.renderImageResults();
+            this.renderVideoHits((data && data.videos) || []);
+            this.imageStatus(this._images.length
+                ? `以图搜图命中 ${this._images.length} 张相似图片`
+                : '没有匹配的相似图片');
+        } catch (err) {
+            this._images = [];
+            this.renderImageResults(err);
+            this.imageStatus(`以图搜图失败：${err.message}`);
+        }
+    },
+
+    /**
+     * 回显当前查询图。本地文件显示缩略图、文件名与体积；网图显示网址与来源标签，
+     * 并尝试让浏览器直接加载缩略图（部分站点防盗链会失败，失败时图自动隐藏，网址仍在）。
+     */
+    renderImagePreview(file, url) {
+        const box = document.getElementById('ms-image-preview');
+        if (!box) return;
+        const img = document.getElementById('ms-image-preview-img');
+        const name = document.getElementById('ms-image-preview-name');
+        const sub = document.getElementById('ms-image-preview-sub');
+        const tag = document.getElementById('ms-image-preview-tag');
+        if (file) {
+            if (img) {
+                img.style.visibility = '';
+                img.src = URL.createObjectURL(file);
+                img.alt = file.name;
+            }
+            if (name) name.textContent = file.name;
+            if (sub) sub.textContent = this.fmtBytes(file.size);
+            if (tag) tag.textContent = '本地文件';
+        } else if (url) {
+            if (img) {
+                img.style.visibility = '';
+                img.src = url;
+                img.alt = url;
+            }
+            if (name) name.textContent = url;
+            if (sub) sub.textContent = '网图（后端下载后检索）';
+            if (tag) tag.textContent = '网址';
+        } else {
+            box.hidden = true;
+            return;
+        }
+        box.hidden = false;
+    },
+
+    /** 清空查询图来源：文件框、网址框、回显与图片结果一起复位，避免残留旧图误导。 */
+    clearImageSource() {
+        const input = document.getElementById('ms-image');
+        if (input) input.value = '';
+        const urlInput = document.getElementById('ms-image-url');
+        if (urlInput) urlInput.value = '';
+        this.renderImagePreview(null, '');
+        const hits = document.getElementById('ms-image-hits');
+        if (hits) { hits.hidden = true; hits.innerHTML = ''; }
+        this._images = [];
+        this.imageStatus('');
+    },
+
+    fmtBytes(bytes) {
+        const n = Number(bytes) || 0;
+        if (!n) return '0 B';
+        const units = ['B', 'KB', 'MB', 'GB'];
+        let value = n;
+        let unit = 0;
+        while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+        return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+    },
+
+    imageStatus(msg) {
+        const el = document.getElementById('ms-image-status');
+        if (!el) return;
+        el.textContent = msg || '';
+    },
+
+    bindImageDrop() {
+        const card = document.getElementById('ms-search-card');
+        if (!card) return;
+        card.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            card.classList.add('dragover');
+        });
+        card.addEventListener('dragleave', (e) => {
+            if (e.target === card) card.classList.remove('dragover');
+        });
+        card.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            card.classList.remove('dragover');
+            const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+            if (!file) return;
+            await this.imageSearch(file);
+        });
+    },
+
+    renderImageResults(err) {
+        const box = document.getElementById('ms-image-hits');
+        if (!box) return;
+        if (err) {
+            const code = err.status ? `HTTP ${err.status}` : '请求失败';
+            box.hidden = false;
+            box.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">⚠️</div>
+                    <h3 class="empty-state-title">以图搜图失败（${code}）</h3>
+                    <p class="empty-state-desc">${this.esc(err.message || '')}</p>
+                </div>`;
+            return;
+        }
+        if (!this._images.length) {
+            box.hidden = false;
+            box.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">🫧</div>
+                    <h3 class="empty-state-title">没有匹配的相似图片</h3>
+                    <p class="empty-state-desc">换一张特征更独特的图片，或先对来源目录点一次「扫描选中来源」补齐索引。</p>
+                </div>`;
+            return;
+        }
+        const esc = (v) => this.esc(v);
+        box.hidden = false;
+        box.innerHTML = `<div class="content-grid">${this._images.map((item, i) => {
+            const thumb = '/media' + (item.thumb || '');
+            const title = (item.article && item.article.title) || item.relpath || '图片';
+            const sub = `相似度 ${Number(item.score).toFixed(2)} · ${item.shot_at || '时间未知'}`;
+            const risky = item.review && item.review.status === 'ok' && item.review.label === 'nsfw'
+                ? `疑似 NSFW ${Number(item.review.score).toFixed(2)}`
+                : (item.nsfw && item.nsfw.status === 'ok' && item.nsfw.label === 'nsfw'
+                    ? `疑似 NSFW ${Number(item.nsfw.score).toFixed(2)}` : '');
+            return `<button type="button" class="content-card ms-image-card" data-index="${i}">
+                        <span class="content-cover">
+                            <img src="${esc(thumb)}" loading="lazy" alt=""
+                                 onerror="this.closest('.content-cover').classList.add('is-broken')">
+                            <span class="media-badge">${esc(item.source_label || item.root || '')}</span>
+                            ${risky ? `<span class="media-badge is-warn">${esc(risky)}</span>` : ''}
+                        </span>
+                        <span class="content-meta">
+                            <span class="content-title">${esc(title)}</span>
+                            <span class="content-sub">${esc(sub)}</span>
+                        </span>
+                    </button>`;
+        }).join('')}</div>`;
+        box.querySelectorAll('.ms-image-card').forEach((card) => {
+            card.addEventListener('click', () => this.openImage(Number(card.dataset.index)));
+        });
+    },
+
+    openImage(index) {
+        const image = this._images[index];
+        if (!image) return;
+        // _images 里的字段（file / relpath / nsfw）与详情图同构，可直接喂给查看器
+        this.openViewer(this._images, index);
     },
 
     fmtTs(seconds) {
