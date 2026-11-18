@@ -103,3 +103,38 @@ def test_global_nsfw_scan_wired(source):
     assert "data.pending" in status
     destroy = _between(source, "destroy() {", "async _loadRoots() {")
     assert "_nsfwTimer" in destroy
+
+
+def test_stats_tiles_are_drill_down_entries(source):
+    # 「已入库文件 / 疑似敏感 / 待复核」三个数字必须是可点入口，点完能到清单看这批文件；
+    # 「最大文件」没有排序参数可传，不做成点了没反应的假按钮。
+    stats = _between(source, "_loadStats() {", "_onStatsClick(event)")
+    for key in ("total", "flagged", "unreviewed"):
+        assert f"data-stat=\"${{key}}\"" in stats or f"stat('{key}'" in stats
+    assert 'data-stat="biggest"' not in source
+    assert "files-stat-link" in stats
+    # 按类型/按媒体根的标签同样可以下钻，否则用户看到「图片 761」却点不进去
+    assert 'data-kind="${this.esc(k.kind)}"' in stats
+    assert 'data-root="${this.esc(r.root)}"' in stats
+
+
+def test_stats_click_clears_filters_and_scrolls(source):
+    # 每次下钻先清空全部条件，避免和上一次筛选叠加成空结果；下钻后必须滚到清单，
+    # 否则清单在页面下方，用户会以为点了没反应。
+    drill = _between(source, "_onStatsClick(event) {", "async _loadList() {")
+    for cid in ("files-q", "files-ext", "files-dup", "files-kind", "files-root", "files-nsfw"):
+        assert f"set('{cid}', '')" in drill, f"下钻前未清空 {cid}"
+    assert "set('files-nsfw', 'flagged')" in drill
+    assert "set('files-nsfw', 'unreviewed')" in drill
+    assert "set('files-kind', act.dataset.kind)" in drill
+    assert "set('files-root', act.dataset.root)" in drill
+    assert "this._search();" in drill
+    assert "scrollIntoView" in drill
+
+
+def test_stats_click_delegated_on_stable_container(source):
+    # 概览块每次刷新整体重渲染，点击只能委托到固定容器 #files-stats-body 上
+    init = _between(source, "async init() {", "destroy() {")
+    assert "getElementById('files-stats-body')" in init
+    assert "addEventListener('click'" in init
+    assert "this._onStatsClick(event)" in init

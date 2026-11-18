@@ -386,6 +386,9 @@ const FilesPage = {
         // 列表内的查看/播放动作用事件委托：清单每次重渲染，逐个绑定会在 DOM 替换后失效。
         const listEl = document.getElementById('files-list');
         if (listEl) listEl.addEventListener('click', (event) => this._onListClick(event));
+        // 概览块每次刷新都会整体重渲染，委托绑在固定容器上。
+        const statsBody = document.getElementById('files-stats-body');
+        if (statsBody) statsBody.addEventListener('click', (event) => this._onStatsClick(event));
         const dupsEl = document.getElementById('files-dups');
         if (dupsEl) dupsEl.addEventListener('click', (event) => this._onDupClick(event));
 
@@ -490,18 +493,25 @@ const FilesPage = {
         if (!body) return;
         try {
             const s = await API.files.stats();
+            // 概览里的数字和标签都是下钻入口：点一下就把对应筛选写进检索条件并滚到清单。
+            // 「最大文件」没有可用的排序参数，保持静态展示，不做成点了没反应的假按钮。
+            const stat = (key, value, label) => `
+                <button type="button" class="files-stat files-stat-link" data-stat="${key}" title="点击查看对应文件清单">
+                    <span class="files-stat-value">${this.esc(value)}</span>
+                    <span class="files-stat-label">${label}</span>
+                </button>`;
             const kindBits = (s.kinds || [])
-                .map((k) => `<span class="files-pill">${this.esc(this._kindLabel(k.kind))} ${this.esc(k.count)}</span>`)
+                .map((k) => `<button type="button" class="files-pill files-pill-link" data-kind="${this.esc(k.kind)}" title="只看${this.esc(this._kindLabel(k.kind))}">${this.esc(this._kindLabel(k.kind))} ${this.esc(k.count)}</button>`)
                 .join(' ');
             const rootBits = (s.roots || [])
-                .map((r) => `<span class="files-pill">${this.esc(r.root)} ${this.esc(r.count)}</span>`)
+                .map((r) => `<button type="button" class="files-pill files-pill-link" data-root="${this.esc(r.root)}" title="只看该媒体根">${this.esc(r.root)} ${this.esc(r.count)}</button>`)
                 .join(' ');
             body.innerHTML = `
                 <div class="files-stats-rows">
-                    <div class="files-stat"><span class="files-stat-value">${this.esc(s.total)}</span><span class="files-stat-label">已入库文件</span></div>
+                    ${stat('total', s.total, '已入库文件')}
                     <div class="files-stat"><span class="files-stat-value">${this.esc(this._formatSize(s.biggest && s.biggest.size))}</span><span class="files-stat-label">最大文件</span></div>
-                    <div class="files-stat"><span class="files-stat-value">${this.esc(s.nsfw_flagged)}</span><span class="files-stat-label">疑似敏感</span></div>
-                    <div class="files-stat"><span class="files-stat-value">${this.esc(s.nsfw_unreviewed)}</span><span class="files-stat-label">待复核</span></div>
+                    ${stat('flagged', s.nsfw_flagged, '疑似敏感')}
+                    ${stat('unreviewed', s.nsfw_unreviewed, '待复核')}
                 </div>
                 <div class="files-stats-block">
                     <div class="files-block-title">按类型</div>
@@ -511,10 +521,42 @@ const FilesPage = {
                     <div class="files-block-title">按媒体根</div>
                     <div class="files-pills">${rootBits || '<span class="form-hint">—</span>'}</div>
                 </div>
+                <p class="form-hint files-stats-hint">点数字或标签，直接查看对应的文件清单（清单内可查看、删除）。</p>
             `;
         } catch (err) {
             body.innerHTML = '<p class="form-hint" style="color:var(--error)">概览加载失败：' + this.esc(err.message || err) + '</p>';
         }
+    },
+
+    /**
+     * 概览下钻：按点中的数字/标签把筛选条件写进检索表单，再滚到文件清单。
+     * 每次都先清空全部条件，避免和上一次下钻叠加成空结果。
+     */
+    _onStatsClick(event) {
+        const act = event.target.closest('[data-stat], [data-kind], [data-root]');
+        if (!act) return;
+        const stat = document.getElementById('files-stats-body');
+        if (!stat || !stat.contains(act)) return;
+        const set = (id, value) => {
+            const el = document.getElementById(id);
+            if (el) el.value = value;
+        };
+        set('files-q', '');
+        set('files-ext', '');
+        set('files-dup', '');
+        set('files-kind', '');
+        set('files-root', '');
+        set('files-nsfw', '');
+        if (act.dataset.stat === 'flagged') set('files-nsfw', 'flagged');
+        else if (act.dataset.stat === 'unreviewed') set('files-nsfw', 'unreviewed');
+        else if (act.dataset.kind) set('files-kind', act.dataset.kind);
+        else if (act.dataset.root) set('files-root', act.dataset.root);
+        this._search();
+        // 清单在页面下方，不滚过去用户会以为点了没反应。
+        if (typeof act.blur === 'function') act.blur();
+        const listEl = document.getElementById('files-list');
+        const card = listEl && listEl.closest('.card');
+        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
     },
 
     async _loadList() {

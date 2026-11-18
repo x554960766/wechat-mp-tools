@@ -2818,6 +2818,33 @@ body {
     border: 1px solid var(--border-color);
     color: var(--text-primary);
 }
+/* 概览里的数字与标签是下钻入口：做成按钮后要抹掉 UA 默认外观，只留可点提示 */
+.files-stat-link,
+.files-pill-link {
+    font: inherit;
+    cursor: pointer;
+    color: inherit;
+    text-align: inherit;
+    transition: border-color 0.15s, background 0.15s;
+}
+/* 数字块已有 .files-stat 的浅底，这里只抹掉按钮默认外观，别把底色一起清掉 */
+.files-stat-link {
+    align-items: center;
+}
+.files-pill-link {
+    background: transparent;
+    border: 1px solid var(--border-color);
+}
+.files-stat-link:hover,
+.files-stat-link:focus-visible,
+.files-pill-link:hover,
+.files-pill-link:focus-visible {
+    border-color: var(--accent-color, #4a9eff);
+    background: var(--bg-subtle-hover, rgba(74, 158, 255, 0.08));
+}
+.files-stats-hint {
+    margin: 8px 0 0;
+}
 .files-row {
     display: flex;
     gap: 12px;
