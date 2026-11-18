@@ -7,11 +7,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from types import SimpleNamespace
+
 from backend import douyin
 
-# 将进度文件重定向到临时目录，避免污染真实 data/
+# 将进度文件与历史记录重定向到临时目录，避免污染真实 data/
+# （历史教训：只重定向 PROGRESS_FILE 时，download_media 会把测试文件写进真实 douyin_history.json，
+#  在前端归到「未知来源」分组，2026-11-19 实测污染 114 条）
 tmp = Path(tempfile.mkdtemp(prefix="dy_resume_test_"))
 douyin.PROGRESS_FILE = tmp / "douyin_progress.json"
+douyin.HISTORY_FILE = tmp / "douyin_history.json"
+# NAS 归档登记用桩替换：测试文件不在媒体根内，本就会被跳过，这里显式短路以防配置变更后被误登记
+douyin.nas_archive = SimpleNamespace(submit_path=lambda *args, **kwargs: False)
+# 媒体扫描通知同样短路：测试不该真的去敲本机媒体服务
+douyin.media_sync = SimpleNamespace(notify_scan=lambda *args, **kwargs: None)
 
 target = tmp / "downloads"
 target.mkdir(parents=True, exist_ok=True)
@@ -100,5 +109,18 @@ rv = douyin.download_media(video_info, target, custom_dir=target / "陈杰森资
                            skip_existing=True, progress_key="post:sec_test")
 assert stub_calls["n"] == 1 and not rv.get("skipped"), "文件删除后应重新下载"
 print("PASS 进度记录存在但文件被删时仍会重新下载（磁盘为准）")
+
+# ── 6. 历史记录去重：同一路径覆盖重下只保留最新一条 ──
+dedup_hist = tmp / "douyin_history_dedup.json"
+saved_hist = douyin.HISTORY_FILE
+douyin.HISTORY_FILE = dedup_hist
+dedup_path = target / "陈杰森资本棋局" / "7300000000000000001_测试视频.mp4"
+douyin.add_history_item("测试视频", "视频", dedup_path, 1 * 1024 * 1024)
+douyin.add_history_item("测试视频", "视频", dedup_path, 2 * 1024 * 1024)
+records = json.loads(dedup_hist.read_text(encoding="utf-8"))
+assert len(records) == 1, f"同路径应去重为 1 条，实际 {len(records)} 条"
+assert records[0]["size"] == "2.00 MB", f"应保留最新记录，实际 {records[0]['size']}"
+douyin.HISTORY_FILE = saved_hist
+print("PASS 历史记录同路径去重，且保留最新一次")
 
 print("\nALL TESTS PASSED ✅")

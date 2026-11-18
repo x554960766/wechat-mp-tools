@@ -28,7 +28,7 @@ from backend.config import (
     get_proxies_dict, report_proxy_status, load_json, save_json
 )
 from backend.douyin_sign import sign_detail, sign_params, sign_secsdk_url
-from backend import nas_archive
+from backend import media_sync, nas_archive
 
 douyin_bp = Blueprint("douyin", __name__, url_prefix="/api/douyin")
 
@@ -167,7 +167,7 @@ def generate_verify_fp() -> str:
 
 
 def add_history_item(title: str, item_type: str, file_path: str, size_bytes: int, source: str = ""):
-    """保存下载记录到历史记录文件"""
+    """保存下载记录到历史记录文件（同一路径只保留最新一条，覆盖重下时更新记录）"""
     # 提取来源（优先使用传入的 source，否则从下载目录下的第一级子目录名提取）
     path_str = str(file_path)
     if not source:
@@ -180,6 +180,8 @@ def add_history_item(title: str, item_type: str, file_path: str, size_bytes: int
                 source = parts[0]
 
     history = load_json(HISTORY_FILE, [])
+    # 同一路径重复下载（覆盖重下）不应堆积重复记录，先移除旧条目再插到最前
+    history = [h for h in history if h.get("path") != path_str]
     history.insert(0, {
         "title": title,
         "type": item_type,
@@ -189,6 +191,12 @@ def add_history_item(title: str, item_type: str, file_path: str, size_bytes: int
         "time": time.strftime("%Y-%m-%d %H:%M:%S")
     })
     save_json(HISTORY_FILE, history[:150])
+    # 落盘后通知媒体服务扫描 douyin 根：否则新作品不进内容索引，
+    # 检索页永远停在上次手动扫描的数量（媒体服务缺席时 notify_scan 自己吞掉）。
+    try:
+        media_sync.notify_scan("抖音下载完成", root="douyin")
+    except Exception:  # noqa: BLE001 - 索引维护不能影响下载结果
+        pass
 
 
 # ── 断点续传进度记录 ──────────────────────────────────────
