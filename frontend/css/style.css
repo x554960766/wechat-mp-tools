@@ -2051,6 +2051,71 @@ body {
     outline: 2px dashed var(--primary-light);
     outline-offset: 4px;
 }
+/* 账号行下载入口：篇数输入 + 下载按钮 + 快手主页链接 + 状态提示 */
+.ms-account-download {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    margin-top: var(--spacing-sm);
+}
+.ms-account-download .ms-dl-limit {
+    width: 5.5rem;
+}
+.ms-account-download .ms-dl-link {
+    flex: 1 1 16rem;
+    min-width: 12rem;
+}
+.ms-account-download .form-hint {
+    flex: 1 1 100%;
+}
+/* 下载记录面板 */
+.ms-dl-log-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-sm);
+    max-height: 60vh;
+    overflow-y: auto;
+}
+.ms-dl-log-item {
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    background: var(--bg-card);
+    padding: var(--spacing-sm) var(--spacing-md);
+    cursor: pointer;
+}
+.ms-dl-log-item:hover {
+    background: var(--bg-card-hover);
+}
+.ms-dl-log-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 0.88rem;
+}
+.ms-dl-log-title {
+    flex: 1 1 auto;
+    font-weight: 600;
+}
+.ms-dl-log-count {
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+}
+.ms-dl-log-scan {
+    display: inline-flex;
+    align-items: center;
+}
+.ms-dl-log-date {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+}
+.ms-dl-log-body {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin-top: var(--spacing-sm);
+}
 .media-advanced {
     margin: var(--spacing-sm) 0 var(--spacing-md);
     border-top: 1px solid var(--border-color);
@@ -2749,8 +2814,51 @@ body {
 .files-dup-op {
     white-space: nowrap;
 }
+.files-stats-rows {
+    flex-wrap: wrap;
+}
+.files-badge-flagged {
+    border-color: var(--error, #e5484d);
+    color: var(--error, #e5484d);
+}
+.files-badge-reviewed {
+    border-color: var(--warning, #f0a020);
+    color: var(--warning, #f0a020);
+}
+.files-nsfw-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 10px;
+}
+.files-nsfw-card {
+    display: flex;
+    gap: 10px;
+    padding: 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    background: var(--bg-card, #fff);
+}
+.files-nsfw-card .files-thumb {
+    width: 96px;
+    height: 96px;
+    flex: 0 0 auto;
+}
+.files-nsfw-body {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+.files-nsfw-body .files-meta {
+    margin-top: 4px;
+}
+.files-nsfw-card .files-actions {
+    margin-top: 6px;
+    flex-wrap: wrap;
+}
 @media (max-width: 720px) {
     .files-grid {
+        grid-template-columns: 1fr;
+    }
+    .files-nsfw-grid {
         grid-template-columns: 1fr;
     }
 }

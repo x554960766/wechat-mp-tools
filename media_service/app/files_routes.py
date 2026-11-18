@@ -20,17 +20,23 @@ def list_files(
     ext: str | None = Query(None, description="扩展名过滤，如 jpg/mp4/txt"),
     kind: str | None = Query(None, description="文件类型过滤：image/text/video"),
     duplicates: str | None = Query(None, description="duplicates 只看重复，unique 只看唯一"),
+    nsfw: str | None = Query(None, description="NSFW 过滤：flagged 只看疑似敏感，unreviewed 只看未复核"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    """全库文件联合清单；每行附带该内容摘要的出现次数 ``dup_count``。"""
+    """全库文件联合清单；每行附带该内容摘要的出现次数 ``dup_count``。
+
+    图片行额外带 ``nsfw``（当前内容的有效结论，人工复核优先）；非图片为 ``None``。
+    """
     if duplicates not in (None, "duplicates", "unique"):
         raise HTTPException(422, "duplicates 只能是 duplicates/unique")
     if kind is not None and kind not in ("image", "text", "video"):
         raise HTTPException(422, "kind 只能是 image/text/video")
+    if nsfw not in (None, "flagged", "unreviewed"):
+        raise HTTPException(422, "nsfw 只能是 flagged/unreviewed")
     items, total = STORE.list_files(
         q=q, root=root, ext=ext, kind=kind,
-        duplicates=duplicates, limit=limit, offset=offset,
+        duplicates=duplicates, nsfw=nsfw, limit=limit, offset=offset,
     )
     return {"items": items, "total": total, "limit": limit, "offset": offset}
 

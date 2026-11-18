@@ -109,8 +109,38 @@ def test_invalid_params_are_explicit(tmp_path, monkeypatch):
     client, _ = _setup(tmp_path, monkeypatch)
     assert client.get("/api/files/list", params={"duplicates": "bogus"}).status_code == 422
     assert client.get("/api/files/list", params={"kind": "bogus"}).status_code == 422
+    assert client.get("/api/files/list", params={"nsfw": "bogus"}).status_code == 422
     assert client.get("/api/files/list", params={"limit": 0}).status_code == 422
     assert client.get("/api/files/list", params={"offset": -1}).status_code == 422
+
+
+def test_list_endpoint_attaches_and_filters_nsfw(tmp_path, monkeypatch):
+    """图片行携带有效 NSFW 结论，非图片恒为 None；flagged/unreviewed 过滤生效。"""
+    client, store = _setup(tmp_path, monkeypatch)
+    risky = b"risky-bytes"
+    clean = b"clean-bytes"
+    vec = np.zeros(512, dtype=np.float32)
+    vec[0] = 1.0
+    store.add_image("wx", "a/risky.png", risky, embedding=vec, size=30)
+    store.add_image("wx", "a/clean.png", clean, embedding=vec, size=20)
+    sha = hashlib.sha256(risky).hexdigest()
+    store.set_nsfw("wx", "a/risky.png", sha, score=0.91, label="nsfw", stage="first")
+    store.set_nsfw("wx", "a/clean.png", hashlib.sha256(clean).hexdigest(),
+                   score=0.1, label="safe", stage="first")
+
+    all_rows = client.get("/api/files/list").json()["items"]
+    by_path = {r["relpath"]: r for r in all_rows}
+    assert by_path["a/risky.png"]["nsfw"]["label"] == "nsfw"
+    assert by_path["a/clean.png"]["nsfw"]["label"] == "safe"
+    assert by_path["a/one.txt"]["nsfw"] is None
+
+    flagged = client.get("/api/files/list", params={"nsfw": "flagged"}).json()
+    assert flagged["total"] == 1
+    assert flagged["items"][0]["relpath"] == "a/risky.png"
+
+    stats = client.get("/api/files/stats").json()
+    assert stats["nsfw_flagged"] == 1
+    assert stats["nsfw_unreviewed"] == 1
 
 
 def _setup_deletable(tmp_path, monkeypatch, *, writable=True):

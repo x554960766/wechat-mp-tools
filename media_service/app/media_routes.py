@@ -9,7 +9,7 @@ from pydantic import BaseModel,Field,StrictInt,field_validator
 from starlette.concurrency import run_in_threadpool
 import re
 from urllib.parse import urlencode
-from . import config,contents,frames,media,encoder,review,search,thumbs
+from . import config,contents,frames,media,encoder,nsfw_scan,review,search,thumbs
 from .store import STORE
 from .jobs import JOBS
 
@@ -285,6 +285,53 @@ def nsfw_review(body:NsfwReviewRequest):
                    nsfw_type=nsfw_type,reviewed_by=reviewed_by,
                    reviewed_at=datetime.now(timezone.utc).isoformat())
     return {"nsfw":STORE.nsfw_summary(body.root,body.relpath),"stage":"second"}
+
+
+class NsfwScanRequest(BaseModel):
+    roots: list[str] = Field(default_factory=list)   # 空 = 全部媒体根
+    force: bool = False                              # False 只补未判定的，True 全部重检
+
+
+@router.get("/api/nsfw/status")
+def nsfw_status():
+    """发起全局检测前的口径：模型可用性 + 覆盖率 + 疑似/待复核计数。"""
+    data = {**nsfw_scan.available(), **STORE.nsfw_coverage()}
+    data["flagged"] = STORE.nsfw_flagged(limit=1, include_reviewed=True)["total"]
+    data["unreviewed"] = STORE.nsfw_flagged(limit=1, include_reviewed=False)["total"]
+    return data
+
+
+@router.post("/api/nsfw/scan", status_code=202)
+def nsfw_scan_post(body: NsfwScanRequest):
+    """发起全局 NSFW 检测：只补机器初筛，不重建索引、不做向量化。"""
+    for root_id in body.roots:
+        try: config.get_root(root_id)
+        except KeyError as exc: raise HTTPException(422, "未知媒体根") from exc
+    state = nsfw_scan.available()
+    if not state["model"]:
+        raise HTTPException(503, detail={"error": {"code": state["reason"],
+                                                  "message": "NSFW 模型未安装或检测已关闭，无法发起全局检测"}})
+    try:
+        item = JOBS.enqueue_nsfw(body.roots, body.force)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    return {"id": item["id"], "status": item["status"]}
+
+
+@router.get("/api/nsfw/scans/{job_id}")
+def nsfw_scan_get(job_id: str):
+    item = JOBS.get_job(job_id)
+    if item is None or item.get("kind") != "nsfw":
+        raise HTTPException(404, "NSFW 检测任务不存在")
+    return item
+
+
+@router.post("/api/nsfw/scans/{job_id}/cancel", status_code=202)
+def nsfw_scan_cancel(job_id: str):
+    item = JOBS.get_job(job_id)
+    if item is None or item.get("kind") != "nsfw":
+        raise HTTPException(404, "NSFW 检测任务不存在")
+    return JOBS.cancel(job_id)
 
 
 @router.post("/api/media/scan", status_code=202)

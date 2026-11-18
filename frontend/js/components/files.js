@@ -17,7 +17,13 @@ const FilesPage = {
     _viewerImages: [],
     _dupGroups: [],
     _dupTotal: 0,
+    _nsfwItems: [],
+    _nsfwTotal: 0,
     _roots: {},
+    _scanRootId: '',
+    _scanJobId: null,
+    _scanTimer: null,
+    _nsfwTimer: null,
 
     esc(value) {
         return String(value == null ? '' : value)
@@ -86,6 +92,15 @@ const FilesPage = {
             + ` ${pad(date.getHours())}:${pad(date.getMinutes())}`;
     },
 
+    /** 图片行的 NSFW 徽标：有效结论为 nsfw 时给出分数，safe 或无结论不显示，避免噪声。 */
+    _nsfwBadge(item) {
+        if (!item || item.kind !== 'image' || !item.nsfw || item.nsfw.label !== 'nsfw') return '';
+        const score = item.nsfw.score != null ? Number(item.nsfw.score).toFixed(2) : '—';
+        const reviewed = item.nsfw.stage === 'second';
+        const cls = reviewed ? 'files-badge files-badge-reviewed' : 'files-badge files-badge-flagged';
+        return `<span class="${cls}">${reviewed ? '已复核' : '疑似'} ${this.esc(score)}</span>`;
+    },
+
     render() {
         return `
             <div class="page-header">
@@ -140,6 +155,14 @@ const FilesPage = {
                             <option value="unique">只看唯一</option>
                         </select>
                     </div>
+                    <div class="form-group">
+                        <label class="form-label" for="files-nsfw">NSFW</label>
+                        <select class="form-input" id="files-nsfw">
+                            <option value="">全部</option>
+                            <option value="flagged">只看疑似敏感</option>
+                            <option value="unreviewed">只看待复核</option>
+                        </select>
+                    </div>
                     <div class="form-group" style="justify-content:flex-end;">
                         <div class="btn-group">
                             <button class="btn btn-primary" id="files-search">检索</button>
@@ -147,6 +170,24 @@ const FilesPage = {
                         </div>
                     </div>
                 </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header"><h3 class="card-title">索引管理</h3></div>
+                <div class="files-grid">
+                    <div class="form-group">
+                        <label class="form-label" for="files-scan-root">扫描来源</label>
+                        <select class="form-input" id="files-scan-root"><option value="">读取中…</option></select>
+                    </div>
+                    <div class="form-group" style="justify-content:flex-end;">
+                        <div class="btn-group">
+                            <button class="btn btn-secondary" id="files-scan">扫描新增</button>
+                            <button class="btn btn-secondary" id="files-rescan">重建索引</button>
+                        </div>
+                    </div>
+                </div>
+                <p class="form-hint">扫描会把所选媒体根里的文件重新入库。索引变化后，本页的概览、清单与重复组会自动刷新。</p>
+                <span class="form-hint" id="files-scan-state"></span>
             </div>
 
             <div class="card">
@@ -168,6 +209,19 @@ const FilesPage = {
                     <button class="btn btn-secondary btn-sm" id="files-load-dups">刷新重复组</button>
                 </div>
                 <div id="files-dups"><p class="form-hint">点击「刷新重复组」查看按内容摘要归并的重复文件。</p></div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h3 class="card-title">NSFW 复核</h3>
+                    <div class="btn-group">
+                        <button class="btn btn-secondary btn-sm" id="files-nsfw-scan">检测未判定</button>
+                        <button class="btn btn-secondary btn-sm" id="files-nsfw-rescan">全部重检</button>
+                        <button class="btn btn-secondary btn-sm" id="files-nsfw-load">加载待复核</button>
+                    </div>
+                </div>
+                <p class="form-hint" id="files-nsfw-state"></p>
+                <div id="files-nsfw-panel"><p class="form-hint">点击「加载待复核」查看仍判疑似敏感的图片，可直接确认敏感或标为误报。</p></div>
             </div>
         `;
     },
@@ -192,6 +246,8 @@ const FilesPage = {
         if (kindSel) kindSel.addEventListener('change', () => this._search());
         const dupSel = document.getElementById('files-dup');
         if (dupSel) dupSel.addEventListener('change', () => this._search());
+        const nsfwSel = document.getElementById('files-nsfw');
+        if (nsfwSel) nsfwSel.addEventListener('change', () => this._search());
         const extInput = document.getElementById('files-ext');
         if (extInput) extInput.addEventListener('keydown', (event) => {
             if (event.key === 'Enter') this._search();
@@ -210,29 +266,59 @@ const FilesPage = {
         const loadBtn = document.getElementById('files-load-dups');
         if (loadBtn) loadBtn.addEventListener('click', () => this._loadDuplicates());
 
+        const scanBtn = document.getElementById('files-scan');
+        if (scanBtn) scanBtn.addEventListener('click', () => this._triggerScan(false));
+        const rescanBtn = document.getElementById('files-rescan');
+        if (rescanBtn) rescanBtn.addEventListener('click', () => this._triggerScan(true));
+
+        const nsfwLoadBtn = document.getElementById('files-nsfw-load');
+        if (nsfwLoadBtn) nsfwLoadBtn.addEventListener('click', () => this._loadNsfw());
+        const nsfwScanBtn = document.getElementById('files-nsfw-scan');
+        if (nsfwScanBtn) nsfwScanBtn.addEventListener('click', () => this._triggerNsfwScan(false));
+        const nsfwRescanBtn = document.getElementById('files-nsfw-rescan');
+        if (nsfwRescanBtn) nsfwRescanBtn.addEventListener('click', () => this._triggerNsfwScan(true));
+        const nsfwEl = document.getElementById('files-nsfw-panel');
+        if (nsfwEl) nsfwEl.addEventListener('click', (event) => this._onNsfwClick(event));
+
         await this._loadRoots();
         // 根列表需先于清单与重复组就绪：删除按钮要按根的可写性渲染，否则首次渲染会漏掉按钮。
         await Promise.allSettled([this._loadStats(), this._loadList()]);
         await this._loadDuplicates();
+        await this._loadNsfw();
+        this._refreshNsfwStatus();
     },
 
     onShow() {
-        // 从别的页返回时刷新概览与清单：索引可能在别处被扫描更新过。
-        Promise.allSettled([this._loadStats(), this._loadList()]);
+        // 从别的页返回时刷新概览、清单与待复核：索引可能在别处被扫描或复核更新过。
+        Promise.allSettled([this._loadStats(), this._loadList(), this._loadNsfw()]);
+        this._refreshNsfwStatus();
     },
 
     destroy() {
+        if (this._scanTimer) {
+            clearInterval(this._scanTimer);
+            this._scanTimer = null;
+        }
+        if (this._nsfwTimer) {
+            clearInterval(this._nsfwTimer);
+            this._nsfwTimer = null;
+        }
         if (this._viewer) {
             this._viewer.close();
             this._viewer = null;
         }
         this._items = [];
         this._viewerImages = [];
+        this._nsfwItems = [];
+        this._nsfwTotal = 0;
+        this._scanJobId = null;
+        this._scanRootId = '';
     },
 
     async _loadRoots() {
         const sel = document.getElementById('files-root');
-        if (!sel) return;
+        const scanSel = document.getElementById('files-scan-root');
+        if (!sel || !scanSel) return;
         try {
             const data = await API.media.roots();
             const items = (data && data.items) || [];
@@ -240,12 +326,21 @@ const FilesPage = {
             items.forEach((root) => {
                 // 记录是否可写：删除按钮只对可写根开放，避免前端点了才被后端 403 拒绝。
                 this._roots[root.id] = { label: root.label || root.id, writable: !!root.writable };
-                const opt = document.createElement('option');
-                opt.value = root.id;
-                opt.textContent = root.label || root.id;
-                sel.appendChild(opt);
+                // 检索筛选与扫描来源共用同一份根列表，避免两处选项不一致。
+                [sel, scanSel].forEach((target) => {
+                    const opt = document.createElement('option');
+                    opt.value = root.id;
+                    opt.textContent = root.label || root.id;
+                    target.appendChild(opt);
+                });
             });
+            // 默认选中第一个根，省一次手动选择。
+            if (items.length && !this._scanRootId) {
+                this._scanRootId = items[0].id;
+                scanSel.value = this._scanRootId;
+            }
         } catch (err) {
+            if (scanSel) scanSel.innerHTML = '<option value="">读取失败</option>';
             // 根列表取不到不影响检索：留空即「全部根」，不必让用户卡在这。
             console.warn('加载媒体根失败：', err);
         }
@@ -266,6 +361,8 @@ const FilesPage = {
                 <div class="files-stats-rows">
                     <div class="files-stat"><span class="files-stat-value">${this.esc(s.total)}</span><span class="files-stat-label">已入库文件</span></div>
                     <div class="files-stat"><span class="files-stat-value">${this.esc(this._formatSize(s.biggest && s.biggest.size))}</span><span class="files-stat-label">最大文件</span></div>
+                    <div class="files-stat"><span class="files-stat-value">${this.esc(s.nsfw_flagged)}</span><span class="files-stat-label">疑似敏感</span></div>
+                    <div class="files-stat"><span class="files-stat-value">${this.esc(s.nsfw_unreviewed)}</span><span class="files-stat-label">待复核</span></div>
                 </div>
                 <div class="files-stats-block">
                     <div class="files-block-title">按类型</div>
@@ -293,6 +390,7 @@ const FilesPage = {
             ext: (document.getElementById('files-ext') || {}).value || undefined,
             kind: (document.getElementById('files-kind') || {}).value || undefined,
             duplicates: (document.getElementById('files-dup') || {}).value || undefined,
+            nsfw: (document.getElementById('files-nsfw') || {}).value || undefined,
             limit: this._limit,
             offset: this._page * this._limit,
         };
@@ -325,6 +423,7 @@ const FilesPage = {
             const dupBadge = Number(item.dup_count) > 1
                 ? `<span class="files-badge files-badge-dup">重复 ×${this.esc(item.dup_count)}</span>`
                 : `<span class="files-badge files-badge-ok">唯一</span>`;
+            const nsfwBadge = this._nsfwBadge(item);
             const thumb = item.kind === 'image'
                 ? `<img class="files-thumb" src="${this.esc(this._thumbUrl(item))}" loading="lazy" alt="">`
                 : `<span class="files-thumb files-thumb-icon">${this._kindIcon(item.kind)}</span>`;
@@ -351,7 +450,7 @@ const FilesPage = {
                             <span class="files-meta-item">大小：${this.esc(this._formatSize(item.size))}</span>
                             <span class="files-meta-item">摘要：${sha}</span>
                         </div>
-                        <div class="files-actions">${dupBadge}${actions}${delBtn}</div>
+                        <div class="files-actions">${dupBadge}${nsfwBadge}${actions}${delBtn}</div>
                     </div>
                 </div>`;
         }).join('');
@@ -361,8 +460,8 @@ const FilesPage = {
         const act = event.target.closest('[data-act]');
         if (!act) return;
         const index = Number(act.dataset.index);
-        if (act.dataset.act === 'view') this._openViewer(index);
-        else if (act.dataset.act === 'pano') this._openViewer(index, true);
+        if (act.dataset.act === 'view') this._openViewer(this._viewerImages, index);
+        else if (act.dataset.act === 'pano') this._openViewer(this._viewerImages, index, true);
         else if (act.dataset.act === 'delete') this._confirmDelete(act.dataset.root, act.dataset.relpath);
     },
 
@@ -389,15 +488,221 @@ const FilesPage = {
         }
     },
 
-    _openViewer(index, pano = false) {
-        const images = this._viewerImages;
-        if (!this._viewer || !images.length) return;
-        // 把当前图片集中的第 index 项映射到查看器序列：清单里的 index 是全类型行号，需换算。
-        const imageRow = this._items[index];
-        if (!imageRow) return;
-        let imageIndex = images.findIndex((image) => image.root === imageRow.root && image.relpath === imageRow.relpath);
-        if (imageIndex < 0) imageIndex = 0;
-        this._viewer.open(images, imageIndex, {});
+    // ── 手动加索引（扫描媒体根） ────────────────────────────
+    /** 提交一次扫描：rebuild=true 重建索引，false 只补新增与更新。 */
+    async _triggerScan(rebuild) {
+        const root = this._scanRootId || (document.getElementById('files-scan-root') || {}).value || '';
+        if (!root) {
+            Toast.error('请先选择要扫描的媒体根');
+            return;
+        }
+        const state = document.getElementById('files-scan-state');
+        if (state) state.textContent = '正在提交扫描…';
+        try {
+            const job = await API.media.scan(root, rebuild);
+            Toast.info('扫描任务已提交');
+            this._pollScan(job.id);
+        } catch (err) {
+            if (state) state.textContent = '';
+            Toast.error('扫描提交失败：' + (err.message || err));
+        }
+    },
+
+    /** 轮询扫描任务：完成后自动刷新概览、清单与重复组，避免用户手动刷新漏掉新入库文件。 */
+    _pollScan(jobId) {
+        if (this._scanTimer) clearInterval(this._scanTimer);
+        const tick = async () => {
+            const state = document.getElementById('files-scan-state');
+            try {
+                const job = await API.media.scanStatus(jobId);
+                if (!job) return;
+                if (state) {
+                    state.textContent = `扫描中：已处理 ${job.scanned || 0} 个文件${job.current ? '（' + job.current + '）' : ''}`;
+                }
+                if (['completed', 'partial', 'failed', 'cancelled', 'interrupted'].includes(job.status)) {
+                    if (this._scanTimer) { clearInterval(this._scanTimer); this._scanTimer = null; }
+                    if (state) {
+                        state.textContent = job.status === 'completed'
+                            ? `扫描完成：图片新增 ${job.indexed_new || 0}、更新 ${job.indexed_updated || 0}、未变 ${job.indexed_unchanged || 0}`
+                            : `扫描结束（${job.status}）`;
+                    }
+                    // 索引变了，三处数据一起刷新。
+                    await Promise.allSettled([this._loadStats(), this._loadList()]);
+                    await this._loadDuplicates();
+                }
+            } catch (err) {
+                if (this._scanTimer) { clearInterval(this._scanTimer); this._scanTimer = null; }
+                if (state) state.textContent = '扫描状态读取失败';
+            }
+        };
+        this._scanTimer = setInterval(tick, 1200);
+        tick();
+    },
+
+    // ── 全局 NSFW 检测 ──────────────────────────────────
+    /** 发起全局检测：只补机器初筛结论；force=true 重检全部（换模型/调阈值后用）。 */
+    async _triggerNsfwScan(force) {
+        const state = document.getElementById('files-nsfw-state');
+        const run = async () => {
+            try {
+                const job = await API.media.nsfwScan({ roots: [], force });
+                Toast.info('检测任务已提交');
+                this._pollNsfwScan(job.id);
+            } catch (err) {
+                if (state) state.textContent = '';
+                Toast.error('检测提交失败：' + (err.message || err));
+            }
+        };
+        if (force) {
+            // 全部重检会覆盖每张图的机器初筛结论，确认一次再动手。
+            Modal.confirm('全部重检',
+                '会对所有已入库图片重新跑 NSFW 模型，<strong>覆盖现有机器结论</strong>（人工复核结论保留）。继续吗？',
+                run);
+        } else {
+            run();
+        }
+    },
+
+    _pollNsfwScan(jobId) {
+        if (this._nsfwTimer) clearInterval(this._nsfwTimer);
+        const tick = async () => {
+            const state = document.getElementById('files-nsfw-state');
+            try {
+                const job = await API.media.nsfwScanStatus(jobId);
+                if (!job) return;
+                if (state) {
+                    state.textContent = `检测中：${job.scanned || 0}/${job.total || 0}，判敏感 ${job.flagged || 0}，失败 ${job.failed || 0}`;
+                }
+                if (['completed', 'partial', 'failed', 'cancelled', 'interrupted'].includes(job.status)) {
+                    if (this._nsfwTimer) { clearInterval(this._nsfwTimer); this._nsfwTimer = null; }
+                    const note = job.status === 'completed'
+                        ? `检测完成：打分 ${job.scored || 0}/${job.total || 0}，判敏感 ${job.flagged || 0}${job.skipped ? '，跳过 ' + job.skipped : ''}`
+                        : `检测结束（${job.status}）：打分 ${job.scored || 0}/${job.total || 0}`;
+                    if (state) state.textContent = note;
+                    Toast.info(note);
+                    // 新结论可能改变筛选结果与待复核列表，一并刷新。
+                    await Promise.allSettled([this._loadStats(), this._loadList(), this._loadNsfw()]);
+                }
+            } catch (err) {
+                if (this._nsfwTimer) { clearInterval(this._nsfwTimer); this._nsfwTimer = null; }
+                if (state) state.textContent = '检测状态读取失败';
+            }
+        };
+        this._nsfwTimer = setInterval(tick, 1200);
+        tick();
+    },
+
+    /** 读取覆盖率与模型可用性：未装模型时提前提示，避免点了按钮才发现不能跑。 */
+    async _refreshNsfwStatus() {
+        const state = document.getElementById('files-nsfw-state');
+        if (!state || this._nsfwTimer) return;   // 检测进行中时不覆盖轮询文案
+        try {
+            const data = await API.media.nsfwStatus({ showError: false });
+            if (!data) return;
+            if (!data.model) {
+                state.textContent = data.enabled
+                    ? 'NSFW 模型未安装（data/nsfw.onnx），无法发起检测'
+                    : 'NSFW 检测已关闭（AI_MEDIA_NSFW_SCAN=0）';
+            } else {
+                state.textContent = `已打分 ${data.scored || 0}/${data.total || 0}，待检 ${data.pending || 0}；疑似敏感 ${data.unreviewed || 0} 待复核`;
+            }
+        } catch {
+            // 状态读不到就不占位，面板里已有各自的加载提示。
+        }
+    },
+
+    // ── NSFW 复核 ───────────────────────────────────────
+    /** 加载仍判疑似、且未被人工复核的图片；second 级结论会使其出列。 */
+    async _loadNsfw() {
+        const wrap = document.getElementById('files-nsfw-panel');
+        if (!wrap) return;
+        wrap.innerHTML = '<p class="form-hint">加载中…</p>';
+        try {
+            const data = await API.media.nsfwFlagged({ include_reviewed: false, limit: 60 }, { showError: false });
+            this._nsfwItems = (data && data.items) || [];
+            this._nsfwTotal = (data && data.total) || this._nsfwItems.length;
+            this._renderNsfw();
+        } catch (err) {
+            wrap.innerHTML = `<p class="form-hint" style="color:var(--error)">待复核加载失败：${this.esc(err.message || err)}</p>`;
+        }
+    },
+
+    _renderNsfw() {
+        const wrap = document.getElementById('files-nsfw-panel');
+        if (!wrap) return;
+        if (!this._nsfwItems.length) {
+            wrap.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">🛡️</div>
+                    <h3 class="empty-state-title">没有待复核的图片</h3>
+                    <p class="empty-state-desc">当前索引里没有仍判疑似敏感、且未被人工复核过的图片。</p>
+                </div>`;
+            return;
+        }
+        wrap.innerHTML = `<p class="form-hint">待复核 ${this.esc(this._nsfwTotal)} 张（按分数从高到低，可直接确认敏感或标为误报）</p>
+            <div class="files-nsfw-grid">${this._nsfwItems.map((item, index) => `
+                <div class="files-nsfw-card">
+                    <img class="files-thumb" src="${this.esc(this._thumbUrl(item))}" loading="lazy" alt="">
+                    <div class="files-nsfw-body">
+                        <div class="files-path" title="${this.esc(item.relpath)}">${this.esc(item.relpath)}</div>
+                        <div class="files-meta">
+                            <span class="files-badge files-badge-flagged">疑似 ${this.esc(Number(item.score != null ? item.score : 0).toFixed(2))}</span>
+                            <span class="files-meta-item">根：${this.esc(item.root)}</span>
+                        </div>
+                    </div>
+                    <div class="files-actions">
+                        <button class="btn btn-secondary btn-sm" data-act="view" data-index="${index}">普通查看</button>
+                        <button class="btn btn-secondary btn-sm" data-act="pano" data-index="${index}">VR 全景</button>
+                        <button class="btn btn-secondary btn-sm" data-act="review-nsfw" data-root="${this.esc(item.root)}" data-relpath="${this.esc(item.relpath)}">确认敏感</button>
+                        <button class="btn btn-secondary btn-sm" data-act="review-safe" data-root="${this.esc(item.root)}" data-relpath="${this.esc(item.relpath)}">标为误报</button>
+                    </div>
+                </div>`).join('')}</div>`;
+    },
+
+    _onNsfwClick(event) {
+        const act = event.target.closest('[data-act]');
+        if (!act) return;
+        const index = Number(act.dataset.index);
+        if (act.dataset.act === 'view') this._openViewer(this._nsfwItems, index);
+        else if (act.dataset.act === 'pano') this._openViewer(this._nsfwItems, index, true);
+        else if (act.dataset.act === 'review-nsfw' || act.dataset.act === 'review-safe') {
+            this._reviewNsfw(act.dataset.root, act.dataset.relpath,
+                act.dataset.act === 'review-nsfw' ? 'nsfw' : 'safe');
+        }
+    },
+
+    /** 复核写 second 级结论，图片随即从「待复核」出列；清单徽标、概览计数同步刷新。 */
+    async _reviewNsfw(root, relpath, label) {
+        try {
+            await API.media.nsfwReview({ root, relpath, label, reviewed_by: '本机' }, { showError: false });
+            Toast.success(`已${label === 'nsfw' ? '确认敏感' : '标为误报'}：${root} / ${relpath}`);
+            await Promise.allSettled([this._loadStats(), this._loadList(), this._loadNsfw()]);
+        } catch (err) {
+            Toast.error('复核失败：' + (err.message || err));
+        }
+    },
+
+    /** 打开查看器。images 显式传入，使清单与 NSFW 待复核两处能各自携带自己的图片集合。 */
+    _openViewer(images, index, pano = false) {
+        if (!this._viewer || !images || !images.length) return;
+        // index 是传入集合的行号；用 root/relpath 定位，避免两处集合行号不一致时选错图。
+        let imageIndex = Number(index) || 0;
+        const row = images[imageIndex];
+        if (row) {
+            const found = images.findIndex((image) => image.root === row.root && image.relpath === row.relpath);
+            if (found >= 0) imageIndex = found;
+        }
+        this._viewer.open(images, imageIndex, {
+            // 查看器内可直接复核：图片行的 nsfw 结论来自后端有效判定，复核写 second 级结论。
+            getNsfw: (image) => image.nsfw || null,
+            review: async (image, label) => {
+                const data = await API.media.nsfwReview({
+                    root: image.root, relpath: image.relpath, label, reviewed_by: '本机',
+                });
+                image.nsfw = data.nsfw;
+                await Promise.allSettled([this._loadStats(), this._loadList(), this._loadNsfw()]);
+            },
+        });
         if (pano) this._viewer.panorama();
     },
 
@@ -418,6 +723,7 @@ const FilesPage = {
         const ext = document.getElementById('files-ext'); if (ext) ext.value = '';
         const kind = document.getElementById('files-kind'); if (kind) kind.value = '';
         const dup = document.getElementById('files-dup'); if (dup) dup.value = '';
+        const nsfw = document.getElementById('files-nsfw'); if (nsfw) nsfw.value = '';
         this._search();
     },
 

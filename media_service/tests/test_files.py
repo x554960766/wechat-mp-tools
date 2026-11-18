@@ -179,3 +179,63 @@ def test_delete_file_does_not_touch_unrelated_duplicates(tmp_path, monkeypatch):
     assert stats["total"] == 2
     assert stats["duplicate_groups"] == 1
     assert stats["duplicate_files"] == 2
+
+
+def _flag(store, root, relpath, data, *, score, label="nsfw", stage="first", reviewed_by=None):
+    """给一张已入库图片写一条 NSFW 判定（直接落库，不经扫描/模型）。"""
+    store.set_nsfw(root, relpath, _sha(data), score=score, label=label,
+                   stage=stage, reviewed_by=reviewed_by)
+
+
+def test_list_files_attaches_effective_nsfw_and_filters(tmp_path, monkeypatch):
+    """图片行附带当前内容的有效 NSFW 结论；过滤只看疑似敏感，且非图片恒为 None。"""
+    root = tmp_path / "wx"
+    root.mkdir()
+    store = _store(tmp_path, monkeypatch, [{"id": "wx", "type": "local", "path": str(root), "writable": True}])
+    risky = b"risky-bytes"
+    clean = b"clean-bytes"
+    _img(store, "wx", "risky/a.png", risky, size=50)
+    _img(store, "wx", "clean/b.png", clean, size=40)
+    store.sync_standalone_texts([
+        {"root": "wx", "relpath": "risky/note.txt", "content_sha256": _sha(b"t"),
+         "kind": "txt", "title": "t", "body": "t"},
+    ])
+    _flag(store, "wx", "risky/a.png", risky, score=0.91)
+    _flag(store, "wx", "clean/b.png", clean, score=0.12, label="safe")
+
+    rows, _ = store.list_files()
+    by_path = {r["relpath"]: r for r in rows}
+    assert by_path["risky/a.png"]["nsfw"]["label"] == "nsfw"
+    assert by_path["risky/a.png"]["nsfw"]["score"] == 0.91
+    assert by_path["clean/b.png"]["nsfw"]["label"] == "safe"
+    # 文本不是图片，即使同名内容也不会挂 NSFW 结论
+    assert by_path["risky/note.txt"]["nsfw"] is None
+
+    flagged, total_flagged = store.list_files(nsfw="flagged")
+    assert total_flagged == 1
+    assert [r["relpath"] for r in flagged] == ["risky/a.png"]
+
+    unreviewed, total_unreviewed = store.list_files(nsfw="unreviewed")
+    assert total_unreviewed == 1
+    assert [r["relpath"] for r in unreviewed] == ["risky/a.png"]
+
+    # 人工复核为误报后，该文件从疑似列表消失
+    _flag(store, "wx", "risky/a.png", risky, score=0.91, stage="second", label="safe", reviewed_by="本机")
+    assert store.list_files(nsfw="flagged")[1] == 0
+
+
+def test_files_stats_counts_nsfw_flagged_and_unreviewed(tmp_path, monkeypatch):
+    root = tmp_path / "wx"
+    root.mkdir()
+    store = _store(tmp_path, monkeypatch, [{"id": "wx", "type": "local", "path": str(root), "writable": True}])
+    a = b"a-bytes"
+    b = b"b-bytes"
+    _img(store, "wx", "a/one.png", a)
+    _img(store, "wx", "a/two.png", b)
+    _flag(store, "wx", "a/one.png", a, score=0.9, stage="first")
+    _flag(store, "wx", "a/two.png", b, score=0.8, stage="second", label="nsfw", reviewed_by="本机")
+
+    stats = store.files_stats()
+    assert stats["nsfw_flagged"] == 2
+    assert stats["nsfw_unreviewed"] == 1
+

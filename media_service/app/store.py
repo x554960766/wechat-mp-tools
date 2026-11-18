@@ -557,6 +557,46 @@ class Store:
         return {"items": [dict(row) for row in rows], "total": int(total), "limit": limit,
                 "offset": offset}
 
+    # ---- 全局 NSFW 检测候选 ------------------------------------------------
+    # 「当前内容已有机器初筛结论」的判定与 nsfw_summary / nsfw_flagged 同口径：
+    # 摘要一致、kind=image、ts_seconds=0.0 的 first 行。人工 second 行不参与——
+    # 复核过的图片仍可能缺机器分数，重检时照常补 first，不会覆盖人工结论。
+    _NSFW_FIRST_OK = (
+        "EXISTS (SELECT 1 FROM nsfw_results n"
+        " WHERE n.root=i.root AND n.relpath=i.relpath AND n.content_sha256=i.content_sha256"
+        " AND n.kind='image' AND n.ts_seconds=0.0 AND n.stage='first' AND n.status='ok')")
+
+    def _nsfw_target_where(self, roots):
+        where = ["i.state='ready'", "i.content_sha256 IS NOT NULL"]
+        args: list = []
+        if roots:
+            where.append("i.root IN (" + ",".join("?" * len(roots)) + ")")
+            args.extend(roots)
+        return where, args
+
+    def nsfw_targets(self, roots=None, *, force=False):
+        """全局检测要处理的图片：默认只挑还没有机器结论的，force 时全部就绪图片。"""
+        where, args = self._nsfw_target_where(roots)
+        if not force:
+            where.append("NOT " + self._NSFW_FIRST_OK)
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT i.root,i.relpath,i.content_sha256,i.content_version FROM images i"
+                " WHERE " + " AND ".join(where) + " ORDER BY i.root,i.relpath", args).fetchall()
+        return [dict(row) for row in rows]
+
+    def nsfw_coverage(self, roots=None):
+        """检测覆盖率：库里有多少就绪图片、其中多少张已有当前内容的机器结论。"""
+        where, args = self._nsfw_target_where(roots)
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT COUNT(*) AS total,"
+                " COALESCE(SUM(CASE WHEN " + self._NSFW_FIRST_OK + " THEN 1 ELSE 0 END),0) AS scored"
+                " FROM images i WHERE " + " AND ".join(where), args).fetchone()
+        total = int(row["total"] or 0)
+        scored = int(row["scored"] or 0)
+        return {"total": total, "scored": scored, "pending": total - scored}
+
     # ---- 视频代表帧 -------------------------------------------------------
     def video_record(self, root, relpath):
         """某个视频已入库的抽帧记录；扫描时用它的内容摘要判断是否可跳过。"""
@@ -990,17 +1030,36 @@ class Store:
         "SELECT 'video', root, video_relpath, NULL, NULL, content_sha256, NULL FROM videos"
     )
 
+    # 文件的有效 NSFW 结论（人工复核 second 优先，其次机器初筛 first），与
+    # nsfw_summary 口径一致。文件清单按 (root, relpath, content_sha256) 挂这条
+    # 子查询，让「当前内容版本」的结论跟着文件走；内容版本已变时旧结论自然不匹配。
+    _NSFW_EFFECTIVE = (
+        "SELECT n2.root, n2.relpath, n2.content_sha256, n2.score, n2.label, n2.status,"
+        " n2.stage, n2.nsfw_type, n2.reviewed_by, n2.reviewed_at"
+        " FROM nsfw_results n2 WHERE n2.kind='image' AND n2.ts_seconds=0.0"
+        " AND n2.id=(SELECT n3.id FROM nsfw_results n3"
+        "   WHERE n3.root=n2.root AND n3.relpath=n2.relpath"
+        "     AND n3.content_sha256=n2.content_sha256"
+        "     AND n3.kind='image' AND n3.ts_seconds=0.0"
+        "   ORDER BY (n3.stage='second') DESC, n3.id DESC LIMIT 1)"
+    )
+
     def list_files(self, *, q=None, root=None, ext=None, kind=None,
-                   duplicates=None, limit=50, offset=0):
+                   duplicates=None, nsfw=None, limit=50, offset=0):
         """全库文件联合清单；支持关键词/根/扩展名/类型筛选，可只看重复或唯一。
 
         ``duplicates``：``"duplicates"`` 只返回出现次数 > 1 的文件，``"unique"`` 只返回
         唯一文件，``None`` 不筛。每行带 ``dup_count``（该内容摘要在全库的出现次数）。
+        ``nsfw``：``"flagged"`` 只看仍判疑似敏感的图片，``"unreviewed"`` 只看其中未复核的，
+        ``None`` 不筛。图片行额外带 ``nsfw``（当前内容的有效结论，结构同 ``nsfw_summary``，
+        非图片恒为 None）。
         返回 (rows, total)，按大小降序（无大小记录排在末尾）。
         """
         union = self._FILE_UNION
         base = (
             f"FROM ({union}) f "
+            f"LEFT JOIN ({self._NSFW_EFFECTIVE}) n ON n.root=f.root AND n.relpath=f.relpath "
+            f"AND n.content_sha256 IS f.content_sha256 "
             "LEFT JOIN (SELECT content_sha256 AS sha, COUNT(*) AS dup_count "
             f"FROM ({union}) GROUP BY content_sha256) d ON d.sha = f.content_sha256"
         )
@@ -1021,16 +1080,38 @@ class Store:
             filters.append("d.dup_count > 1")
         elif duplicates == "unique":
             filters.append("(d.dup_count IS NULL OR d.dup_count <= 1)")
+        if nsfw == "flagged":
+            filters.append("n.label='nsfw' AND n.status='ok'")
+        elif nsfw == "unreviewed":
+            filters.append("n.label='nsfw' AND n.status='ok' AND n.reviewed_by IS NULL")
         clause = (" WHERE " + " AND ".join(filters)) if filters else ""
         with self.lock:
             total = int(self.conn.execute(f"SELECT COUNT(*) {base}{clause}", args).fetchone()[0])
             rows = self.conn.execute(
                 "SELECT f.kind, f.root, f.relpath, f.size, f.mtime, f.content_sha256, "
-                f"f.content_version, COALESCE(d.dup_count, 1) AS dup_count {base}{clause} "
+                "f.content_version, COALESCE(d.dup_count, 1) AS dup_count, "
+                "n.score AS nsfw_score, n.label AS nsfw_label, n.status AS nsfw_status, "
+                "n.stage AS nsfw_stage, n.nsfw_type AS nsfw_type, "
+                "n.reviewed_by AS nsfw_reviewed_by, n.reviewed_at AS nsfw_reviewed_at "
+                f"{base}{clause} "
                 "ORDER BY (f.size IS NULL), f.size DESC, f.root, f.relpath LIMIT ? OFFSET ?",
                 [*args, int(limit), int(offset)],
             ).fetchall()
-        return [dict(row) for row in rows], total
+        out = []
+        for row in rows:
+            item = dict(row)
+            item["nsfw"] = (
+                {
+                    "score": row["nsfw_score"], "label": row["nsfw_label"],
+                    "status": row["nsfw_status"], "stage": row["nsfw_stage"],
+                    "nsfw_type": row["nsfw_type"], "reviewed_by": row["nsfw_reviewed_by"],
+                    "reviewed_at": row["nsfw_reviewed_at"],
+                }
+                if item.get("kind") == "image" and row["nsfw_label"] is not None
+                else None
+            )
+            out.append(item)
+        return out, total
 
     def duplicate_groups(self, *, min_count=2, limit=50, offset=0, members=5):
         """按内容摘要归组，只返回出现次数 ≥ min_count 的重复组。
@@ -1082,8 +1163,12 @@ class Store:
         return [dict(row) for row in rows]
 
     def files_stats(self):
-        """文件清单概览：总量、按类型/根分布、重复组数与涉及文件数、最大文件。"""
+        """文件清单概览：总量、按类型/根分布、重复组数与涉及文件数、最大文件、NSFW 计数。"""
         union = self._FILE_UNION
+        nsfw_join = (
+            f"LEFT JOIN ({self._NSFW_EFFECTIVE}) n ON n.root=f.root AND n.relpath=f.relpath "
+            f"AND n.content_sha256 IS f.content_sha256"
+        )
         with self.lock:
             total = int(self.conn.execute(f"SELECT COUNT(*) FROM ({union})").fetchone()[0])
             kinds = [dict(r) for r in self.conn.execute(
@@ -1097,6 +1182,13 @@ class Store:
                 f"SELECT COUNT(*) FROM (SELECT content_sha256 FROM ({union}) WHERE content_sha256 IS NOT NULL "
                 f"GROUP BY content_sha256 HAVING COUNT(*) > 1) g "
                 f"JOIN ({union}) f ON f.content_sha256 = g.content_sha256").fetchone()[0])
+            # NSFW 计数同样只认「当前内容版本的有效结论」，与列表角标口径一致。
+            nsfw_flagged = int(self.conn.execute(
+                f"SELECT COUNT(*) FROM ({union}) f {nsfw_join} "
+                "WHERE n.label='nsfw' AND n.status='ok'").fetchone()[0])
+            nsfw_unreviewed = int(self.conn.execute(
+                f"SELECT COUNT(*) FROM ({union}) f {nsfw_join} "
+                "WHERE n.label='nsfw' AND n.status='ok' AND n.reviewed_by IS NULL").fetchone()[0])
             biggest = self.conn.execute(
                 f"SELECT root, relpath, size FROM ({union}) "
                 "ORDER BY (size IS NULL), size DESC LIMIT 1").fetchone()
@@ -1106,6 +1198,8 @@ class Store:
             "roots": roots,
             "duplicate_groups": duplicate_groups,
             "duplicate_files": duplicate_files,
+            "nsfw_flagged": nsfw_flagged,
+            "nsfw_unreviewed": nsfw_unreviewed,
             "biggest": dict(biggest) if biggest else None,
         }
 

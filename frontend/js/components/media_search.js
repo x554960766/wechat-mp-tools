@@ -22,6 +22,11 @@ const MediaSearchPage = {
     _nsfwOnly: false,
     _images: [],
     _viewerCtrl: null,
+    _archivePlatforms: [],
+    _downloadTimer: null,
+    _downloadTaskId: '',
+    _downloadLog: [],
+    _logTimer: null,
 
     render() {
         return `
@@ -68,6 +73,14 @@ const MediaSearchPage = {
                     <div class="form-group">
                         <label class="form-label" for="ms-account">账号 / UP主</label>
                         <select class="form-input" id="ms-account"><option value="">全部账号</option></select>
+                        <div class="ms-account-download" id="ms-account-download" hidden>
+                            <input type="number" class="form-input ms-dl-limit" id="ms-dl-limit"
+                                   min="1" max="50" step="1" value="10" title="下载篇数，1–50">
+                            <button class="btn btn-primary btn-sm" id="ms-dl-account" type="button">下载该账号</button>
+                            <input type="url" class="form-input ms-dl-link" id="ms-dl-link"
+                                   placeholder="或贴快手主页链接" hidden>
+                            <span class="form-hint" id="ms-dl-hint"></span>
+                        </div>
                     </div>
                     <div class="form-group">
                         <label class="form-label" for="ms-root">媒体来源（扫描用）</label>
@@ -91,6 +104,8 @@ const MediaSearchPage = {
                         <button class="btn btn-secondary btn-sm" id="ms-tag-rename"
                                 title="整体改名选中的标签；新名字已存在时两边合并成一个标签" hidden>改名</button>
                         <span class="form-hint" id="ms-scan-state"></span>
+                        <button class="btn btn-secondary btn-sm" id="ms-download-log"
+                                type="button" title="查看本机按账号下载的历史记录">下载记录</button>
                         <button class="btn btn-secondary btn-sm" id="ms-scan">扫描选中来源</button>
                     </span>
                 </div>
@@ -160,9 +175,18 @@ const MediaSearchPage = {
         if (account) {
             account.addEventListener('change', () => {
                 this._account = account.value;
+                this.updateDownloadEntry();
                 this.search(true);
             });
         }
+        const dlAccount = document.getElementById('ms-dl-account');
+        if (dlAccount) dlAccount.addEventListener('click', () => this.startAccountDownload());
+        const dlLimit = document.getElementById('ms-dl-limit');
+        if (dlLimit) dlLimit.addEventListener('change', () => this.updateDownloadEntry());
+        const dlLink = document.getElementById('ms-dl-link');
+        if (dlLink) dlLink.addEventListener('input', () => this.updateDownloadEntry());
+        const downloadLog = document.getElementById('ms-download-log');
+        if (downloadLog) downloadLog.addEventListener('click', () => this.openDownloadLog());
         const imageGo = document.getElementById('ms-image-go');
         if (imageGo) imageGo.addEventListener('click', () => this.imageSearch());
         const imageInput = document.getElementById('ms-image');
@@ -176,6 +200,8 @@ const MediaSearchPage = {
         const imageUrlGo = document.getElementById('ms-image-url-go');
         if (imageUrlGo) imageUrlGo.addEventListener('click', () => this.imageSearch());
         this.bindImageDrop();
+        // 先取归档平台元数据，账号行的下载门控依赖它；失败也继续，只是下载按钮禁用。
+        await this.loadArchivePlatforms();
         await this.loadFacets();
         await this.loadRoots();
         this.loadTagFilter();
@@ -186,6 +212,10 @@ const MediaSearchPage = {
     destroy() {
         clearInterval(this._scanTimer);
         this._scanTimer = null;
+        clearInterval(this._downloadTimer);
+        this._downloadTimer = null;
+        clearInterval(this._logTimer);
+        this._logTimer = null;
         this.closeViewer();
         this.detachKeys();
     },
@@ -242,6 +272,241 @@ const MediaSearchPage = {
         }));
         select.innerHTML = options.join('');
         if (this._account) select.value = this._account;
+        this.updateDownloadEntry();
+    },
+
+    // ── 账号级下载入口（复用 wmp 的 /api/archive/*）────
+    /**
+     * 下载执行全部在 wmp 侧，本页只做触发与展示：账号行提供入口，
+     * 门控按 wmp 实际支持的平台（/api/archive/platforms 的 enabled）决定。
+     */
+    async loadArchivePlatforms() {
+        try {
+            const data = await API.archive.platforms();
+            this._archivePlatforms = (data && data.platforms) || [];
+        } catch (err) {
+            // 服务还是旧进程、/api/archive 未注册时拿到 404，下载入口直接禁用。
+            this._archivePlatforms = [];
+        }
+        this.updateDownloadEntry();
+    },
+
+    archivePlatform(platformId) {
+        return this._archivePlatforms.find((p) => p.id === platformId) || null;
+    },
+
+    /** 账号行下载入口的门控：选中账号且平台受支持才显示，否则禁用并给原因。 */
+    updateDownloadEntry() {
+        const box = document.getElementById('ms-account-download');
+        if (!box) return;
+        const account = this._account;
+        const platform = this._platform;
+        box.hidden = !account || !platform;
+        if (box.hidden) return;
+
+        const meta = this.archivePlatform(platform);
+        const support = Boolean(meta && meta.enabled !== false);
+        const btn = document.getElementById('ms-dl-account');
+        const hint = document.getElementById('ms-dl-hint');
+        const linkInput = document.getElementById('ms-dl-link');
+
+        if (btn) {
+            btn.disabled = !support;
+            btn.textContent = '下载该账号';
+        }
+        // 只有支持贴链接的平台（快手）才显示主页链接输入，其余平台保持隐藏。
+        if (linkInput) linkInput.hidden = !(meta && meta.allow_link);
+        if (hint) {
+            hint.textContent = support
+                ? (meta.note || '')
+                : '该平台暂不支持按账号下载，请到对应采集页操作';
+        }
+    },
+
+    /** 把素材检索的账号名解析成 wmp 收藏账号的 id / 主页链接。 */
+    async resolveAccount(platform, accountName) {
+        const data = await API.archive.accounts(platform);
+        const rows = (data && data.accounts) || [];
+        const wanted = (accountName || '').trim().toLowerCase();
+        return rows.find((a) => (a.name || '').trim().toLowerCase() === wanted) || null;
+    },
+
+    async startAccountDownload() {
+        const accountName = this._account;
+        const platform = this._platform;
+        if (!accountName || !platform) return;
+        const meta = this.archivePlatform(platform);
+        if (!meta || meta.enabled === false) {
+            Toast.error('该平台暂不支持按账号下载，请到对应采集页操作');
+            return;
+        }
+        const limit = Number(document.getElementById('ms-dl-limit')?.value || 10);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+            Toast.error('篇数需在 1..50');
+            return;
+        }
+        const link = (document.getElementById('ms-dl-link')?.value || '').trim();
+
+        try {
+            const hit = await this.resolveAccount(platform, accountName);
+            const accountId = hit ? (hit.id || '') : '';
+            // 解析不到且平台不支持贴链接时，直接提示到采集页，不发起注定失败的下载。
+            if (!accountId && !link) {
+                Toast.error(meta.allow_link
+                    ? '收藏列表里没有该账号，请粘贴作者主页链接'
+                    : '收藏列表里没有该账号，请到对应采集页操作');
+                return;
+            }
+            const started = await API.archive.start({
+                platform,
+                account_id: accountId,
+                account_name: accountId ? (hit.name || accountName) : (link || ''),
+                limit,
+                profile_url: meta.allow_link ? link : '',
+            });
+            Toast.info(`已提交${meta.name || platform}下载任务`);
+            this.pollArchiveDownload(started.task_id, platform);
+        } catch (err) {
+            Toast.error(`下载启动失败: ${err.message}`);
+        }
+    },
+
+    pollArchiveDownload(taskId, platform) {
+        clearInterval(this._downloadTimer);
+        this._downloadTaskId = taskId;
+        const tick = async () => {
+            let task;
+            try {
+                task = await API.archive.status(platform, taskId);
+            } catch (err) {
+                clearInterval(this._downloadTimer);
+                this._downloadTimer = null;
+                this._downloadTaskId = '';
+                Toast.error(`下载状态读取失败: ${err.message}`);
+                return;
+            }
+            const total = task.total || task.requested || 0;
+            const done = (task.completed || 0) + (task.failed || 0);
+            const label = {
+                idle: '启动中', running: '下载中', completed: '已完成',
+                failed: '失败', cancelled: '已取消',
+            }[task.status] || task.status;
+            const hint = document.getElementById('ms-dl-hint');
+            if (hint) {
+                hint.textContent = `${label}　${done}/${total}　成功 ${task.completed || 0}　失败 ${task.failed || 0}`
+                    + `${task.skipped ? `　跳过 ${task.skipped}` : ''}${task.current ? '　' + task.current : ''}`;
+            }
+            if (['completed', 'failed', 'cancelled'].includes(task.status)) {
+                clearInterval(this._downloadTimer);
+                this._downloadTimer = null;
+                this._downloadTaskId = '';
+                // 下载终态后本机索引可能已更新，重拉筛选与统计，让新内容立刻可检索。
+                this.loadFacets();
+                this.loadStats();
+                this.search(false);
+                this.refreshDownloadLog(true);
+            }
+        };
+        this._downloadTimer = setInterval(tick, 1200);
+        tick();
+    },
+
+    // ── 下载记录面板 ─────────────────────────────────
+    async openDownloadLog() {
+        Modal.open({
+            title: '<span>下载记录</span>',
+            content: `
+                <div class="ms-dl-log-note form-hint">
+                    按账号发起的下载会记录在这里（最近 200 条 / 7 天）。点击任一条可展开进度与扫描结果。
+                </div>
+                <div id="ms-dl-log-list" class="ms-dl-log-list">正在读取…</div>`,
+            footer: `<button class="btn btn-secondary" onclick="MediaSearchPage.closeDownloadLog()">关闭</button>`,
+        });
+        await this.refreshDownloadLog();
+        this.pollDownloadLog();
+    },
+
+    closeDownloadLog() {
+        clearInterval(this._logTimer);
+        this._logTimer = null;
+        if (typeof Modal !== 'undefined' && Modal.close) Modal.close();
+    },
+
+    async refreshDownloadLog(silent) {
+        const list = document.getElementById('ms-dl-log-list');
+        if (!list) return;
+        if (!silent) list.innerHTML = '<div class="form-hint">正在读取…</div>';
+        try {
+            const data = await API.archive.tasks();
+            this._downloadLog = (data && data.tasks) || [];
+        } catch (err) {
+            this._downloadLog = [];
+            list.innerHTML = `<div class="form-hint">下载记录读取失败：${this.esc(err.message || '')}</div>`;
+            return;
+        }
+        this.renderDownloadLog(list);
+    },
+
+    renderDownloadLog(list) {
+        const rows = this._downloadLog;
+        if (!rows.length) {
+            list.innerHTML = '<div class="form-hint">还没有按账号下载的记录。</div>';
+            return;
+        }
+        const statusLabel = {
+            idle: '启动中', running: '下载中', completed: '已完成',
+            failed: '失败', cancelled: '已取消',
+        };
+        list.innerHTML = rows.map((t) => {
+            const scan = t.scan_error
+                ? '<span class="media-badge is-warn">扫描异常</span>'
+                : (t.scan_job_id ? '<span class="media-badge">已扫描</span>' : '<span class="form-hint">未扫描</span>');
+            return `
+                <div class="ms-dl-log-item" data-task="${this.esc(t.task_id)}">
+                    <div class="ms-dl-log-head">
+                        <span class="ms-dl-log-status">${this.esc(statusLabel[t.status] || t.status)}</span>
+                        <span class="ms-dl-log-title">${this.esc(t.platform_label || t.platform)} · ${this.esc(t.account_name || t.account_id || '未知账号')}</span>
+                        <span class="ms-dl-log-count">${Number(t.completed || 0)}/${Number(t.requested || 0)}</span>
+                        <span class="ms-dl-log-scan">${scan}</span>
+                        <span class="ms-dl-log-date">${this.esc(this.fmtTs(t.created_at))}</span>
+                    </div>
+                    <div class="ms-dl-log-body" hidden>
+                        <div class="form-hint">请求 ${Number(t.requested || 0)} 篇 · 成功 ${Number(t.completed || 0)} · 失败 ${Number(t.failed || 0)}${Number(t.skipped) ? ` · 跳过 ${t.skipped}` : ''}${t.current ? ' · 当前：' + this.esc(t.current) : ''}</div>
+                        <div class="form-hint">媒体根：${this.esc(t.root || '')}</div>
+                        ${t.scan_job_id ? `<div class="form-hint">扫描任务：${this.esc(t.scan_job_id)}</div>` : ''}
+                        ${t.scan_error ? `<div class="form-hint">扫描错误：${this.esc(t.scan_error)}</div>` : ''}
+                        ${t.note ? `<div class="form-hint">备注：${this.esc(t.note)}</div>` : ''}
+                    </div>
+                </div>`;
+        }).join('');
+        list.querySelectorAll('.ms-dl-log-item').forEach((item) => {
+            item.addEventListener('click', () => {
+                const body = item.querySelector('.ms-dl-log-body');
+                if (body) body.hidden = !body.hidden;
+            });
+        });
+    },
+
+    pollDownloadLog() {
+        clearInterval(this._logTimer);
+        const tick = async () => {
+            if (!document.getElementById('ms-dl-log-list')) {
+                clearInterval(this._logTimer);
+                this._logTimer = null;
+                return;
+            }
+            await this.refreshDownloadLog(true);
+        };
+        this._logTimer = setInterval(tick, 3000);
+        tick();
+    },
+
+    fmtTs(ts) {
+        if (!ts) return '';
+        const d = new Date(Number(ts) * 1000);
+        if (Number.isNaN(d.getTime())) return '';
+        const p = (n) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
     },
 
     // ── 媒体根与统计 ──────────────────────────────────

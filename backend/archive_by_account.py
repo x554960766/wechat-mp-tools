@@ -23,6 +23,8 @@ from typing import Callable, Optional
 
 import requests
 
+from backend.config import ARCHIVE_TASKS_FILE, load_json, save_json
+
 log = logging.getLogger("backend.archive_by_account")
 
 # 单次归档的篇数上限，与前端 ① 卡片的输入范围保持一致
@@ -35,6 +37,13 @@ BILIBILI_PAGE_SIZE = 50
 # 活跃槽超过这个时长仍未终结就回收，避免页面关闭后永久锁死
 ACTIVE_TTL_SECONDS = 6 * 3600
 TERMINAL_STATUSES = ("completed", "failed", "cancelled")
+
+# 下载记录台账的保留上限：条数与时间双上限，避免文件随下载单调膨胀
+ARCHIVE_TASKS_MAX_COUNT = 200
+ARCHIVE_TASKS_MAX_AGE_SECONDS = 7 * 24 * 3600
+# 记录列表单次返回上限
+ARCHIVE_TASKS_LIST_MAX = 200
+ARCHIVE_TASKS_LIST_DEFAULT = 50
 
 PLATFORM_LABELS = {
     "wechat": "微信公众号",
@@ -59,6 +68,8 @@ _platforms: tuple = ("wechat",)
 _tasks: dict = {}
 # platform -> 正在跑的 task_id
 _active: dict = {}
+# 下载记录台账的读写锁：start/status 与列表读取可能并发
+_ledger_lock = threading.RLock()
 
 
 class ArchiveError(Exception):
@@ -154,6 +165,7 @@ def start(platform: str, account_id: str = "", account_name: str = "",
         "platform": platform,
         "root": PLATFORM_ROOTS[platform],
         "requested": limit,
+        "account_id": account_id,
         "account_name": account_name,
         "native_task_id": "",
         "created_at": time.time(),
@@ -183,7 +195,9 @@ def start(platform: str, account_id: str = "", account_name: str = "",
 
     with _config_lock:
         record.update(detail)
-    return _task_payload(record)
+    payload = _task_payload(record)
+    _sync_ledger(record, payload)
+    return payload
 
 
 def task_status(platform: str, task_id: str) -> dict:
@@ -200,7 +214,83 @@ def task_status(platform: str, task_id: str) -> dict:
     payload = _native_progress(record)
     _maybe_scan(record, payload)
     _prune_tasks()
+    _sync_ledger(record, payload)
     return _task_payload(record, payload)
+
+
+# ---------------------------------------------------------------- 下载记录台账
+
+def _ledger_load() -> list:
+    """载入下载记录台账；文件缺失或格式异常时按空列表处理。"""
+    rows = load_json(ARCHIVE_TASKS_FILE, [])
+    return rows if isinstance(rows, list) else []
+
+
+def _ledger_save(rows: list) -> None:
+    save_json(ARCHIVE_TASKS_FILE, rows)
+
+
+def _prune_ledger(rows: list) -> list:
+    """按「最近 7 天 + 最近 200 条」双上限裁剪，倒序返回。"""
+    cutoff = time.time() - ARCHIVE_TASKS_MAX_AGE_SECONDS
+    keep = [row for row in rows if (row.get("created_at") or 0) >= cutoff]
+    keep.sort(key=lambda row: row.get("created_at") or 0, reverse=True)
+    return keep[:ARCHIVE_TASKS_MAX_COUNT]
+
+
+def _ledger_record(record: dict, progress: Optional[dict] = None) -> dict:
+    """把内存任务记录转成台账记录（含展示与溯源字段）。"""
+    payload = _task_payload(record, progress)
+    payload["account_id"] = record.get("account_id") or ""
+    payload["platform_label"] = PLATFORM_LABELS.get(record["platform"], record["platform"])
+    payload["created_at"] = record.get("created_at") or 0
+    payload["updated_at"] = time.time()
+    if progress and progress.get("status") in TERMINAL_STATUSES:
+        payload["finished_at"] = payload["updated_at"]
+    else:
+        payload["finished_at"] = record.get("finished_at") or ""
+    return payload
+
+
+def _ledger_upsert(record: dict, progress: Optional[dict] = None) -> None:
+    """把一条任务记录写入台账（按 task_id 去重），并做保留裁剪。"""
+    with _ledger_lock:
+        rows = _ledger_load()
+        task_id = record.get("task_id") or ""
+        row = _ledger_record(record, progress)
+        for index, existing in enumerate(rows):
+            if existing.get("task_id") == task_id:
+                rows[index] = row
+                break
+        else:
+            rows.append(row)
+        _ledger_save(_prune_ledger(rows))
+
+
+def _sync_ledger(record: dict, progress: dict) -> None:
+    """把任务当前状态同步到台账；台账故障不影响下载主流程。"""
+    try:
+        _ledger_upsert(record, progress)
+    except Exception as exc:  # 台账写失败只记日志，下载与入库不受影响
+        log.warning("下载记录台账写入失败：%s", exc)
+
+
+def list_tasks(platform: str = "", limit=None) -> dict:
+    """下载记录列表，按发起时间倒序；platform 为空则返回全部平台。"""
+    with _ledger_lock:
+        rows = _ledger_load()
+    if (platform or "").strip():
+        rows = [row for row in rows if row.get("platform") == platform.strip()]
+    rows.sort(key=lambda row: row.get("created_at") or 0, reverse=True)
+    total = len(rows)
+
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = ARCHIVE_TASKS_LIST_DEFAULT
+    if limit < 1 or limit > ARCHIVE_TASKS_LIST_MAX:
+        limit = ARCHIVE_TASKS_LIST_DEFAULT
+    return {"tasks": rows[:limit], "total": total}
 
 
 def init_blueprint(app, platforms=("wechat",)):
@@ -266,6 +356,17 @@ def init_blueprint(app, platforms=("wechat",)):
         except Exception as exc:
             log.exception("读取归档进度失败")
             return jsonify({"error": f"读取进度失败：{str(exc)[:200]}"}), 500
+
+    @bp.route("/tasks", methods=["GET"])
+    def api_tasks():
+        try:
+            return jsonify(list_tasks(
+                platform=(request.args.get("platform") or "").strip(),
+                limit=request.args.get("limit"),
+            ))
+        except Exception as exc:
+            log.exception("读取下载记录失败")
+            return jsonify({"error": f"读取下载记录失败：{str(exc)[:200]}"}), 500
 
     return bp
 
@@ -802,6 +903,7 @@ def _task_payload(record: dict, progress: Optional[dict] = None) -> dict:
         "platform": record["platform"],
         "root": record["root"],
         "requested": record["requested"],
+        "account_id": record.get("account_id") or "",
         "native_task_id": record.get("native_task_id") or "",
         "account_name": record.get("account_name") or "",
         "note": record.get("note") or "",

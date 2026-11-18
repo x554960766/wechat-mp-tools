@@ -31,6 +31,8 @@ PROXY_CONFIG_FILE = DATA_DIR / "proxy_config.json"
 ACCOUNT_POOL_FILE = DATA_DIR / "account_pool.json"
 APP_SETTINGS_FILE = DATA_DIR / "app_settings.json"
 DOWNLOAD_HISTORY_FILE = DATA_DIR / "download_history.json"
+# 按号归档任务的下载记录台账（跨会话可回看的持久化副本）
+ARCHIVE_TASKS_FILE = DATA_DIR / "archive_tasks.json"
 
 # ── 微信 API 配置 ─────────────────────────────────────────
 BASE_URL = "https://mp.weixin.qq.com"

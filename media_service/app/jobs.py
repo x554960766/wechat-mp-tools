@@ -70,6 +70,11 @@ class JobManager:
                            indexed_new=0, indexed_updated=0, indexed_unchanged=0,
                            deleted=0, failed=0, complete=False)
 
+    def enqueue_nsfw(self, roots: list[str] | None = None, force: bool = False) -> dict[str, Any]:
+        return self.create("nsfw", roots=list(roots or []), force=bool(force), total=0,
+                           scanned=0, scored=0, flagged=0, skipped=0, failed=0,
+                           complete=False)
+
     def retry(self, job_id: str) -> dict[str, Any] | None:
         with self.lock:
             old = self.jobs.get(job_id)
@@ -228,6 +233,14 @@ class JobManager:
             item["status"] = "cancelled" if result.get("status") == "cancelled" else result.get("status", "completed")
             if item["status"] not in {"cancelled", "partial", "failed"}:
                 item["status"] = "completed"
+            return
+        if item["kind"] == "nsfw":
+            from .nsfw_scan import scan as scan_nsfw
+            result = scan_nsfw(item.get("roots") or None, force=item.get("force", False),
+                               progress=lambda p: item.update(p),
+                               cancel=lambda: bool(item.get("cancel_requested")))
+            item.update(result)
+            item["status"] = result.get("status", "completed")
             return
         if item["kind"] == "archive":
             from .archive_runner import run_archive

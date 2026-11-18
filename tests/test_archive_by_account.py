@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -34,9 +35,11 @@ class FakeHost:
 
 
 @pytest.fixture(autouse=True)
-def clean_state():
+def clean_state(tmp_path, monkeypatch):
     from backend import articles, bilibili, kuaishou, xiaohongshu
 
+    # 台账重定向到临时文件：所有用例都不得写入真实 data/archive_tasks.json
+    monkeypatch.setattr(aba, "ARCHIVE_TASKS_FILE", tmp_path / "archive_tasks.json")
     aba._tasks.clear()
     aba._active.clear()
     aba.configure(None, ("wechat", "xhs", "bilibili", "kuaishou"))
@@ -376,3 +379,119 @@ def test_scan_proceeds_when_state_stale_but_port_healthy(monkeypatch):
     assert done["scan_job_id"] == "scanjob-1"
     assert posted and posted[0][0] == "http://127.0.0.1:59999/api/media/scan"
     assert posted[0][1] == {"root": "articles-full"}
+
+
+# ---------------------------------------------------------------- 下载记录台账
+
+def test_start_records_account_id_in_ledger(monkeypatch, scan_calls):
+    """发起下载后台账落一条记录，含账号溯源字段。"""
+    from backend import articles
+
+    monkeypatch.setattr(articles, "_do_collect_latest", lambda *a, **k: None)
+
+    started = aba.start("wechat", account_id="f1", account_name="甲号", limit=2)
+    assert started["account_id"] == "f1"
+
+    rows = aba._ledger_load()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["task_id"] == started["task_id"]
+    assert row["account_id"] == "f1"
+    assert row["account_name"] == "甲号"
+    assert row["platform"] == "wechat"
+    assert row["platform_label"] == "微信公众号"
+    assert row["created_at"] > 0
+    assert row["status"] == "running"
+    assert row["finished_at"] == ""
+
+
+def test_task_status_persists_terminal_state(monkeypatch, scan_calls):
+    """下载进入终态后台账更新状态并写入 finished_at。"""
+    from backend import articles
+
+    monkeypatch.setattr(articles, "_do_collect_latest", lambda *a, **k: None)
+
+    started = aba.start("wechat", account_id="f2", account_name="乙号", limit=1)
+    native = articles._download_tasks[started["native_task_id"]]
+    native["status"] = "completed"
+    native["total"] = 1
+    native["completed"] = 1
+
+    done = aba.task_status("wechat", started["task_id"])
+    assert done["status"] == "completed"
+
+    row = aba._ledger_load()[0]
+    assert row["status"] == "completed"
+    assert row["completed"] == 1
+    assert row["finished_at"] > 0
+    assert row["account_id"] == "f2"
+
+
+def test_ledger_upsert_dedupes_by_task_id():
+    """同一 task_id 重复写入只保留一条，避免轮询刷屏。"""
+    record = {"task_id": "t1", "platform": "wechat", "root": "articles-full",
+              "requested": 3, "account_id": "f1", "account_name": "甲",
+              "native_task_id": "n1", "created_at": time.time(), "scan_job_id": "",
+              "scan_error": "", "scan_requested": False, "note": ""}
+    aba._ledger_upsert(record, {"status": "running", "total": 3, "completed": 1,
+                                "failed": 0, "skipped": 0, "current": "", "reason": ""})
+    aba._ledger_upsert(record, {"status": "completed", "total": 3, "completed": 3,
+                                "failed": 0, "skipped": 0, "current": "", "reason": ""})
+    rows = aba._ledger_load()
+    assert len(rows) == 1
+    assert rows[0]["status"] == "completed"
+
+
+def test_list_tasks_filters_platform_and_sorts_desc():
+    now = time.time()
+    aba._ledger_save([
+        {"task_id": "a", "platform": "wechat", "created_at": now - 100},
+        {"task_id": "b", "platform": "xhs", "created_at": now - 50},
+        {"task_id": "c", "platform": "wechat", "created_at": now - 10},
+    ])
+    all_tasks = aba.list_tasks()
+    assert [t["task_id"] for t in all_tasks["tasks"]] == ["c", "b", "a"]
+    assert all_tasks["total"] == 3
+
+    wechat_only = aba.list_tasks(platform="wechat")
+    assert [t["task_id"] for t in wechat_only["tasks"]] == ["c", "a"]
+    assert wechat_only["total"] == 2
+
+
+def test_list_tasks_limit_capped():
+    now = time.time()
+    aba._ledger_save([
+        {"task_id": f"t{i}", "platform": "wechat", "created_at": now - i}
+        for i in range(10)
+    ])
+    assert len(aba.list_tasks(limit=3)["tasks"]) == 3
+    assert aba.list_tasks(limit=3)["total"] == 10
+    # 非法 limit 与越界 limit 都回退到默认值，返回全部（仅 10 条时）
+    assert len(aba.list_tasks(limit="bad")["tasks"]) == 10
+    assert len(aba.list_tasks(limit=9999)["tasks"]) == 10
+
+
+def test_ledger_retention_caps_count_and_age():
+    now = time.time()
+    rows = [{"task_id": f"t{i}", "created_at": now - i * 60} for i in range(250)]
+    pruned = aba._prune_ledger(rows)
+    assert len(pruned) == aba.ARCHIVE_TASKS_MAX_COUNT
+    assert pruned[0]["task_id"] == "t0"  # 最新的在最前
+
+    too_old = [{"task_id": "old", "created_at": now - 8 * 24 * 3600}]
+    assert aba._prune_ledger(too_old) == []
+
+
+def test_ledger_write_failure_does_not_break_start(monkeypatch, scan_calls):
+    """台账写失败只记日志，不能让下载启动失败。"""
+    from backend import articles
+
+    monkeypatch.setattr(articles, "_do_collect_latest", lambda *a, **k: None)
+
+    def boom(filepath, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(aba, "save_json", boom)
+    started = aba.start("wechat", account_id="f3", account_name="丙号", limit=1)
+    assert started["task_id"]
+    assert started["account_id"] == "f3"

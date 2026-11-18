@@ -181,6 +181,10 @@ const API = {
             const qs = new URLSearchParams({ platform, task_id: taskId });
             return API.get(`/api/archive/status?${qs.toString()}`, { showError: false });
         },
+        tasks(platform) {
+            const qs = platform ? `?platform=${encodeURIComponent(platform)}` : '';
+            return API.get(`/api/archive/tasks${qs}`, { showError: false });
+        },
     },
 
     // ── Proxy API ────────────────────────────────────
@@ -368,6 +372,11 @@ const API = {
             return API.get(`/media/api/nsfw/flagged${qs ? '?' + qs : ''}`, opts);
         },
         nsfwReview(payload) { return API.post('/media/api/nsfw/review', payload); },
+        // 全局检测：status 给覆盖率与模型可用性；scan 入队，按 job 轮询
+        nsfwStatus(opts) { return API.get('/media/api/nsfw/status', opts); },
+        nsfwScan(payload) { return API.post('/media/api/nsfw/scan', payload); },
+        nsfwScanStatus(jobId) { return API.get(`/media/api/nsfw/scans/${jobId}`, { showError: false }); },
+        cancelNsfwScan(jobId) { return API.post(`/media/api/nsfw/scans/${jobId}/cancel`); },
         // 标签：文件标签挂在内容摘要上（同内容副本共享），作品标签挂在 work_key 上
         tags(opts) { return API.get('/media/api/tags', opts); },
         imagesByTag(tag, params = {}, opts) {
