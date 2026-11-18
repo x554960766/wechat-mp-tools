@@ -80,6 +80,21 @@ def test_media_root_env_without_index(tmp_path):
     assert list(roots) == ["articles-full", "wx-archive"]
     assert roots["wx-archive"]["type"] == "zspace"
     assert roots["wx-archive"]["writable"] is True
+    # 本地下载落盘根由本应用管理，删除重复件要能落物理删除，必须可写
+    assert roots["articles-full"]["type"] == "local"
+    assert roots["articles-full"]["writable"] is True
+
+
+def test_media_root_env_local_download_roots_are_writable(tmp_path):
+    host = mh.MediaHost(port=9999, media_root=str(tmp_path), data_dir=str(tmp_path / "media"))
+    # `_media_root_env` 里 repo_root 是 media_root 的父目录，下载目录挂在 repo_root/data/<subdir>
+    repo_root = tmp_path.parent
+    for subdir in ("douyin_downloads", "kuaishou_downloads", "bilibili_downloads", "xhs_downloads"):
+        (repo_root / "data" / subdir).mkdir(parents=True, exist_ok=True)
+    roots = {r["id"]: r for r in host._media_root_env()}
+    for root_id in ("articles-full", "douyin", "kuaishou", "bilibili", "xhs"):
+        assert roots[root_id]["type"] == "local"
+        assert roots[root_id]["writable"] is True, f"{root_id} 应可写，否则重复件删除按钮不出现"
 
 
 def test_media_root_env_nas_root_env_override(tmp_path):

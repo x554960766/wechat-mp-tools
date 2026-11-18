@@ -1703,6 +1703,15 @@ def _do_xhs_download_thread(task_id: str, urls: list, account_name: str):
             task["end_time"] = time.time()
             task["current"] = ""
 
+    # 下载落盘后通知媒体服务扫描 xhs 根：否则新笔记不会进内容索引，
+    # 素材检索的平台计数会停留在上一次扫描的数量（媒体服务缺席时静默跳过）。
+    if task and task.get("completed", 0) > 0:
+        try:
+            from backend import media_sync
+            media_sync.notify_scan("小红书下载完成", root="xhs")
+        except Exception:  # noqa: BLE001 - 索引维护不能影响下载结果
+            print("媒体扫描通知失败")
+
 # ── API 路由 ──────────────────────────────────────────────
 @xhs_bp.route("/parse", methods=["POST"])
 def parse_url():

@@ -202,6 +202,18 @@ def upload_tree(images_root: Path, remote_root: str | None = None, *, runner: Ru
     return summary
 
 
+def delete_remote_file(path: str, *, runner: Runner = _run_cli) -> dict:
+    """永久删除 NAS 上的单个文件。
+
+    ``skip_bin:"1"`` 跳过回收站，与「删除即不可恢复」的前端语义一致。删除是破坏性
+    动作，CLI 要求显式 ``--yes``。返回 CLI 的 data。
+    """
+    if not (path or "").strip():
+        raise NasError("待删除路径不能为空")
+    params = json.dumps({"paths": [path], "skip_bin": "1"}, ensure_ascii=False)
+    return runner(["file", "delete", "--params", params, "--yes"])
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="python -m app.nas", description="把 wx-archiver 抓下来的文章图片推到极空间 NAS"

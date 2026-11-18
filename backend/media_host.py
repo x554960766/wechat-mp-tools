@@ -260,6 +260,13 @@ class MediaHost:
             # 「根被删除」并让子服务拒绝启动（root_binding_mismatch）。
             if os.path.isdir(path) or root_id in merged:
                 merged.setdefault(root_id, {"id": root_id, "type": "local", "path": path})
+        # 本地下载落盘目录（公众号文章与各平台下载）由本应用管理，全局文件删除
+        # 需要能落物理删除，统一标记可写；外部挂载的只读根（iphone / volume-archive）
+        # 不在此列，保持只读，避免误删用户未托管给本应用的文件。
+        for root_id in ("articles-full", "douyin", "kuaishou", "bilibili", "xhs"):
+            root = merged.get(root_id)
+            if root is not None and root.get("type") == "local":
+                root["writable"] = True
         return list(merged.values())
 
     def _indexed_roots(self) -> list[dict]:

@@ -2007,6 +2007,11 @@ body {
     border-radius: 10px;
     background: var(--bg-card);
 }
+/* display:flex 会盖掉 [hidden] 的默认 display:none，必须显式声明隐藏，
+   否则「清空」只设 hidden 属性、预览框不会真正收起。 */
+.ms-image-preview[hidden] {
+    display: none;
+}
 .ms-image-preview-img {
     width: 56px;
     height: 56px;
@@ -2571,4 +2576,181 @@ body {
 }
 .video-ts:hover {
     border-color: var(--accent-color, #4a9eff);
+}
+
+/* ── 全局文件检索（FilesPage）──────────────────────────────
+   只服务于文件清单/重复组的行式展示，不覆盖既有组件样式。 */
+.files-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+.files-stats-rows {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+.files-stat {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 10px;
+    border-radius: 10px;
+    background: var(--bg-subtle, #f6f8fb);
+    border: 1px solid var(--border-color);
+}
+.files-stat-value {
+    font-size: 1.25rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+.files-stat-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+.files-stats-block {
+    margin-top: 8px;
+}
+.files-block-title {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    margin-bottom: 4px;
+}
+.files-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+.files-pill {
+    padding: 2px 8px;
+    font-size: 0.78rem;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+}
+.files-row {
+    display: flex;
+    gap: 12px;
+    padding: 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    margin-bottom: 8px;
+    background: var(--bg-card, #fff);
+}
+.files-row:hover {
+    border-color: var(--accent-color, #4a9eff);
+}
+.files-thumb {
+    width: 64px;
+    height: 64px;
+    flex: 0 0 auto;
+    object-fit: cover;
+    border-radius: 8px;
+    background: var(--bg-subtle, #f0f2f5);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.files-thumb-icon {
+    font-size: 1.6rem;
+}
+.files-main {
+    flex: 1;
+    min-width: 0;
+}
+.files-path {
+    font-weight: 500;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.files-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 12px;
+    margin-top: 4px;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+.files-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-top: 8px;
+}
+.files-badge {
+    padding: 2px 8px;
+    font-size: 0.75rem;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+    color: var(--text-secondary);
+}
+.files-badge-dup {
+    border-color: var(--warning, #f0a020);
+    color: var(--warning, #f0a020);
+}
+.files-badge-ok {
+    border-color: var(--border-color);
+    color: var(--text-muted);
+}
+.files-dup-group {
+    padding: 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    margin-bottom: 8px;
+    background: var(--bg-card, #fff);
+}
+.files-dup-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+.files-dup-sha {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+.files-dup-members {
+    margin-top: 8px;
+    font-size: 0.8rem;
+    overflow-x: auto;
+}
+.files-dup-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+.files-dup-table th,
+.files-dup-table td {
+    padding: 6px 8px;
+    border-bottom: 1px solid var(--border-color);
+    text-align: left;
+    vertical-align: top;
+}
+.files-dup-table th {
+    color: var(--text-secondary);
+    font-weight: 500;
+    white-space: nowrap;
+}
+.files-dup-table tbody tr:hover {
+    background: var(--bg-subtle, #f0f2f5);
+}
+.files-dup-path {
+    max-width: 320px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.files-dup-op {
+    white-space: nowrap;
+}
+@media (max-width: 720px) {
+    .files-grid {
+        grid-template-columns: 1fr;
+    }
 }

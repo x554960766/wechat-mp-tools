@@ -406,6 +406,43 @@ class Store:
                 raise
         return self.image_tags(root, relpath)
 
+    def rename_tag(self, old, new):
+        """把标签 ``old`` 整体改名为 ``new``；``new`` 已存在时合并成同一个标签。
+
+        改名同时作用于文件标签与作品标签，也覆盖同一内容/同一作品的所有归档副本
+        （它们本来就共享标签，不改名会留下两套词汇）。返回移动前的行数，便于
+        调用方确认影响面。
+        """
+        if not old or not new:
+            raise ValueError("标签不能为空")
+        if old == new:
+            raise ValueError("新旧标签同名")
+        with self.lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                known = self.conn.execute("SELECT 1 FROM tags WHERE name=?", (old,)).fetchone()
+                target_exists = self.conn.execute("SELECT 1 FROM tags WHERE name=?", (new,)).fetchone()
+                if known is None:
+                    raise KeyError(old)
+                n_images = self.conn.execute(
+                    "SELECT COUNT(*) FROM image_tags WHERE tag=?", (old,)).fetchone()[0]
+                n_contents = self.conn.execute(
+                    "SELECT COUNT(*) FROM content_tags WHERE tag=?", (old,)).fetchone()[0]
+                self._ensure_tag_tx(new)
+                # UPDATE OR IGNORE 遇到主键冲突（同一文件/作品已打了新标签）会跳过该行，
+                # 旧标签行由紧随的 DELETE 清掉——这一步就是「合并」。
+                self.conn.execute("UPDATE OR IGNORE image_tags SET tag=? WHERE tag=?", (new, old))
+                self.conn.execute("UPDATE OR IGNORE content_tags SET tag=? WHERE tag=?", (new, old))
+                self.conn.execute("DELETE FROM image_tags WHERE tag=?", (old,))
+                self.conn.execute("DELETE FROM content_tags WHERE tag=?", (old,))
+                self.conn.execute("DELETE FROM tags WHERE name=?", (old,))
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+        return {"old": old, "new": new, "images": int(n_images), "contents": int(n_contents),
+                "merged": bool(target_exists)}
+
     # ---- NSFW 筛查结果 ------------------------------------------------------
     def set_nsfw(self, root, relpath, content_sha256, *, score, label, status="ok",
                  kind="image", ts_seconds=0.0, stage="first", model_version=None,
@@ -939,6 +976,197 @@ class Store:
                 "SELECT root,COUNT(*) count FROM standalone_texts GROUP BY root ORDER BY count DESC")]
             total = self.conn.execute("SELECT COUNT(*) FROM standalone_texts").fetchone()[0]
         return {"kinds": kinds, "roots": roots, "total": int(total)}
+
+    # ---- 全局文件检索与内容查重（只读）--------------------------------------
+    # 三张文件表的列名不统一（images/standalone_texts 用 relpath，videos 用
+    # video_relpath；只有 images 有 size/mtime/content_version），这里用 UNION ALL
+    # 归一成同一套列，作为文件清单与查重的唯一来源。查重按内容摘要 content_sha256。
+    _FILE_UNION = (
+        "SELECT 'image' AS kind, root, relpath, size, mtime, content_sha256, content_version "
+        "FROM images WHERE state='ready' "
+        "UNION ALL "
+        "SELECT 'text', root, relpath, NULL, NULL, content_sha256, NULL FROM standalone_texts "
+        "UNION ALL "
+        "SELECT 'video', root, video_relpath, NULL, NULL, content_sha256, NULL FROM videos"
+    )
+
+    def list_files(self, *, q=None, root=None, ext=None, kind=None,
+                   duplicates=None, limit=50, offset=0):
+        """全库文件联合清单；支持关键词/根/扩展名/类型筛选，可只看重复或唯一。
+
+        ``duplicates``：``"duplicates"`` 只返回出现次数 > 1 的文件，``"unique"`` 只返回
+        唯一文件，``None`` 不筛。每行带 ``dup_count``（该内容摘要在全库的出现次数）。
+        返回 (rows, total)，按大小降序（无大小记录排在末尾）。
+        """
+        union = self._FILE_UNION
+        base = (
+            f"FROM ({union}) f "
+            "LEFT JOIN (SELECT content_sha256 AS sha, COUNT(*) AS dup_count "
+            f"FROM ({union}) GROUP BY content_sha256) d ON d.sha = f.content_sha256"
+        )
+        filters, args = [], []
+        if q:
+            filters.append("f.relpath LIKE ?")
+            args.append(f"%{q}%")
+        if root:
+            filters.append("f.root=?")
+            args.append(root)
+        if kind:
+            filters.append("f.kind=?")
+            args.append(kind)
+        if ext:
+            filters.append("LOWER(f.relpath) LIKE ?")
+            args.append(f"%.{ext.lower().lstrip('.')}%")
+        if duplicates == "duplicates":
+            filters.append("d.dup_count > 1")
+        elif duplicates == "unique":
+            filters.append("(d.dup_count IS NULL OR d.dup_count <= 1)")
+        clause = (" WHERE " + " AND ".join(filters)) if filters else ""
+        with self.lock:
+            total = int(self.conn.execute(f"SELECT COUNT(*) {base}{clause}", args).fetchone()[0])
+            rows = self.conn.execute(
+                "SELECT f.kind, f.root, f.relpath, f.size, f.mtime, f.content_sha256, "
+                f"f.content_version, COALESCE(d.dup_count, 1) AS dup_count {base}{clause} "
+                "ORDER BY (f.size IS NULL), f.size DESC, f.root, f.relpath LIMIT ? OFFSET ?",
+                [*args, int(limit), int(offset)],
+            ).fetchall()
+        return [dict(row) for row in rows], total
+
+    def duplicate_groups(self, *, min_count=2, limit=50, offset=0, members=5):
+        """按内容摘要归组，只返回出现次数 ≥ min_count 的重复组。
+
+        每组 ``members`` 截断到 ``members`` 条，完整清单走 ``duplicate_group(sha)``。
+        返回 (groups, total)。
+        """
+        union = self._FILE_UNION
+        with self.lock:
+            total = int(self.conn.execute(
+                f"SELECT COUNT(*) FROM (SELECT 1 FROM ({union}) WHERE content_sha256 IS NOT NULL "
+                "GROUP BY content_sha256 HAVING COUNT(*) >= ?)",
+                (int(min_count),),
+            ).fetchone()[0])
+            rows = self.conn.execute(
+                f"SELECT content_sha256 AS sha, COUNT(*) AS count, MIN(size) AS size "
+                f"FROM ({union}) WHERE content_sha256 IS NOT NULL "
+                "GROUP BY content_sha256 HAVING COUNT(*) >= ? "
+                "ORDER BY count DESC, sha LIMIT ? OFFSET ?",
+                [int(min_count), int(limit), int(offset)],
+            ).fetchall()
+            groups = []
+            for row in rows:
+                sha = row["sha"]
+                member_rows = self.conn.execute(
+                    "SELECT kind, root, relpath, size, mtime, content_sha256, content_version "
+                    f"FROM ({union}) WHERE content_sha256 IS ? "
+                    "ORDER BY kind, root, relpath LIMIT ?",
+                    (sha, int(members)),
+                ).fetchall()
+                groups.append({
+                    "sha": sha,
+                    "count": int(row["count"]),
+                    "size": row["size"],
+                    "members": [dict(m) for m in member_rows],
+                })
+        return groups, total
+
+    def duplicate_group(self, sha):
+        """返回某内容摘要下的全部文件记录（未截断）；无记录返回空列表。"""
+        union = self._FILE_UNION
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT kind, root, relpath, size, mtime, content_sha256, content_version "
+                f"FROM ({union}) WHERE content_sha256 IS ? "
+                "ORDER BY kind, root, relpath",
+                (sha,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def files_stats(self):
+        """文件清单概览：总量、按类型/根分布、重复组数与涉及文件数、最大文件。"""
+        union = self._FILE_UNION
+        with self.lock:
+            total = int(self.conn.execute(f"SELECT COUNT(*) FROM ({union})").fetchone()[0])
+            kinds = [dict(r) for r in self.conn.execute(
+                f"SELECT kind, COUNT(*) count FROM ({union}) GROUP BY kind ORDER BY count DESC")]
+            roots = [dict(r) for r in self.conn.execute(
+                f"SELECT root, COUNT(*) count FROM ({union}) GROUP BY root ORDER BY count DESC")]
+            duplicate_groups = int(self.conn.execute(
+                f"SELECT COUNT(*) FROM (SELECT 1 FROM ({union}) WHERE content_sha256 IS NOT NULL "
+                "GROUP BY content_sha256 HAVING COUNT(*) > 1)").fetchone()[0])
+            duplicate_files = int(self.conn.execute(
+                f"SELECT COUNT(*) FROM (SELECT content_sha256 FROM ({union}) WHERE content_sha256 IS NOT NULL "
+                f"GROUP BY content_sha256 HAVING COUNT(*) > 1) g "
+                f"JOIN ({union}) f ON f.content_sha256 = g.content_sha256").fetchone()[0])
+            biggest = self.conn.execute(
+                f"SELECT root, relpath, size FROM ({union}) "
+                "ORDER BY (size IS NULL), size DESC LIMIT 1").fetchone()
+        return {
+            "total": total,
+            "kinds": kinds,
+            "roots": roots,
+            "duplicate_groups": duplicate_groups,
+            "duplicate_files": duplicate_files,
+            "biggest": dict(biggest) if biggest else None,
+        }
+
+    def delete_file(self, root, relpath):
+        """删除单个已索引文件的索引记录，不动物理文件。
+
+        图片用墓碑（``state='deleted'``、清空向量）而不是删行，与扫描 prune 的
+        口径一致，保留行身份与来源数据；独立文本删行并清 FTS；视频删行并清代表帧。
+        同一份 ``(root, relpath)`` 可能在多表命中（如图片与其侧车文本），逐一处理。
+        返回 ``{"image": bool, "text": bool, "video": bool, "removed": int}``，
+        ``removed`` 为实际命中的表数量，便于前端判断是否有索引被清理。
+        """
+        with self.lock:
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                image = self.conn.execute(
+                    "SELECT id,state FROM images WHERE root=? AND relpath=?", (root, relpath)
+                ).fetchone()
+                hit_image = False
+                if image and image["state"] != "deleted":
+                    self.conn.execute("UPDATE images SET state='deleted',emb=NULL WHERE id=?", (image["id"],))
+                    # 文件已删，按文件归集的复核结论与标签不再保留，避免后续检索命中幽灵记录。
+                    self.conn.execute("DELETE FROM nsfw_results WHERE root=? AND relpath=?", (root, relpath))
+                    self.conn.execute("DELETE FROM image_tags WHERE root=? AND relpath=?", (root, relpath))
+                    hit_image = True
+
+                text = self.conn.execute(
+                    "SELECT id FROM standalone_texts WHERE root=? AND relpath=?", (root, relpath)
+                ).fetchone()
+                hit_text = False
+                if text:
+                    self.conn.execute("DELETE FROM text_fts WHERE text_id=?", (text["id"],))
+                    self.conn.execute("DELETE FROM standalone_texts WHERE id=?", (text["id"],))
+                    hit_text = True
+
+                videos = self.conn.execute(
+                    "SELECT video_relpath FROM videos WHERE root=? AND video_relpath=?",
+                    (root, relpath),
+                ).fetchall()
+                hit_video = False
+                if videos:
+                    for row in videos:
+                        self.conn.execute(
+                            "DELETE FROM video_frames WHERE root=? AND video_relpath=?",
+                            (root, row["video_relpath"]),
+                        )
+                    self.conn.execute(
+                        "DELETE FROM videos WHERE root=? AND video_relpath=?", (root, relpath)
+                    )
+                    hit_video = True
+
+                removed = int(hit_image) + int(hit_text) + int(hit_video)
+                if removed:
+                    self.conn.execute("UPDATE index_meta SET generation=generation+1 WHERE id=1")
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
+        if hit_image:
+            self.reload_snapshot()
+        return {"image": hit_image, "text": hit_text, "video": hit_video, "removed": removed}
 
 STORE=Store()
 

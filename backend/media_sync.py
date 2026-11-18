@@ -4,9 +4,10 @@
 
 1. ``normalize_article_url``：把公众号文章 URL 压成稳定的关联键，写进
    ``metadata.json``，供媒体索引把「一张图」挂回「哪篇文章」。
-2. ``notify_scan``：文章落盘后通知媒体服务增量扫描。宿主进程里媒体服务
+2. ``notify_scan``：内容落盘后通知媒体服务增量扫描。宿主进程里媒体服务
    是子进程，可能没装、可能正在重启；任何失败都必须静默吞掉，下载链路
-   不能因为媒体服务缺席而变慢或报错。
+   不能因为媒体服务缺席而变慢或报错。公众号落盘扫描 ``articles-full``，
+   小红书落盘扫描 ``xhs``，通过 ``root`` 参数指定。
 
 扫描请求按 5 秒防抖合并：批量下载时连续落盘几百篇，只在最后安静下来后
 触发一次扫描，避免把子进程的扫描队列打满。
@@ -32,7 +33,9 @@ _SCAN_TIMEOUT = 5.0
 
 _host_provider: Callable[[], object] | None = None
 _cond = threading.Condition()
-_pending = False
+# 待扫描的媒体根集合：公众号落盘扫描 articles-full，小红书落盘扫描 xhs。
+# 同一批通知只合并成一轮扫描，但不同根各自触发，避免一个根的通知把另一个根漏掉。
+_pending_roots: set[str] = set()
 _stop = False
 _worker: threading.Thread | None = None
 
@@ -108,12 +111,17 @@ def _bind_host(host: object) -> None:
     set_host_provider(lambda: host)
 
 
-def notify_scan(reason: str = "") -> None:
-    """请求一次（防抖后的）增量扫描；永不抛异常。"""
-    global _pending, _worker
+def notify_scan(reason: str = "", root: str | None = None) -> None:
+    """请求一次（防抖后的）增量扫描；永不抛异常。
+
+    ``root`` 指定要扫描的媒体根，缺省为 ``SCAN_ROOT``（公众号归档根）。
+    多个根的通知会合并到同一轮扫描，但各自成一次扫描请求。
+    """
+    global _pending_roots, _worker
+    root = root or SCAN_ROOT
     try:
         with _cond:
-            _pending = True
+            _pending_roots.add(root)
             if _worker is None or not _worker.is_alive():
                 _worker = threading.Thread(
                     target=_scan_worker, name="media-scan-notifier", daemon=True
@@ -121,21 +129,21 @@ def notify_scan(reason: str = "") -> None:
                 _worker.start()
             _cond.notify()
         if reason:
-            logger.debug("媒体扫描已排队：%s", reason)
+            logger.debug("媒体扫描已排队：%s（root=%s）", reason, root)
     except Exception:  # noqa: BLE001 - 通知失败绝不影响下载
         logger.debug("媒体扫描通知失败", exc_info=True)
 
 
 def flush_pending(timeout: float = DEBOUNCE_SECONDS + 5.0) -> bool:
     """测试用：立刻放弃防抖窗口并同步触发一次扫描。"""
-    global _pending
+    global _pending_roots
     with _cond:
-        had = _pending
-        _pending = False
+        roots = set(_pending_roots)
+        _pending_roots.clear()
         _cond.notify_all()
-    if not had:
+    if not roots:
         return False
-    return _trigger_scan()
+    return all(_trigger_scan(root) for root in roots)
 
 
 def stop_notifier() -> None:
@@ -153,20 +161,22 @@ def stop_notifier() -> None:
 
 
 def _scan_worker() -> None:
-    global _pending
+    global _pending_roots
     while True:
         with _cond:
-            while not _pending and not _stop:
+            while not _pending_roots and not _stop:
                 _cond.wait()
-            if _stop and not _pending:
+            if _stop and not _pending_roots:
                 return
-            _pending = False
+            roots = set(_pending_roots)
+            _pending_roots.clear()
         # 从最后一次通知起再等满一个防抖窗口；期间又来通知就顺延。
         deadline = time.monotonic() + DEBOUNCE_SECONDS
         while True:
             with _cond:
-                if _pending:
-                    _pending = False
+                if _pending_roots:
+                    roots |= _pending_roots
+                    _pending_roots.clear()
                     deadline = time.monotonic() + DEBOUNCE_SECONDS
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -174,13 +184,15 @@ def _scan_worker() -> None:
                 _cond.wait(remaining)
         # 触发失败不能把通知线程带走：否则第一次媒体服务崩溃后就再也不会扫描。
         try:
-            _trigger_scan()
+            for root in roots:
+                _trigger_scan(root)
         except Exception:  # noqa: BLE001
             logger.debug("媒体扫描触发异常", exc_info=True)
 
 
-def _trigger_scan() -> bool:
+def _trigger_scan(root: str | None = None) -> bool:
     """向就绪的媒体子进程投递扫描任务；不可用时直接放弃。"""
+    root = root or SCAN_ROOT
     provider = _host_provider
     if provider is None:
         return False
@@ -197,7 +209,7 @@ def _trigger_scan() -> bool:
             return False
         resp = requests.post(
             f"http://127.0.0.1:{host.port}/api/media/scan",
-            json={"root": SCAN_ROOT},
+            json={"root": root},
             timeout=_SCAN_TIMEOUT,
         )
         if resp.status_code not in (200, 202):

@@ -15,6 +15,7 @@ const Router = {
             'articles': ArticlesPage,
             'media_search': typeof MediaSearchPage !== 'undefined' ? MediaSearchPage : null,
             'media_archive': typeof MediaArchivePage !== 'undefined' ? MediaArchivePage : null,
+            'files': typeof FilesPage !== 'undefined' ? FilesPage : null,
             'download': DownloadPage,
             'history': HistoryPage,
             'channels': ChannelsPage,

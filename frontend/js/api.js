@@ -447,6 +447,32 @@ const API = {
         display(item) { return '/media' + item.file.split('&display=1')[0]; },
     },
 
+    // ── 全局文件检索与查重 API（媒体服务 /api/files/*）──────────────
+    // 只读：只取已入库索引（images / standalone_texts / videos），不做磁盘扫描。
+    // 公共查询参数一律用 URLSearchParams 组装，空值跳过，避免后端收到空串被当成过滤条件。
+    files: {
+        list(params = {}, opts) {
+            const qs = new URLSearchParams();
+            Object.entries(params || {}).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') qs.set(key, value);
+            });
+            return API.get(`/media/api/files/list?${qs.toString()}`, opts);
+        },
+        duplicates(params = {}, opts) {
+            const qs = new URLSearchParams();
+            Object.entries(params || {}).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') qs.set(key, value);
+            });
+            return API.get(`/media/api/files/duplicates?${qs.toString()}`, opts);
+        },
+        group(sha, opts) {
+            return API.get(`/media/api/files/group/${encodeURIComponent(sha)}`, opts);
+        },
+        stats(opts) { return API.get('/media/api/files/stats', { showError: false, ...opts }); },
+        // 删除单个已入库文件：先删物理文件、成功后清索引记录。破坏性写操作，前端需逐条二次确认。
+        deleteFile(payload, opts) { return API.post('/media/api/files/delete', payload, opts); },
+    },
+
     // ── Version Update API ──────────────────────────────
     version: {
         check()         { return API.get('/api/version/check', { showError: false }); },

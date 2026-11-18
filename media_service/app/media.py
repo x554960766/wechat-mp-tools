@@ -209,3 +209,34 @@ def write_new(root_id, relpath, local_file):
             raise RuntimeError("target_conflict: 远端目标内容与本地候选不一致") from exc
         status = "skipped"
     return {"status": status, "target": relpath}
+
+
+def delete_entry(root_id, relpath):
+    """删除媒体根内的物理文件。只读根拒绝删除。
+
+    这是破坏性操作：调用方须先在路由层校验根的 ``writable``，再在索引层清理
+    索引记录（先物理、后索引，物理失败时索引保持不动，避免「索引隐藏但文件仍在」）。
+    本地根直接删除；zspace 根走 ``file delete`` 并跳过回收站（``skip_bin="1"``）。
+    返回 ``{"existed": bool, "root": root_id, "relpath": relpath}``，
+    ``existed`` 表示删除前文件是否真实存在（本地用于幂等提示，远端按提交成功计 True）。
+    """
+    relpath = validate_relpath(relpath)
+    root = config.get_root(root_id)
+    if not root.get("writable"):
+        raise PermissionError("媒体根只读，不允许删除")
+
+    if root["type"] == "local":
+        base = Path(root["path"]).resolve()
+        target = (base / relpath).resolve()
+        if not target.is_relative_to(base):
+            raise ValueError("路径越过媒体根，拒绝删除")
+        existed = target.is_file()
+        if existed:
+            with _IO_GATE:
+                target.unlink()
+        return {"existed": existed, "root": root_id, "relpath": relpath}
+
+    from . import nas
+    remote = root["path"].rstrip("/") + "/" + relpath
+    nas.delete_remote_file(remote)
+    return {"existed": True, "root": root_id, "relpath": relpath}

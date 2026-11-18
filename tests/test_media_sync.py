@@ -69,7 +69,7 @@ class NotifyScanTests(unittest.TestCase):
 
     def test_burst_of_notifications_triggers_one_scan(self):
         calls = []
-        with mock.patch.object(media_sync, "_trigger_scan", lambda: calls.append(1) or True), \
+        with mock.patch.object(media_sync, "_trigger_scan", lambda root=None: calls.append(root) or True), \
              mock.patch.object(media_sync, "DEBOUNCE_SECONDS", 0.05):
             for _ in range(5):
                 media_sync.notify_scan("batch")
@@ -78,6 +78,18 @@ class NotifyScanTests(unittest.TestCase):
                 time.sleep(0.01)
             time.sleep(0.2)  # 再等一个窗口，确认没有第二次
         self.assertEqual(len(calls), 1)
+
+    def test_notifications_for_different_roots_each_trigger_a_scan(self):
+        calls = []
+        with mock.patch.object(media_sync, "_trigger_scan", lambda root=None: calls.append(root) or True), \
+             mock.patch.object(media_sync, "DEBOUNCE_SECONDS", 0.05):
+            media_sync.notify_scan("文章", root="articles-full")
+            media_sync.notify_scan("小红书", root="xhs")
+            deadline = time.monotonic() + 2.0
+            while len(calls) < 2 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            time.sleep(0.2)
+        self.assertEqual(sorted(calls), ["articles-full", "xhs"])
 
     def test_notification_never_raises_when_scan_fails(self):
         def boom():
