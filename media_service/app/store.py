@@ -561,10 +561,18 @@ class Store:
     # 「当前内容已有机器初筛结论」的判定与 nsfw_summary / nsfw_flagged 同口径：
     # 摘要一致、kind=image、ts_seconds=0.0 的 first 行。人工 second 行不参与——
     # 复核过的图片仍可能缺机器分数，重检时照常补 first，不会覆盖人工结论。
-    _NSFW_FIRST_OK = (
-        "EXISTS (SELECT 1 FROM nsfw_results n"
-        " WHERE n.root=i.root AND n.relpath=i.relpath AND n.content_sha256=i.content_sha256"
-        " AND n.kind='image' AND n.ts_seconds=0.0 AND n.stage='first' AND n.status='ok')")
+    @staticmethod
+    def _nsfw_first_ok(model_version=None):
+        """「当前内容在 stage='first' 有可用机器结论」的相关子查询。
+
+        model_version 给定时还要求结论由该方案产出：换鉴黄方案后旧分数仍留在库里，
+        但分数量纲不同，不能当作「已按当前方案判过」（Spec：换方案只能重扫）。
+        """
+        extra = " AND n.model_version = ?" if model_version else ""
+        return ("EXISTS (SELECT 1 FROM nsfw_results n"
+                " WHERE n.root=i.root AND n.relpath=i.relpath AND n.content_sha256=i.content_sha256"
+                " AND n.kind='image' AND n.ts_seconds=0.0 AND n.stage='first' AND n.status='ok'"
+                + extra + ")")
 
     def _nsfw_target_where(self, roots):
         where = ["i.state='ready'", "i.content_sha256 IS NOT NULL"]
@@ -578,23 +586,28 @@ class Store:
         """全局检测要处理的图片：默认只挑还没有机器结论的，force 时全部就绪图片。"""
         where, args = self._nsfw_target_where(roots)
         if not force:
-            where.append("NOT " + self._NSFW_FIRST_OK)
+            where.append("NOT " + self._nsfw_first_ok())
         with self.lock:
             rows = self.conn.execute(
                 "SELECT i.root,i.relpath,i.content_sha256,i.content_version FROM images i"
                 " WHERE " + " AND ".join(where) + " ORDER BY i.root,i.relpath", args).fetchall()
         return [dict(row) for row in rows]
 
-    def nsfw_coverage(self, roots=None):
-        """检测覆盖率：库里有多少就绪图片、其中多少张已有当前内容的机器结论。"""
+    def nsfw_coverage(self, roots=None, model_version=None):
+        """检测覆盖率：库里有多少就绪图片、其中多少张已有当前内容的机器结论。
+
+        model_version 给定时只把「该方案产出的结论」算作已覆盖：换方案后旧分数还在
+        库里，口径却不同，重扫完成前不能对用户报「已全量判过」。
+        """
         where, args = self._nsfw_target_where(roots)
+        base = " FROM images i WHERE " + " AND ".join(where)
         with self.lock:
-            row = self.conn.execute(
-                "SELECT COUNT(*) AS total,"
-                " COALESCE(SUM(CASE WHEN " + self._NSFW_FIRST_OK + " THEN 1 ELSE 0 END),0) AS scored"
-                " FROM images i WHERE " + " AND ".join(where), args).fetchone()
-        total = int(row["total"] or 0)
-        scored = int(row["scored"] or 0)
+            total = int(self.conn.execute(
+                "SELECT COUNT(*)" + base, args).fetchone()[0])
+            # ok 子查询拼在 WHERE 末尾，占位符顺序因此是「先 where 参数、再版本号」
+            scored = int(self.conn.execute(
+                "SELECT COUNT(*)" + base + " AND " + self._nsfw_first_ok(model_version),
+                (*args, model_version) if model_version else args).fetchone()[0])
         return {"total": total, "scored": scored, "pending": total - scored}
 
     def nsfw_recompute(self, threshold):

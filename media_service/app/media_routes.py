@@ -306,7 +306,10 @@ NSFW_THRESHOLD_PRESETS = (
 
 def _nsfw_settings_payload():
     settings = config.nsfw_settings()
-    coverage = STORE.nsfw_coverage()
+    # 覆盖率按「已生效方案的结论」算：换方案后旧分数还在库里但口径不同，
+    # 重扫没跑完之前不能对用户说「已经全量判过」。
+    applied_mv = review.PROVIDERS.get(settings["applied_provider"], {}).get("model_version")
+    coverage = STORE.nsfw_coverage(model_version=applied_mv)
     providers = [{
         "id": pid,
         "label": spec["label"],
@@ -321,12 +324,13 @@ def _nsfw_settings_payload():
         "locked": config.nsfw_locked_fields(),   # 被部署环境变量锁定的字段（UI 置灰）
         "providers": providers,
         "presets": list(NSFW_THRESHOLD_PRESETS),
-        # pending 是「已有机器结论、等着按新口径对齐」的图片数：
+        # pending 是「还是旧方案分数、等着重扫对齐」的图片数：
         # 阈值变了可 SQL 重算，方案变了只能重扫（分数语义不同）。
         "stale": {
             "threshold": settings["threshold"] != settings["applied_threshold"],
-            "provider": settings["provider"] != settings["applied_provider"],
-            "pending": coverage["scored"],
+            "provider": (settings["provider"] != settings["applied_provider"]
+                         or coverage["pending"] > 0),
+            "pending": coverage["pending"],
         },
         "coverage": coverage,   # {total, scored, pending}：面板展示「已判多少张」
     }

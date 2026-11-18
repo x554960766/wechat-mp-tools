@@ -167,3 +167,57 @@ def test_provider_spec_falls_back_for_unknown_name(setup):
 
     assert review.current_provider() == "falconsai-vit-b16"
     assert review.provider_spec()["model_version"] == "Falconsai/nsfw_image_detection"
+
+
+def _seed_image(store, root):
+    """在库里放一张真实可索引的小图，返回内容摘要（结论要挂在摘要上才生效）。"""
+    import hashlib
+    from io import BytesIO
+
+    import numpy as np
+    from PIL import Image
+
+    out = BytesIO()
+    Image.new("RGB", (8, 8), "white").save(out, "PNG")
+    data = out.getvalue()
+    (root / "a.png").write_bytes(data)
+    vec = np.ones(512, dtype=np.float32)
+    store.add_image("articles-full", "a.png", data,
+                    embedding=vec / np.linalg.norm(vec))
+    return hashlib.sha256(data).hexdigest()
+
+
+def test_coverage_ignores_scores_from_previous_provider(setup):
+    """换方案后旧分数还在库里，但「已覆盖」只算当前方案产出的结论。
+
+    这是面板诚实性：重扫没跑完却报「752/752 已判过」，用户会以为旧口径的分数
+    就是新方案的结论（Spec：换方案只能重扫，分数不可跨方案换算）。
+    """
+    store, root = setup
+    digest = _seed_image(store, root)
+    store.set_nsfw("articles-full", "a.png", digest, score=0.9, label="nsfw",
+                   model_version="Falconsai/nsfw_image_detection")
+    # 宿主已切到 eva02 并开始重扫，但这张还没轮到
+    config.mark_nsfw_applied(threshold=0.5, provider="freepik-eva02")
+
+    body = _client().get("/api/settings/nsfw").json()
+
+    assert body["coverage"] == {"total": 1, "scored": 0, "pending": 1}
+    assert body["stale"] == {"threshold": False, "provider": True, "pending": 1}
+
+
+def test_coverage_recovers_after_rescan_with_applied_provider(setup):
+    """按新方案重扫完成后覆盖率和 stale 同时归零，不再长期挂红。"""
+    store, root = setup
+    digest = _seed_image(store, root)
+    store.set_nsfw("articles-full", "a.png", digest, score=0.4, label="nsfw",
+                   model_version=review.PROVIDERS["freepik-eva02"]["model_version"])
+    config.save_nsfw_settings({"threshold": 0.35, "provider": "freepik-eva02"})
+    config.mark_nsfw_applied(threshold=0.35, provider="freepik-eva02")
+    config._nsfw_settings_cache.update(mtime=None, data=None)
+
+    body = _client().get("/api/settings/nsfw").json()
+
+    assert body["coverage"] == {"total": 1, "scored": 1, "pending": 0}
+    assert body["stale"] == {"threshold": False, "provider": False, "pending": 0}
+
