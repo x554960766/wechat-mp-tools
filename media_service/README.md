@@ -19,7 +19,17 @@ uv run --extra test python -m pytest tests/
 uv run python -m compileall app
 ```
 
-首次扫描与模型推理会花时间。三个来源项目（wx-archiver、nas-image-search、zspace-photo-search）已于 2026-11-08 整合完成后删除；其旧索引（13,043 条）备份在 `data/legacy-import/index.sqlite`。服务仅监听本机地址。
+首次扫描与模型推理会花时间。三个来源项目（wx-archiver、nas-image-search、zspace-photo-search）已于 2026-11-08 整合完成后删除；其旧索引（13,043 条）在 `/Users/yaobinsun/IdeaProjects/ai-media/data/media/legacy-import/index.sqlite`，**不在本仓 `data/` 下**。服务仅监听本机地址。
+
+旧索引迁移走 `migrate_legacy`，默认只出预案、不写库也不跑模型：
+
+```sh
+uv run python -m media_service.migrate_legacy            # dry-run，报可导入/已存在/文件缺失条数
+uv run python -m media_service.migrate_legacy --json     # 同上，JSON 便于存档
+uv run python -m media_service.migrate_legacy --apply    # 真正落库（幂等，已有键不覆盖）
+```
+
+根映射默认取当前 `AI_MEDIA_ROOTS`（旧路径 == 新根路径）；旧卷换挂载点时用 `--map 旧路径=根ID` 覆盖。旧卷未挂载时 dry-run 会把全部行报成「文件已不在」，这是预期结果而非缺陷。
 
 ## 当前状态
 
