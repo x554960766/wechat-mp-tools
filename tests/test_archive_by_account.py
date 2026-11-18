@@ -495,3 +495,15 @@ def test_ledger_write_failure_does_not_break_start(monkeypatch, scan_calls):
     started = aba.start("wechat", account_id="f3", account_name="丙号", limit=1)
     assert started["task_id"]
     assert started["account_id"] == "f3"
+
+
+def test_accounts_endpoint_rejects_missing_platform():
+    """缺 platform 不能静默按 wechat 查，否则跨平台账号会被错配给公众号。"""
+    from flask import Flask
+
+    app = Flask(__name__)
+    app.register_blueprint(aba.init_blueprint(app, ("wechat", "xhs")))
+    client = app.test_client()
+
+    assert client.get("/api/archive/accounts?platform=").status_code == 400
+    assert client.get("/api/archive/accounts").status_code == 400

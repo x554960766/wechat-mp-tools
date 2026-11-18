@@ -295,36 +295,67 @@ const MediaSearchPage = {
         return this._archivePlatforms.find((p) => p.id === platformId) || null;
     },
 
-    /** 账号行下载入口的门控：选中账号且平台受支持才显示，否则禁用并给原因。 */
+    /** 素材检索的账号名可能跨平台出现，用它反推能落到哪个归档平台。 */
+    accountPlatforms(accountName) {
+        const name = (accountName || '').trim().toLowerCase();
+        if (!name) return [];
+        const rows = (this._facets && this._facets.accounts) || [];
+        const seen = new Set();
+        rows.forEach((row) => {
+            if ((row.account || '').trim().toLowerCase() !== name) return;
+            if (row.platform) seen.add(row.platform);
+        });
+        return Array.from(seen);
+    },
+
+    /** 下载目标平台：优先用当前平台筛选；未筛选用账号名反推；撞名或推不出返回空。 */
+    downloadPlatform() {
+        if (this._platform) return { platform: this._platform, ambiguous: false };
+        const platforms = this.accountPlatforms(this._account);
+        if (platforms.length === 1) return { platform: platforms[0], ambiguous: false };
+        if (platforms.length > 1) return { platform: '', ambiguous: true };
+        return { platform: '', ambiguous: false };
+    },
+
+    /** 账号行下载入口的门控：只按「是否选中账号」决定显隐，平台不支持时禁用并给原因。 */
     updateDownloadEntry() {
         const box = document.getElementById('ms-account-download');
         if (!box) return;
         const account = this._account;
-        const platform = this._platform;
-        box.hidden = !account || !platform;
+        // 显隐只看账号：否则默认的「全部平台」下入口永远不出现，看起来像没有这个功能。
+        box.hidden = !account;
         if (box.hidden) return;
 
-        const meta = this.archivePlatform(platform);
-        const support = Boolean(meta && meta.enabled !== false);
+        const target = this.downloadPlatform();
+        const meta = this.archivePlatform(target.platform);
+        const support = !target.ambiguous && Boolean(meta && meta.enabled !== false);
         const btn = document.getElementById('ms-dl-account');
         const hint = document.getElementById('ms-dl-hint');
         const linkInput = document.getElementById('ms-dl-link');
 
         if (btn) {
             btn.disabled = !support;
-            btn.textContent = '下载该账号';
+            btn.textContent = support && meta && meta.name
+                ? `下载该账号（${meta.name}）`
+                : '下载该账号';
         }
         // 只有支持贴链接的平台（快手）才显示主页链接输入，其余平台保持隐藏。
-        if (linkInput) linkInput.hidden = !(meta && meta.allow_link);
+        if (linkInput) linkInput.hidden = !(support && meta && meta.allow_link);
         if (hint) {
-            hint.textContent = support
-                ? (meta.note || '')
-                : '该平台暂不支持按账号下载，请到对应采集页操作';
+            if (target.ambiguous) {
+                hint.textContent = '该账号名在多个平台存在，请先在上方平台筛选里选定一个再下载';
+            } else if (!support) {
+                hint.textContent = '该平台暂不支持按账号下载，请到对应采集页操作';
+            } else {
+                hint.textContent = meta.note || '';
+            }
         }
     },
 
     /** 把素材检索的账号名解析成 wmp 收藏账号的 id / 主页链接。 */
     async resolveAccount(platform, accountName) {
+        // 后端缺省会按 wechat 查，留空会把小红书账号错解析成公众号，这里直接拒绝。
+        if (!platform) return null;
         const data = await API.archive.accounts(platform);
         const rows = (data && data.accounts) || [];
         const wanted = (accountName || '').trim().toLowerCase();
@@ -333,8 +364,17 @@ const MediaSearchPage = {
 
     async startAccountDownload() {
         const accountName = this._account;
-        const platform = this._platform;
-        if (!accountName || !platform) return;
+        if (!accountName) return;
+        const target = this.downloadPlatform();
+        if (target.ambiguous) {
+            Toast.error('该账号名在多个平台存在，请先选择平台');
+            return;
+        }
+        const platform = target.platform;
+        if (!platform) {
+            Toast.error('无法确定该账号属于哪个平台，请先在上方选择平台');
+            return;
+        }
         const meta = this.archivePlatform(platform);
         if (!meta || meta.enabled === false) {
             Toast.error('该平台暂不支持按账号下载，请到对应采集页操作');

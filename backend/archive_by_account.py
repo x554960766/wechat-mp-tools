@@ -318,7 +318,10 @@ def init_blueprint(app, platforms=("wechat",)):
 
     @bp.route("/accounts", methods=["GET"])
     def api_accounts():
-        platform = (request.args.get("platform") or "wechat").strip()
+        platform = (request.args.get("platform") or "").strip()
+        # 曾默认按 wechat 查：调用方漏传平台时会静默返回公众号账号，把别的平台账号错配掉。
+        if not platform:
+            return jsonify({"error": "缺少 platform 参数"}), 400
         try:
             return jsonify(list_accounts(platform))
         except ArchiveError as exc:
