@@ -236,6 +236,57 @@ async def search_image(file:UploadFile|None=File(None),url:str|None=Form(None),k
 @router.get("/api/search/stats")
 def stats(): return STORE.stats()
 
+
+class NsfwReviewRequest(BaseModel):
+    root: str
+    relpath: str
+    label: str            # "nsfw" 确认敏感 / "safe" 标为误报
+    nsfw_type: str|None = None   # explicit / suggestive / other，误报时忽略
+    reviewed_by: str|None = None
+
+
+@router.get("/api/nsfw/flagged")
+def nsfw_flagged(root:str|None=None,limit:int=50,offset:int=0,include_reviewed:bool=True):
+    """集中复核列表：当前内容仍判 NSFW 的图片。人工复核结论优先于机器初筛。"""
+    if root:
+        try: config.get_root(root)
+        except KeyError: raise HTTPException(422,"未知媒体根")
+    result=STORE.nsfw_flagged(root,limit=limit,offset=offset,include_reviewed=include_reviewed)
+    for item in result["items"]:
+        item["thumb"]=_media_url("/api/media/thumb",item["root"],item["relpath"],item["content_version"],size=360)
+        item["file"]=_media_url("/api/media/file",item["root"],item["relpath"],item["content_version"],display=1)
+    return result
+
+
+@router.post("/api/nsfw/review")
+def nsfw_review(body:NsfwReviewRequest):
+    """人工复核单张图片：写 stage="second" 的结论。
+
+    机器初筛固定在 first 行且重扫只会 upsert 同一 stage，所以人工结论不会被
+    后续扫描抹掉；图片换内容（content_sha256 变化）后旧复核自然失效，需重新判。
+    """
+    if body.label not in ("nsfw","safe"):
+        raise HTTPException(422,"label 必须是 nsfw 或 safe")
+    try: config.get_root(body.root)
+    except KeyError: raise HTTPException(422,"未知媒体根")
+    row=STORE.get(body.root,body.relpath)
+    if row is None or row["state"]!="ready":
+        raise HTTPException(404,detail={"error":{"code":"not_found","message":"该图片不在索引中或尚未就绪，请先扫描"}})
+    if not row["content_sha256"]:
+        raise HTTPException(409,detail={"error":{"code":"not_indexed","message":"该图片还没有内容摘要，请重新扫描后再复核"}})
+    reviewed_by=(body.reviewed_by or "").strip()[:64] or "local"
+    nsfw_type=None if body.label=="safe" else (body.nsfw_type or "explicit")
+    if nsfw_type not in (None,"explicit","suggestive","other"):
+        raise HTTPException(422,"nsfw_type 必须是 explicit / suggestive / other")
+    previous=STORE.nsfw_summary(body.root,body.relpath)
+    score=previous.get("score") if previous else None
+    STORE.set_nsfw(body.root,body.relpath,row["content_sha256"],score=score,label=body.label,
+                   status="ok",stage="second",model_version=config.NSFW_MODEL_SOURCE,
+                   nsfw_type=nsfw_type,reviewed_by=reviewed_by,
+                   reviewed_at=datetime.now(timezone.utc).isoformat())
+    return {"nsfw":STORE.nsfw_summary(body.root,body.relpath),"stage":"second"}
+
+
 @router.post("/api/media/scan", status_code=202)
 def scan_post(payload: dict = Body(...)):
     root = payload.get("root")

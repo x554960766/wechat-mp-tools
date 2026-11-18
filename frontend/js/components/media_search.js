@@ -85,6 +85,8 @@ const MediaSearchPage = {
                         <label class="media-toggle" title="只显示含疑似 NSFW 图片的条目；标记不改变检索排序">
                             <input type="checkbox" id="ms-nsfw-only"> 只看含疑似 NSFW
                         </label>
+                        <button class="btn btn-secondary btn-sm" id="ms-nsfw-review"
+                                title="列出仍判疑似敏感的图片；打开大图后可确认敏感或标为误报">待复核</button>
                         <span class="form-hint" id="ms-scan-state"></span>
                         <button class="btn btn-secondary btn-sm" id="ms-scan">扫描选中来源</button>
                     </span>
@@ -116,6 +118,7 @@ const MediaSearchPage = {
         this._query = '';
         this._nsfwOnly = false;
         this._images = [];
+        this._flaggedMode = false;
 
         // 侧栏全局检索跳转携带的关键词：预填输入框，随后的 search() 会读取它
         const q = document.getElementById('ms-q');
@@ -140,6 +143,8 @@ const MediaSearchPage = {
                 this.renderResults();
             });
         }
+        const nsfwReview = document.getElementById('ms-nsfw-review');
+        if (nsfwReview) nsfwReview.addEventListener('click', () => this.loadNsfwFlagged());
         const account = document.getElementById('ms-account');
         if (account) {
             account.addEventListener('change', () => {
@@ -397,6 +402,7 @@ const MediaSearchPage = {
             fd.append('review', String(this._nsfwOnly));
             const data = await API.media.searchImage(fd, { showError: false });
             this._images = (data && data.items) || [];
+            this._flaggedMode = false;
             this.renderImageResults();
             this.renderVideoHits((data && data.videos) || []);
             this.imageStatus(this._images.length
@@ -472,6 +478,69 @@ const MediaSearchPage = {
         const el = document.getElementById('ms-image-status');
         if (!el) return;
         el.textContent = msg || '';
+    },
+
+    nsfwOf(image) {
+        if (!image) return null;
+        if (image.nsfw && image.nsfw.status === 'ok') return image.nsfw;
+        if (image.review && image.review.status === 'ok') return image.review;
+        return null;
+    },
+
+    /** 集中复核：列出仍判疑似敏感、且未被人工复核过的图片（second 级结论会使其出列）。 */
+    async loadNsfwFlagged() {
+        const status = document.getElementById('ms-image-status');
+        if (status) status.textContent = '正在读取待复核图片…';
+        try {
+            const data = await API.media.nsfwFlagged({ include_reviewed: false, limit: 60 });
+            const items = (data.items || []).map((row) => ({
+                ...row,
+                nsfw: { label: row.label, score: row.score, stage: row.stage, status: 'ok',
+                        nsfw_type: row.nsfw_type, reviewed_by: row.reviewed_by,
+                        reviewed_at: row.reviewed_at },
+            }));
+            this._images = items;
+            this._flaggedMode = true;
+            this.renderNsfwFlagged(data.total != null ? data.total : items.length);
+        } catch (err) {
+            if (status) status.textContent = '';
+            Toast.error('读取待复核图片失败：' + (err && err.message ? err.message : '请求失败'));
+        }
+    },
+
+    renderNsfwFlagged(total) {
+        const box = document.getElementById('ms-image-hits');
+        if (!box) return;
+        const status = document.getElementById('ms-image-status');
+        if (status) status.textContent = total ? `待复核 ${total} 张（按分数从高到低，打开大图可复核）` : '';
+        box.hidden = false;
+        if (!this._images.length) {
+            box.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">🛡️</div>
+                    <h3 class="empty-state-title">没有待复核的图片</h3>
+                    <p class="empty-state-desc">当前索引里没有仍判疑似敏感、且未被人工复核过的图片。</p>
+                </div>`;
+            return;
+        }
+        const esc = (v) => this.esc(v);
+        box.innerHTML = `<div class="content-grid">${this._images.map((item, i) => {
+            const score = item.nsfw && item.nsfw.score != null ? Number(item.nsfw.score).toFixed(2) : '—';
+            return `<button type="button" class="content-card ms-image-card" data-index="${i}">
+                        <span class="content-cover">
+                            <img src="${esc('/media' + (item.thumb || ''))}" loading="lazy" alt=""
+                                 onerror="this.closest('.content-cover').classList.add('is-broken')">
+                            <span class="media-badge is-warn">疑似 ${esc(score)}</span>
+                        </span>
+                        <span class="content-meta">
+                            <span class="content-title">${esc(item.relpath || '')}</span>
+                            <span class="content-sub">${esc(item.root || '')}</span>
+                        </span>
+                    </button>`;
+        }).join('')}</div>`;
+        box.querySelectorAll('.ms-image-card').forEach((card) => {
+            card.addEventListener('click', () => this.openImage(Number(card.dataset.index)));
+        });
     },
 
     bindImageDrop() {
@@ -754,6 +823,10 @@ const MediaSearchPage = {
                         </label>
                         <button class="btn btn-secondary btn-sm" data-act="pano-exit">退出全景</button>
                     </span>
+                    <span class="ms-viewer-review" id="ms-viewer-review" hidden>
+                        <button class="btn btn-secondary btn-sm" data-act="review-nsfw">确认敏感</button>
+                        <button class="btn btn-secondary btn-sm" data-act="review-safe">标为误报</button>
+                    </span>
                     <button class="btn btn-primary btn-sm" data-act="pano">全景查看</button>
                     <button class="btn btn-secondary btn-sm" data-act="close">关闭</button>
                 </div>
@@ -778,6 +851,8 @@ const MediaSearchPage = {
             else if (name === 'next') this.viewerStep(1);
             else if (name === 'pano') this.viewerPanorama();
             else if (name === 'pano-exit') this.viewerExitPano();
+            else if (name === 'review-nsfw') this.viewerReview('nsfw');
+            else if (name === 'review-safe') this.viewerReview('safe');
         });
         const mode = document.getElementById('ms-pano-mode');
         if (mode) mode.addEventListener('change', () => this.viewerApplyPanoMode());
@@ -810,8 +885,40 @@ const MediaSearchPage = {
             img.alt = image.relpath || '';
             img.hidden = false;
         }
-        const risky = image.nsfw && image.nsfw.label === 'nsfw';
-        this.viewerStatus(risky ? `初筛 疑似 NSFW（${Number(image.nsfw.score).toFixed(3)}）` : '');
+        const nsfw = this.nsfwOf(image);
+        const risky = !!(nsfw && nsfw.label === 'nsfw');
+        const reviewed = !!(nsfw && nsfw.stage === 'second');
+        const score = nsfw && nsfw.score != null ? Number(nsfw.score).toFixed(3) : '—';
+        this.viewerStatus(risky
+            ? (reviewed ? `人工复核：确认敏感（分数 ${score}）` : `初筛 疑似 NSFW（${score}）`)
+            : (reviewed ? '人工复核：已标为误报' : ''));
+        // 有机器初筛结论才提供复核入口：没有证据的图不该被随手标记
+        const reviewBox = document.getElementById('ms-viewer-review');
+        if (reviewBox) reviewBox.hidden = !nsfw;
+    },
+
+    /** 人工复核当前大图：写 second 级结论，机器重扫只动 first 行，不会覆盖它。 */
+    async viewerReview(label) {
+        const viewer = this._viewer;
+        if (!viewer) return;
+        const image = viewer.images[viewer.index];
+        if (!image || !image.root || !image.relpath) return;
+        const box = document.getElementById('ms-viewer-review');
+        const buttons = box ? box.querySelectorAll('button') : [];
+        buttons.forEach((button) => { button.disabled = true; });
+        try {
+            const data = await API.media.nsfwReview({
+                root: image.root, relpath: image.relpath, label, reviewed_by: '本机',
+            });
+            image.nsfw = data.nsfw;
+            image.review = null;
+            this.viewerShow(viewer.index); // 状态行与按钮跟着新结论刷新
+            if (this._flaggedMode) await this.loadNsfwFlagged(); // 误报出列后列表同步
+        } catch (err) {
+            Toast.error('复核失败：' + (err && err.message ? err.message : '请求失败'));
+        } finally {
+            buttons.forEach((button) => { button.disabled = false; });
+        }
     },
 
     viewerStep(delta) {

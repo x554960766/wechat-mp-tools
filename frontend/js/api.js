@@ -358,6 +358,16 @@ const API = {
          * 后端走 multipart，见 API.request 对 FormData 的分支处理。
          */
         searchImage(formData, opts) { return API.post('/media/api/search/image', formData, opts); },
+        // 两级 NSFW：flagged 列出仍判疑似敏感的图片，review 写人工复核结论（second 级）
+        nsfwFlagged(params = {}, opts) {
+            const query = new URLSearchParams();
+            Object.entries(params).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') query.set(key, value);
+            });
+            const qs = query.toString();
+            return API.get(`/media/api/nsfw/flagged${qs ? '?' + qs : ''}`, opts);
+        },
+        nsfwReview(payload) { return API.post('/media/api/nsfw/review', payload); },
         contentsSearch(params, opts) {
             const query = new URLSearchParams();
             Object.entries(params || {}).forEach(([key, value]) => {

@@ -406,31 +406,35 @@ class Store:
                 raise
         return self.image_tags(root, relpath)
 
-    # ---- NSFW 初筛结果 ------------------------------------------------------
+    # ---- NSFW 筛查结果 ------------------------------------------------------
     def set_nsfw(self, root, relpath, content_sha256, *, score, label, status="ok",
                  kind="image", ts_seconds=0.0, stage="first", model_version=None,
-                 nsfw_type=None):
+                 nsfw_type=None, reviewed_by=None, reviewed_at=None):
         """写入一条 NSFW 判定。
 
-        唯一键含 content_sha256：图片换内容就等于换一条记录，旧判定自然失效，不会被
-        当成新内容的结论。ts_seconds 对图片固定 0.0（SQLite 里 NULL 不参与唯一比较，
-        留空会重复插入）。人工复核字段（reviewed_by/reviewed_at）不在 UPDATE 列表里，
-        机器重跑初筛不会抹掉人工结论。
+        两级口径：机器初筛（stage="first"，扫描期与检索期按需打分）与人工复核
+        （stage="second"）。两级各占一行——机器重跑只 upsert first 行，人工结论
+        落在 second 行，天然不会被覆盖。唯一键含 content_sha256：图片换内容就等于
+        换一条记录，旧判定自然失效。ts_seconds 对图片固定 0.0（SQLite 里 NULL 不参与
+        唯一比较，留空会重复插入）。
         """
         with self.lock:
             self.conn.execute("BEGIN IMMEDIATE")
             try:
                 self.conn.execute(
                     "INSERT INTO nsfw_results(root,relpath,content_sha256,kind,ts_seconds,stage,"
-                    "nsfw_type,score,label,status,model_version,created_at)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"
+                    "nsfw_type,score,label,status,model_version,reviewed_by,reviewed_at,created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
                     " ON CONFLICT(root,relpath,content_sha256,kind,stage,ts_seconds) DO UPDATE SET"
                     " nsfw_type=excluded.nsfw_type,score=excluded.score,label=excluded.label,"
                     " status=excluded.status,model_version=excluded.model_version,"
+                    # 只有显式传人工字段时才覆盖，机器调用（None）保留已有复核人/时间
+                    " reviewed_by=COALESCE(excluded.reviewed_by,nsfw_results.reviewed_by),"
+                    " reviewed_at=COALESCE(excluded.reviewed_at,nsfw_results.reviewed_at),"
                     " created_at=excluded.created_at",
                     (root, relpath, content_sha256, kind, float(ts_seconds or 0.0), stage,
                      nsfw_type, None if score is None else float(score), label, status,
-                     model_version, utcnow()))
+                     model_version, reviewed_by, reviewed_at, utcnow()))
                 self.conn.commit()
             except Exception:
                 self.conn.rollback()
@@ -438,26 +442,31 @@ class Store:
         return {"score": score, "label": label, "status": status, "stage": stage}
 
     def nsfw_summary(self, root, relpath):
-        """文件当前内容的初筛结论；内容版本已变或从未跑过时返回 None。"""
+        """文件当前内容的 NSFW 结论：人工复核（second）优先，其次机器初筛（first）。
+
+        内容版本已变或从未跑过时返回 None。
+        """
         with self.lock:
             row = self.conn.execute(
-                "SELECT n.score,n.label,n.status,n.stage,n.nsfw_type,n.reviewed_by FROM nsfw_results n"
-                " JOIN images i ON i.root=n.root AND i.relpath=n.relpath"
+                "SELECT n.score,n.label,n.status,n.stage,n.nsfw_type,n.reviewed_by,n.reviewed_at"
+                " FROM nsfw_results n JOIN images i ON i.root=n.root AND i.relpath=n.relpath"
                 " AND i.content_sha256=n.content_sha256"
-                " WHERE n.root=? AND n.relpath=? AND n.kind='image' AND n.stage='first'"
-                " ORDER BY n.id DESC LIMIT 1", (root, relpath)).fetchone()
+                " WHERE n.root=? AND n.relpath=? AND n.kind='image' AND n.ts_seconds=0.0"
+                " ORDER BY (n.stage='second') DESC, n.id DESC LIMIT 1", (root, relpath)).fetchone()
         if row is None:
             return None
         return {"score": row["score"], "label": row["label"], "status": row["status"],
                 "stage": row["stage"], "nsfw_type": row["nsfw_type"],
-                "reviewed_by": row["reviewed_by"]}
+                "reviewed_by": row["reviewed_by"], "reviewed_at": row["reviewed_at"]}
 
     def content_nsfw_flags(self, content_ids):
-        """内容条目下图片的初筛命中统计：{content_id: {"total": n, "flagged": n}}。
+        """内容条目下图片的 NSFW 命中统计：{content_id: {"total": n, "flagged": n}}。
 
         条目本身没有「是否 NSFW」这个属性——高风险是图片级的判定，内容级只做聚合：
-        该条目已入库的图片里有多少张命中初筛，前端据此在卡片上挂角标并支持筛选。
-        摘要必须与图片行一致，否则那是旧内容版本的结论，不能算到当前条目头上。
+        该条目已入库的图片里有多少张命中筛查，前端据此在卡片上挂角标并支持筛选。
+        每张图取当前内容的有效结论（人工复核优先，见 nsfw_summary），所以人工
+        标为误报后角标会跟着归零。摘要必须与图片行一致，否则那是旧内容版本的
+        结论，不能算到当前条目头上。
         """
         ids = [cid for cid in content_ids if cid]
         if not ids:
@@ -465,17 +474,51 @@ class Store:
         marks = ",".join("?" * len(ids))
         with self.lock:
             rows = self.conn.execute(
-                # 左连接：没跑过初筛的图片也要计入 total，否则角标分母会漏算，
+                # 左连接：没跑过筛查的图片也要计入 total，否则角标分母会漏算，
                 # 而摘要不一致的旧结论只让 flagged 归零、不影响这张图本身的存在。
                 "SELECT i.content_id AS cid, COUNT(*) AS total,"
                 " SUM(CASE WHEN n.label='nsfw' AND n.status='ok' THEN 1 ELSE 0 END) AS flagged"
-                " FROM images i LEFT JOIN nsfw_results n"
-                " ON n.root=i.root AND n.relpath=i.relpath AND n.content_sha256=i.content_sha256"
-                " AND n.kind='image' AND n.stage='first' AND n.ts_seconds=0.0"
+                " FROM images i LEFT JOIN nsfw_results n ON n.id=("
+                "  SELECT n2.id FROM nsfw_results n2"
+                "  WHERE n2.root=i.root AND n2.relpath=i.relpath AND n2.content_sha256=i.content_sha256"
+                "  AND n2.kind='image' AND n2.ts_seconds=0.0"
+                "  ORDER BY (n2.stage='second') DESC, n2.id DESC LIMIT 1)"
                 f" WHERE i.state='ready' AND i.content_id IN ({marks}) GROUP BY i.content_id",
                 ids).fetchall()
         return {row["cid"]: {"total": int(row["total"]), "flagged": int(row["flagged"] or 0)}
                 for row in rows}
+
+    def nsfw_flagged(self, root=None, *, limit=50, offset=0, include_reviewed=True):
+        """集中复核列表：当前内容仍判 NSFW 的图片，人工复核过的可选包含。
+
+        与检索结果的角标同源（有效结论 = second 优先），所以人工标为误报的图会
+        从列表里消失；排序按机器分数从高到低，先看最可疑的。
+        """
+        limit = max(1, min(int(limit), 200))
+        offset = max(0, int(offset))
+        where = ["i.state='ready'", "n.label='nsfw'", "n.status='ok'"]
+        args: list = []
+        if root:
+            where.append("i.root=?")
+            args.append(root)
+        if not include_reviewed:
+            where.append("n.reviewed_by IS NULL")
+        effective = (
+            " FROM images i JOIN nsfw_results n ON n.id=("
+            "  SELECT n2.id FROM nsfw_results n2"
+            "  WHERE n2.root=i.root AND n2.relpath=i.relpath AND n2.content_sha256=i.content_sha256"
+            "  AND n2.kind='image' AND n2.ts_seconds=0.0"
+            "  ORDER BY (n2.stage='second') DESC, n2.id DESC LIMIT 1)")
+        with self.lock:
+            total = self.conn.execute(
+                "SELECT COUNT(*)" + effective + " WHERE " + " AND ".join(where), args).fetchone()[0]
+            rows = self.conn.execute(
+                "SELECT i.root,i.relpath,i.content_sha256,i.content_id,i.content_version,"
+                " n.score,n.label,n.stage,n.nsfw_type,n.reviewed_by,n.reviewed_at" + effective
+                + " WHERE " + " AND ".join(where)
+                + " ORDER BY n.score DESC, i.relpath LIMIT ? OFFSET ?", args + [limit, offset]).fetchall()
+        return {"items": [dict(row) for row in rows], "total": int(total), "limit": limit,
+                "offset": offset}
 
     # ---- 视频代表帧 -------------------------------------------------------
     def video_record(self, root, relpath):
