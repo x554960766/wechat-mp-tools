@@ -69,6 +69,16 @@ def test_extract_frames_respects_limit(tmp_path):
     assert len(samples) == 2
 
 
+def test_extract_frames_short_video_shorter_than_interval(tmp_path):
+    """时长不足一个采样间隔时也要出首帧，否则短视频永远进不了检索。"""
+    video = _make_video(tmp_path / "short.mp4", seconds=2)
+    duration = frames.probe_duration(video)
+    assert duration and duration < 10.0
+    samples = frames.extract_frames(video, duration, 10.0, 10)
+    assert len(samples) == 1
+    assert samples[0][0] == 0.0
+
+
 def test_scan_videos_persists_then_skips_unchanged(tmp_path, monkeypatch):
     root, store = _setup(monkeypatch, tmp_path)
     video = _make_video(root / "作者" / "作品" / "clip.mp4", seconds=3)

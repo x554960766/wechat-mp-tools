@@ -69,9 +69,18 @@ def extract_frames(path: Path, duration: float | None, interval: float, limit: i
              "-vf", f"fps=1/{interval:g}", "-frames:v", str(limit),
              "-q:v", "3", "-y", pattern],
             capture_output=True, text=True, timeout=300, check=False)
-        if done.returncode != 0:
-            raise RuntimeError(f"ffmpeg 抽帧失败：{(done.stderr or '').strip()[:200]}")
         files = sorted(Path(tmp).glob("f*.jpg"))
+        if done.returncode != 0 or not files:
+            # 时长不足一个采样间隔时 fps 过滤器一帧都不吐，ffmpeg 还会报出与像素
+            # 格式无关的编码器初始化错误。退回抽首帧，保证短视频也能被检索。
+            fallback = subprocess.run(
+                [ffmpeg, "-nostdin", "-v", "error", "-i", str(path),
+                 "-frames:v", "1", "-q:v", "3", "-y", pattern],
+                capture_output=True, text=True, timeout=300, check=False)
+            if fallback.returncode != 0:
+                detail = (fallback.stderr or done.stderr or "").strip()[:200]
+                raise RuntimeError(f"ffmpeg 抽帧失败：{detail}")
+            files = sorted(Path(tmp).glob("f*.jpg"))
         frames: list[tuple[float, bytes]] = []
         for index, item in enumerate(files):
             if item.stat().st_size == 0:
