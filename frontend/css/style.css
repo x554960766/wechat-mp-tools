@@ -2192,7 +2192,10 @@ body {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 5px 10px;
+    height: 26px;
+    padding: 0 10px;
+    line-height: 1;
+    vertical-align: middle;
     border: 1px solid var(--border-color);
     border-radius: 999px;
     background: var(--bg-card);
@@ -2343,6 +2346,7 @@ body {
 }
 .media-chip-count {
     font-size: 0.72rem;
+    line-height: 1;
     opacity: 0.72;
 }
 .content-grid {
@@ -3314,6 +3318,10 @@ body {
 .ms-search-card {
     padding: var(--spacing-lg);
     margin-bottom: var(--spacing-lg);
+    /* 筛选小卡片会越过卡片下沿，这里放开裁剪并抬高整卡层级 */
+    position: relative;
+    z-index: 5;
+    overflow: visible;
 }
 .ms-search-row {
     display: flex;
@@ -3357,7 +3365,12 @@ body {
 }
 .ms-scope-row .ms-scope-label {
     margin: 0;
+    line-height: 26px;
     white-space: nowrap;
+}
+/* .media-roots 自带的 8px 下边距会顶偏 flex 行里的基线，范围行里要抹平 */
+.ms-scope-row .media-roots {
+    margin-bottom: 0;
 }
 .ms-account-group {
     display: flex;
@@ -3435,74 +3448,54 @@ body {
     display: none;
 }
 
-/* 筛选抽屉：右侧滑出；底色、圆角、阴影、标题与 .modal-dialog 保持一致 */
-@keyframes drawerFade {
-    from { opacity: 0; }
-    to { opacity: 1; }
+/* 筛选小卡片：锚定在「筛选」按钮下方，不再占满整层抽屉 */
+.ms-filter-wrap {
+    position: relative;
+    display: inline-flex;
 }
-@keyframes drawerSlideIn {
-    from { opacity: 0; transform: translateX(24px); }
-    to { opacity: 1; transform: translateX(0); }
-}
-.ms-drawer-mask {
-    position: fixed;
-    inset: 0;
-    z-index: 900;
-    background: rgba(0, 0, 0, 0.65);
-    animation: drawerFade 0.15s ease;
-}
-.ms-drawer-mask[hidden] {
-    display: none;
-}
-.ms-drawer {
-    position: fixed;
-    top: 0;
+.ms-filter-pop {
+    position: absolute;
+    top: calc(100% + 8px);
     right: 0;
-    z-index: 901;
+    z-index: 50;
     display: flex;
     flex-direction: column;
     gap: var(--spacing-md);
-    width: 380px;
-    max-width: 92vw;
-    height: 100vh;
-    padding: var(--spacing-xl) var(--spacing-lg);
-    overflow: auto;
-    /* 抽屉要挡住底下的页面：--bg-card 是半透明卡片色，直接用会透出页面文字 */
+    width: 320px;
+    max-width: min(360px, 92vw);
+    padding: var(--spacing-md) var(--spacing-lg);
+    /* 压在检索卡之上，卡片是半透明的，必须用不透明底色 */
     background: var(--bg-secondary);
-    border-left: 1px solid var(--border-color);
-    border-radius: var(--radius-xl) 0 0 var(--radius-xl);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
     box-shadow: var(--shadow-lg);
-    animation: drawerSlideIn 0.2s ease;
+    animation: drawerFade 0.15s ease;
 }
-.ms-drawer[hidden] {
+.ms-filter-pop[hidden] {
     display: none;
 }
-.ms-drawer-head {
+.ms-filter-head {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding-bottom: var(--spacing-md);
-    border-bottom: 1px solid var(--border-color);
 }
-.ms-drawer-head h3 {
+.ms-filter-head h3 {
     margin: 0;
-    font-size: 1.2rem;
+    font-size: 1rem;
     font-weight: 700;
     color: var(--text-primary);
 }
-.ms-drawer-foot {
+.ms-filter-field,
+.ms-filter-toggle {
+    margin: 0;
+}
+.ms-filter-foot {
     display: flex;
     justify-content: flex-end;
     gap: var(--spacing-sm);
-    margin-top: auto;
-    padding-top: var(--spacing-md);
+    margin: 0 calc(-1 * var(--spacing-lg)) calc(-1 * var(--spacing-md));
+    padding: var(--spacing-md) var(--spacing-lg);
     border-top: 1px solid var(--border-color);
-}
-.ms-drawer-field {
-    margin: 0;
-}
-.ms-drawer-toggle {
-    margin: 0;
 }
 .ms-tag-row {
     display: flex;
@@ -3516,15 +3509,6 @@ body {
     flex: 1;
     min-width: 0;
 }
-.ms-drawer-foot {
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-    margin-top: auto;
-    padding-top: var(--spacing-md);
-    border-top: 1px solid var(--border-color);
-}
-
 
 /* ==================== 工作台 UI 收敛：全局文件检索条 / 统计条 / 结果 tab ==================== */
 .files-search-card {

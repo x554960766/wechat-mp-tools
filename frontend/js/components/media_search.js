@@ -45,10 +45,47 @@ const MediaSearchPage = {
                     <input type="search" class="form-input ms-q" id="ms-q" autocomplete="off"
                            placeholder="例如：手机壁纸 / 翰墨修心 / 咖啡 手写">
                     <button class="btn btn-primary" id="ms-go">检索</button>
-                    <button class="btn btn-secondary" id="ms-filter-open" type="button"
-                            title="按 NSFW、标签筛选结果">
-                        筛选<span class="ms-filter-count" id="ms-filter-count" hidden>0</span>
-                    </button>
+                    <div class="ms-filter-wrap">
+                        <button class="btn btn-secondary" id="ms-filter-open" type="button"
+                                title="按 NSFW、标签筛选结果">
+                            筛选<span class="ms-filter-count" id="ms-filter-count" hidden>0</span>
+                        </button>
+                        <div class="ms-filter-pop" id="ms-filter-drawer" hidden role="dialog" aria-label="筛选">
+                            <div class="ms-filter-head">
+                                <h3>筛选</h3>
+                                <button class="modal-close" id="ms-filter-close" type="button"
+                                        aria-label="关闭筛选" title="关闭">✕</button>
+                            </div>
+                            <p class="form-hint">更改后立即生效；「重置全部」会清空关键词、平台、账号、标签与查询图。</p>
+
+                            <label class="media-toggle ms-filter-toggle"
+                                   title="只显示含疑似 NSFW 图片的条目；标记不改变检索排序">
+                                <input type="checkbox" id="ms-nsfw-only"> 只看含疑似 NSFW
+                            </label>
+
+                            <div class="form-group ms-filter-field">
+                                <label class="form-label" for="ms-tag-filter">按标签浏览图片</label>
+                                <div class="ms-tag-row">
+                                    <select class="form-input ms-tag-filter" id="ms-tag-filter">
+                                        <option value="">按标签浏览</option>
+                                    </select>
+                                    <button class="btn btn-secondary btn-sm" id="ms-tag-rename"
+                                            title="整体改名选中的标签；新名字已存在时两边合并成一个标签" hidden>改名</button>
+                                </div>
+                            </div>
+
+                            <div class="form-group ms-filter-field">
+                                <label class="form-label" for="ms-root">媒体来源（仅扫描用）</label>
+                                <select class="form-input" id="ms-root"><option value="">读取中…</option></select>
+                                <span class="form-hint">这个选择只用于「扫描选中来源」，不参与检索。</span>
+                            </div>
+
+                            <div class="ms-filter-foot">
+                                <button class="btn btn-secondary btn-sm" id="ms-filter-reset" type="button">重置全部</button>
+                                <button class="btn btn-primary btn-sm" id="ms-filter-apply" type="button">完成</button>
+                            </div>
+                        </div>
+                    </div>
                     <button class="btn btn-secondary" id="ms-image-toggle" type="button"
                             title="上传图片或粘贴图片网址，按图找相似内容">📷 以图找图</button>
                     <div class="ms-menu-wrap">
@@ -117,41 +154,6 @@ const MediaSearchPage = {
                 </div>
             </div>
 
-            <div class="ms-drawer-mask" id="ms-filter-mask" hidden></div>
-            <aside class="ms-drawer" id="ms-filter-drawer" hidden aria-label="筛选">
-                <div class="ms-drawer-head">
-                    <h3>筛选</h3>
-                    <button class="modal-close" id="ms-filter-close" type="button" aria-label="关闭筛选" title="关闭">✕</button>
-                </div>
-                <p class="form-hint">更改后立即生效；「重置全部」会清空关键词、平台、账号、标签与查询图。</p>
-
-                <label class="media-toggle ms-drawer-toggle"
-                       title="只显示含疑似 NSFW 图片的条目；标记不改变检索排序">
-                    <input type="checkbox" id="ms-nsfw-only"> 只看含疑似 NSFW
-                </label>
-
-                <div class="form-group ms-drawer-field">
-                    <label class="form-label" for="ms-tag-filter">按标签浏览图片</label>
-                    <div class="ms-tag-row">
-                        <select class="form-input ms-tag-filter" id="ms-tag-filter">
-                            <option value="">按标签浏览</option>
-                        </select>
-                        <button class="btn btn-secondary btn-sm" id="ms-tag-rename"
-                                title="整体改名选中的标签；新名字已存在时两边合并成一个标签" hidden>改名</button>
-                    </div>
-                </div>
-
-                <div class="form-group ms-drawer-field">
-                    <label class="form-label" for="ms-root">媒体来源（仅扫描用）</label>
-                    <select class="form-input" id="ms-root"><option value="">读取中…</option></select>
-                    <span class="form-hint">这个选择只用于「扫描选中来源」，不参与检索。</span>
-                </div>
-
-                <div class="ms-drawer-foot">
-                    <button class="btn btn-secondary" id="ms-filter-reset" type="button">重置全部</button>
-                    <button class="btn btn-primary" id="ms-filter-apply" type="button">完成</button>
-                </div>
-            </aside>
 
             <div id="ms-image-hits" class="media-results" hidden></div>
             <p id="ms-image-status" class="form-hint" role="status"></p>
@@ -254,13 +256,16 @@ const MediaSearchPage = {
 
         // 检索条上的「筛选」「以图找图」「⋯」：抽屉与菜单只在本页存活，不跨页保存
         const filterOpen = document.getElementById('ms-filter-open');
-        if (filterOpen) filterOpen.addEventListener('click', () => this.openFilterDrawer());
+        if (filterOpen) filterOpen.addEventListener('click', () => {
+            const pop = document.getElementById('ms-filter-drawer');
+            // 再点一次同一个按钮就收起，省得用户去找空白处点
+            if (pop && !pop.hidden) this.closeFilterDrawer();
+            else this.openFilterDrawer();
+        });
         const filterClose = document.getElementById('ms-filter-close');
         if (filterClose) filterClose.addEventListener('click', () => this.closeFilterDrawer());
         const filterApply = document.getElementById('ms-filter-apply');
         if (filterApply) filterApply.addEventListener('click', () => this.closeFilterDrawer());
-        const filterMask = document.getElementById('ms-filter-mask');
-        if (filterMask) filterMask.addEventListener('click', () => this.closeFilterDrawer());
         const filterReset = document.getElementById('ms-filter-reset');
         if (filterReset) filterReset.addEventListener('click', () => this.clearAll());
         const imageToggle = document.getElementById('ms-image-toggle');
@@ -279,6 +284,8 @@ const MediaSearchPage = {
         // ⋯ 菜单点外部自动收起；监听挂在 document 上，destroy 里要解绑
         this._menuOutside = (e) => {
             if (!e.target.closest || !e.target.closest('.ms-menu-wrap')) this.closeMoreMenu();
+            const wrap = document.querySelector('.ms-filter-wrap');
+            if (wrap && !wrap.contains(e.target)) this.closeFilterDrawer();
         };
         document.addEventListener('click', this._menuOutside);
         // 先取归档平台元数据，账号行的下载门控依赖它；失败也继续，只是下载按钮禁用。
@@ -949,17 +956,13 @@ const MediaSearchPage = {
 
     // ── 检索条上的抽屉 / 菜单 / 图片模式 ────────────────
     openFilterDrawer() {
-        const mask = document.getElementById('ms-filter-mask');
-        const drawer = document.getElementById('ms-filter-drawer');
-        if (mask) mask.hidden = false;
-        if (drawer) drawer.hidden = false;
+        const pop = document.getElementById('ms-filter-drawer');
+        if (pop) pop.hidden = false;
     },
 
     closeFilterDrawer() {
-        const mask = document.getElementById('ms-filter-mask');
-        const drawer = document.getElementById('ms-filter-drawer');
-        if (mask) mask.hidden = true;
-        if (drawer) drawer.hidden = true;
+        const pop = document.getElementById('ms-filter-drawer');
+        if (pop) pop.hidden = true;
     },
 
     closeMoreMenu() {

@@ -70,9 +70,12 @@ def test_media_source_falls_back_to_default_root(source):
     assert "this._roots[0]" in root
 
 
-def test_scan_only_controls_live_in_drawer(source):
-    """媒体来源只服务「扫描」，不该和检索条件并排；NSFW 与标签收进筛选抽屉。"""
-    drawer = _between(source, 'id="ms-filter-drawer"', 'id="ms-image-hits"')
+def test_scan_only_controls_live_in_filter_popover(source):
+    """媒体来源只服务「扫描」，不该和检索条件并排；NSFW 与标签收进筛选小卡片。"""
+    # 筛选不是整层抽屉，而是锚在「筛选」按钮下方的小卡片：无遮罩、点外部收起
+    assert 'class="ms-filter-wrap"' in source
+    assert 'ms-filter-mask' not in source
+    drawer = _between(source, 'class="ms-filter-pop"', 'id="ms-image-hits"')
     for element in ("ms-nsfw-only", "ms-tag-filter", "ms-root", "ms-filter-reset"):
         assert f'id="{element}"' in drawer, f"{element} 应在筛选抽屉里"
     # 扫描/下载记录/待复核是管理动作，收进 ⋯ 菜单
