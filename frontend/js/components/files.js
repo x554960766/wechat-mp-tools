@@ -37,6 +37,16 @@ const FilesPage = {
     // 卡片折叠：默认只折清单（一进页面就摊开 50 行太长）；状态存 localStorage，切页回来不重置
     _cardState: null,
     _collapsedByDefault: ['list'],
+    // 清单展示方式：list（行）/ grid（卡片）；用户切换后存 localStorage，切页或刷新保持上次选择
+    _viewMode: 'list',
+    _viewModeKey: 'files:viewMode',
+    // 悬停预览：单例浮层 + 延时计时器；指针离开、滚动或切页都要收起，避免浮层留在屏幕上
+    _hoverPreview: null,
+    _hoverTimer: null,
+    _hoverScrollBound: false,
+    // 浮层显示时刻：刚出现的 350ms 内忽略滚动事件，避免「滚动后立刻悬停」被误收起
+    _hoverShownAt: 0,
+    _hoverWheelHandler: null,
 
     esc(value) {
         return String(value == null ? '' : value)
@@ -66,6 +76,12 @@ const FilesPage = {
         return `/media/api/media/video?root=${encodeURIComponent(item.root || '')}`
             + `&relpath=${encodeURIComponent(item.relpath || '')}`
             + `&version=${encodeURIComponent(item.content_sha256 || '')}`;
+    },
+
+    /** 视频代表帧（抽帧扫描的 ts=0 一定存在）。未抽帧的视频会 404，前端捕获 error 退回图标。 */
+    _frameUrl(item, ts = 0) {
+        return `/media/api/media/frame?root=${encodeURIComponent(item.root || '')}`
+            + `&relpath=${encodeURIComponent(item.relpath || '')}&ts=${ts}`;
     },
 
     _formatSize(bytes) {
@@ -123,42 +139,49 @@ const FilesPage = {
                 </p>
             </div>
 
-            <div class="files-grid">
-                <div class="card" data-card="stats">
-                    <div class="card-header"><h3 class="card-title">清单概览</h3></div>
-                    <div id="files-stats-body"><p class="form-hint">加载中…</p></div>
+            <div class="card files-search-card">
+                <div class="files-search-row">
+                    <input class="form-input files-q" id="files-q" type="search"
+                           placeholder="文件名关键词，回车检索" autocomplete="off">
+                    <select class="form-input files-kind" id="files-kind" aria-label="类型">
+                        <option value="">全部类型</option>
+                        <option value="image">图片</option>
+                        <option value="text">文本</option>
+                        <option value="video">视频</option>
+                    </select>
+                    <select class="form-input files-root" id="files-root" aria-label="媒体根">
+                        <option value="">全部根</option>
+                    </select>
+                    <button class="btn btn-primary" id="files-search">检索</button>
+                    <button class="btn btn-secondary" id="files-more-filters" type="button"
+                            title="扩展名、重复状态与 NSFW 筛选">更多筛选<span class="files-more-count" id="files-more-count" hidden>0</span></button>
+                    <div class="files-menu-wrap">
+                        <button class="btn btn-secondary files-menu-btn" id="files-more" type="button"
+                                title="索引管理与内容审核">⋯</button>
+                        <div class="files-menu" id="files-more-menu" hidden>
+                            <div class="files-menu-section">
+                                <label class="files-menu-label" for="files-scan-root">扫描来源</label>
+                                <select class="form-input" id="files-scan-root"><option value="">读取中…</option></select>
+                                <div class="files-menu-actions">
+                                    <button class="btn btn-secondary btn-sm" id="files-scan">扫描新增</button>
+                                    <button class="btn btn-secondary btn-sm" id="files-rescan">重建索引</button>
+                                </div>
+                                <span class="form-hint" id="files-scan-state"></span>
+                            </div>
+                            <button class="files-menu-item" id="files-open-review" type="button">
+                                内容审核（NSFW）
+                                <span class="files-menu-item-sub">检测未判定 / 任意目录 / 单文件，以及待复核队列</span>
+                            </button>
+                            <button class="files-menu-item" id="files-reset" type="button">重置检索条件</button>
+                        </div>
+                    </div>
                 </div>
-                <div class="card" data-card="dupStats">
-                    <div class="card-header"><h3 class="card-title">重复情况</h3></div>
-                    <div id="files-dups-body"><p class="form-hint">加载中…</p></div>
-                </div>
-            </div>
+                <p class="form-hint">扫描会把所选媒体根里的文件重新入库。索引变化后，本页的概览、清单与重复组会自动刷新。</p>
 
-            <div class="card" data-card="filters">
-                <div class="card-header"><h3 class="card-title">检索条件</h3></div>
-                <div class="files-grid">
-                    <div class="form-group">
-                        <label class="form-label" for="files-q">文件名关键词</label>
-                        <input class="form-input" id="files-q" type="text" placeholder="按相对路径模糊匹配，回车检索">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="files-root">媒体根</label>
-                        <select class="form-input" id="files-root">
-                            <option value="">全部根</option>
-                        </select>
-                    </div>
+                <div class="files-adv-filters" id="files-adv-filters" hidden>
                     <div class="form-group">
                         <label class="form-label" for="files-ext">扩展名</label>
                         <input class="form-input" id="files-ext" type="text" placeholder="如 jpg、mp4">
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="files-kind">类型</label>
-                        <select class="form-input" id="files-kind">
-                            <option value="">全部</option>
-                            <option value="image">图片</option>
-                            <option value="text">文本</option>
-                            <option value="video">视频</option>
-                        </select>
                     </div>
                     <div class="form-group">
                         <label class="form-label" for="files-dup">重复状态</label>
@@ -176,31 +199,19 @@ const FilesPage = {
                             <option value="unreviewed">只看待复核</option>
                         </select>
                     </div>
-                    <div class="form-group" style="justify-content:flex-end;">
-                        <div class="btn-group">
-                            <button class="btn btn-primary" id="files-search">检索</button>
-                            <button class="btn btn-secondary" id="files-reset">重置</button>
-                        </div>
-                    </div>
                 </div>
             </div>
 
-            <div class="card" data-card="index">
-                <div class="card-header"><h3 class="card-title">索引管理</h3></div>
-                <div class="files-grid">
-                    <div class="form-group">
-                        <label class="form-label" for="files-scan-root">扫描来源</label>
-                        <select class="form-input" id="files-scan-root"><option value="">读取中…</option></select>
-                    </div>
-                    <div class="form-group" style="justify-content:flex-end;">
-                        <div class="btn-group">
-                            <button class="btn btn-secondary" id="files-scan">扫描新增</button>
-                            <button class="btn btn-secondary" id="files-rescan">重建索引</button>
-                        </div>
-                    </div>
+            <div class="card files-summary" data-card="stats">
+                <div class="card-header">
+                    <h3 class="card-title">清单概览</h3>
+                    <span class="form-hint">点数字或标签，直接查看对应清单</span>
                 </div>
-                <p class="form-hint">扫描会把所选媒体根里的文件重新入库。索引变化后，本页的概览、清单与重复组会自动刷新。</p>
-                <span class="form-hint" id="files-scan-state"></span>
+                <div id="files-stats-body"><p class="form-hint">加载中…</p></div>
+                <div class="files-dup-inline">
+                    <span class="files-block-title">重复情况</span>
+                    <div id="files-dups-body"><span class="form-hint">加载中…</span></div>
+                </div>
             </div>
 
             <style>
@@ -234,128 +245,150 @@ const FilesPage = {
                 }
             </style>
 
-            <div class="card" data-card="probe">
-                <div class="card-header">
-                    <h3 class="card-title">内容审核（NSFW）</h3>
-                    <div class="btn-group" id="files-probe-scope">
-                        <button class="btn btn-primary btn-sm" data-scope="library">媒体库</button>
-                        <button class="btn btn-secondary btn-sm" data-scope="path">任意目录</button>
-                        <button class="btn btn-secondary btn-sm" data-scope="upload">单个文件</button>
-                    </div>
-                </div>
-                <p class="form-hint" id="files-nsfw-state"></p>
-
-                <div data-panel="library">
-                    <div class="btn-group">
-                        <button class="btn btn-secondary btn-sm" id="files-nsfw-scan">检测未判定</button>
-                        <button class="btn btn-secondary btn-sm" id="files-nsfw-rescan">全部重检</button>
-                    </div>
-                    <p class="form-hint">只扫已入库索引：结论写入索引、计入覆盖率，判疑似的会进入下方「待复核」队列。</p>
-                </div>
-
-                <div data-panel="path" hidden>
-                    <div class="files-grid">
-                        <div class="form-group">
-                            <label class="form-label" for="files-probe-path">目录绝对路径</label>
-                            <input class="form-input" id="files-probe-path" placeholder="/Users/you/Pictures" autocomplete="off">
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label" for="files-probe-kinds">检测类型</label>
-                            <select class="form-input" id="files-probe-kinds">
-                                <option value="">图片 + 视频</option>
-                                <option value="image">仅图片</option>
-                                <option value="video">仅视频</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label class="form-label" for="files-probe-interval">视频抽帧间隔</label>
-                            <select class="form-input" id="files-probe-interval">
-                                <option value="2">2 秒</option>
-                                <option value="5" selected>5 秒</option>
-                                <option value="10">10 秒</option>
-                            </select>
-                        </div>
-                        <div class="form-group" style="justify-content:flex-end;">
-                            <label class="form-label" style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer;">
-                                <input type="checkbox" id="files-probe-recursive" checked> 含子目录
-                            </label>
-                        </div>
-                    </div>
-                    <div class="btn-group">
-                        <button class="btn btn-secondary btn-sm" id="files-probe-check">预检</button>
-                        <button class="btn btn-primary btn-sm" id="files-probe-start" disabled>开始检测</button>
-                    </div>
-                    <p class="form-hint" id="files-probe-check-state">先预检确认路径可读、能扫到多少文件。该范围只本次有效：结果不入索引、不计覆盖率；需要留档的文件在结果里单独「入库」。</p>
-                </div>
-
-                <div data-panel="upload" hidden>
-                    <div class="files-probe-drop" id="files-probe-drop">
-                        <div class="files-probe-drop-title">把图片或视频拖到这里</div>
-                        <div class="files-probe-drop-hint">也可以点击选择文件。只检测这一个文件，原件会保留到你决定是否入库为止。</div>
-                    </div>
-                    <input type="file" id="files-probe-file" accept="image/*,video/*" hidden>
-                    <p class="form-hint" id="files-probe-upload-state"></p>
-                </div>
-            </div>
-
-            <div class="card" id="files-probe-card" hidden>
-                <div class="card-header">
-                    <h3 class="card-title">本次检测结果</h3>
-                    <div class="btn-group">
-                        <label class="form-hint" style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer;">
-                            <input type="checkbox" id="files-probe-flagged-only"> 只看疑似
-                        </label>
-                        <button class="btn btn-secondary btn-sm" id="files-probe-more" hidden>加载更多</button>
-                        <button class="btn btn-secondary btn-sm" id="files-probe-cancel" hidden>取消检测</button>
-                    </div>
-                </div>
-                <p class="form-hint" id="files-probe-summary"></p>
-                <div class="files-grid" id="files-probe-target" hidden>
-                    <div class="form-group">
-                        <label class="form-label" for="files-probe-root">入库目标媒体根</label>
-                        <select class="form-input" id="files-probe-root"></select>
-                    </div>
-                    <div class="form-group">
-                        <label class="form-label" for="files-probe-dir">目标子目录（可空）</label>
-                        <input class="form-input" id="files-probe-dir" placeholder="例如 inbox/2026-11" autocomplete="off">
-                    </div>
-                </div>
-                <div id="files-probe-items"></div>
-            </div>
-
-            <div class="card" data-card="review">
-                <div class="card-header">
-                    <h3 class="card-title">待复核（媒体库）</h3>
-                    <button class="btn btn-secondary btn-sm" id="files-nsfw-load">加载待复核</button>
-                </div>
-                <div id="files-nsfw-panel"><p class="form-hint">点击「加载待复核」查看已入库、仍判疑似敏感的图片，可直接确认敏感或标为误报。</p></div>
-            </div>
-
             <div class="card" data-card="list">
                 <div class="card-header">
-                    <h3 class="card-title">文件清单</h3>
-                    <span class="form-hint" id="files-count">—</span>
+                    <h3 class="card-title">结果</h3>
+                    <div class="files-result-tabs" id="files-result-tabs" role="tablist">
+                        <button type="button" class="files-result-tab is-active" id="files-tab-list"
+                                data-tab="list" role="tab" aria-selected="true">清单</button>
+                        <button type="button" class="files-result-tab" id="files-tab-dups"
+                                data-tab="dups" role="tab" aria-selected="false">重复组</button>
+                    </div>
+                    <div class="files-list-tools">
+                        <div class="files-view-toggle" id="files-view-toggle" role="group" aria-label="文件清单展示方式">
+                            <button type="button" class="files-view-btn" data-view="list" aria-pressed="true" title="列表展示">☰ 列表</button>
+                            <button type="button" class="files-view-btn" data-view="grid" aria-pressed="false" title="卡片网格展示">▦ 网格</button>
+                        </div>
+                        <button class="btn btn-secondary btn-sm" id="files-load-dups" hidden>刷新重复组</button>
+                        <span class="form-hint" id="files-count">—</span>
+                    </div>
                 </div>
-                <div id="files-list"><div class="empty-state"><p class="form-hint">加载中…</p></div></div>
-                <div class="btn-group" id="files-pager">
-                    <button class="btn btn-secondary" id="files-prev">上一页</button>
-                    <span class="files-pager-jump" id="files-page">
-                        <input class="form-input files-page-input" id="files-page-input" type="number" min="1" value="1"
-                               inputmode="numeric" aria-label="跳到指定页，回车确认" title="输入页码后回车跳转">
-                        <span class="form-hint" id="files-page-total">/ 1</span>
-                    </span>
-                    <button class="btn btn-secondary" id="files-next">下一页</button>
+
+                <div class="files-result-panel" data-panel="list">
+                    <div id="files-list"><div class="empty-state"><p class="form-hint">加载中…</p></div></div>
+                    <div class="btn-group" id="files-pager">
+                        <button class="btn btn-secondary" id="files-prev">上一页</button>
+                        <span class="files-pager-jump" id="files-page">
+                            <input class="form-input files-page-input" id="files-page-input" type="number" min="1" value="1"
+                                   inputmode="numeric" aria-label="跳到指定页，回车确认" title="输入页码后回车跳转">
+                            <span class="form-hint" id="files-page-total">/ 1</span>
+                        </span>
+                        <button class="btn btn-secondary" id="files-next">下一页</button>
+                    </div>
+                </div>
+
+                <div class="files-result-panel" data-panel="dups" hidden>
+                    <div id="files-dups"><p class="form-hint">点击「刷新重复组」查看按内容摘要归并的重复文件。</p></div>
                 </div>
             </div>
 
-            <div class="card" data-card="dupGroups">
-                <div class="card-header">
-                    <h3 class="card-title">重复内容组</h3>
-                    <button class="btn btn-secondary btn-sm" id="files-load-dups">刷新重复组</button>
+            <div class="files-drawer-mask" id="files-review-mask" hidden></div>
+            <aside class="files-drawer" id="files-review-drawer" hidden aria-label="内容审核">
+                <div class="files-drawer-head">
+                    <h3>内容审核（NSFW）</h3>
+                    <button class="btn btn-secondary btn-sm" id="files-review-close" type="button">关闭</button>
                 </div>
-                <div id="files-dups"><p class="form-hint">点击「刷新重复组」查看按内容摘要归并的重复文件。</p></div>
-            </div>
+                <p class="form-hint">
+                    检测范围一次只选一种：媒体库（已入库索引）、任意目录（临时检测）、单个文件。
+                </p>
 
+                <div class="card files-drawer-card" data-card="probe">
+                    <div class="card-header">
+                        <h3 class="card-title">检测范围</h3>
+                        <div class="btn-group" id="files-probe-scope">
+                            <button class="btn btn-primary btn-sm" data-scope="library">媒体库</button>
+                            <button class="btn btn-secondary btn-sm" data-scope="path">任意目录</button>
+                            <button class="btn btn-secondary btn-sm" data-scope="upload">单个文件</button>
+                        </div>
+                    </div>
+                    <p class="form-hint" id="files-nsfw-state"></p>
+
+                    <div data-panel="library">
+                        <div class="btn-group">
+                            <button class="btn btn-secondary btn-sm" id="files-nsfw-scan">检测未判定</button>
+                            <button class="btn btn-secondary btn-sm" id="files-nsfw-rescan">全部重检</button>
+                        </div>
+                        <p class="form-hint">只扫已入库索引：结论写入索引、计入覆盖率，判疑似的会进入下方「待复核」队列。</p>
+                    </div>
+
+                    <div data-panel="path" hidden>
+                        <div class="files-grid">
+                            <div class="form-group">
+                                <label class="form-label" for="files-probe-path">目录绝对路径</label>
+                                <input class="form-input" id="files-probe-path" placeholder="/Users/you/Pictures" autocomplete="off">
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label" for="files-probe-kinds">检测类型</label>
+                                <select class="form-input" id="files-probe-kinds">
+                                    <option value="">图片 + 视频</option>
+                                    <option value="image">仅图片</option>
+                                    <option value="video">仅视频</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label class="form-label" for="files-probe-interval">视频抽帧间隔</label>
+                                <select class="form-input" id="files-probe-interval">
+                                    <option value="2">2 秒</option>
+                                    <option value="5" selected>5 秒</option>
+                                    <option value="10">10 秒</option>
+                                </select>
+                            </div>
+                            <div class="form-group" style="justify-content:flex-end;">
+                                <label class="form-label" style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer;">
+                                    <input type="checkbox" id="files-probe-recursive" checked> 含子目录
+                                </label>
+                            </div>
+                        </div>
+                        <div class="btn-group">
+                            <button class="btn btn-secondary btn-sm" id="files-probe-check">预检</button>
+                            <button class="btn btn-primary btn-sm" id="files-probe-start" disabled>开始检测</button>
+                        </div>
+                        <p class="form-hint" id="files-probe-check-state">先预检确认路径可读、能扫到多少文件。该范围只本次有效：结果不入索引、不计覆盖率；需要留档的文件在结果里单独「入库」。</p>
+                    </div>
+
+                    <div data-panel="upload" hidden>
+                        <div class="files-probe-drop" id="files-probe-drop">
+                            <div class="files-probe-drop-title">把图片或视频拖到这里</div>
+                            <div class="files-probe-drop-hint">也可以点击选择文件。只检测这一个文件，原件会保留到你决定是否入库为止。</div>
+                        </div>
+                        <input type="file" id="files-probe-file" accept="image/*,video/*" hidden>
+                        <p class="form-hint" id="files-probe-upload-state"></p>
+                    </div>
+                </div>
+
+                <div class="card files-drawer-card" id="files-probe-card" hidden>
+                    <div class="card-header">
+                        <h3 class="card-title">本次检测结果</h3>
+                        <div class="btn-group">
+                            <label class="form-hint" style="display:flex;align-items:center;gap:6px;margin:0;cursor:pointer;">
+                                <input type="checkbox" id="files-probe-flagged-only"> 只看疑似
+                            </label>
+                            <button class="btn btn-secondary btn-sm" id="files-probe-more" hidden>加载更多</button>
+                            <button class="btn btn-secondary btn-sm" id="files-probe-cancel" hidden>取消检测</button>
+                        </div>
+                    </div>
+                    <p class="form-hint" id="files-probe-summary"></p>
+                    <div class="files-grid" id="files-probe-target" hidden>
+                        <div class="form-group">
+                            <label class="form-label" for="files-probe-root">入库目标媒体根</label>
+                            <select class="form-input" id="files-probe-root"></select>
+                        </div>
+                        <div class="form-group">
+                            <label class="form-label" for="files-probe-dir">目标子目录（可空）</label>
+                            <input class="form-input" id="files-probe-dir" placeholder="例如 inbox/2026-11" autocomplete="off">
+                        </div>
+                    </div>
+                    <div id="files-probe-items"></div>
+                </div>
+
+                <div class="card files-drawer-card" data-card="review">
+                    <div class="card-header">
+                        <h3 class="card-title">待复核（媒体库）</h3>
+                        <button class="btn btn-secondary btn-sm" id="files-nsfw-load">加载待复核</button>
+                    </div>
+                    <div id="files-nsfw-panel"><p class="form-hint">点击「加载待复核」查看已入库、仍判疑似敏感的图片，可直接确认敏感或标为误报。</p></div>
+                </div>
+            </aside>
         `;
     },
 
@@ -364,6 +397,8 @@ const FilesPage = {
         this._items = [];
         this._dupGroups = [];
         this._viewer = new MediaViewer('fv');
+        this._viewMode = this._readViewMode();
+        this._resultTab = 'list';
         // 先装折叠：后续 _load* 写入的内容都落在 card-body 里，收起时一起隐藏。
         this._initCards();
 
@@ -387,6 +422,46 @@ const FilesPage = {
         if (extInput) extInput.addEventListener('keydown', (event) => {
             if (event.key === 'Enter') this._search();
         });
+        // 更多筛选：默认收起，展开后与常驻 3 个条件一起生效；角标显示已启用的条件数
+        const moreFilters = document.getElementById('files-more-filters');
+        if (moreFilters) moreFilters.addEventListener('click', () => {
+            const panel = document.getElementById('files-adv-filters');
+            if (panel) {
+                panel.hidden = !panel.hidden;
+                moreFilters.setAttribute('aria-expanded', String(!panel.hidden));
+            }
+        });
+        ['files-ext', 'files-dup', 'files-nsfw'].forEach((id) => {
+            const el = document.getElementById(id);
+            if (el) el.addEventListener('input', () => this._syncMoreCount());
+        });
+        // ⋯ 菜单：索引管理与内容审核入口；点外部自动收起
+        const more = document.getElementById('files-more');
+        if (more) more.addEventListener('click', (event) => {
+            event.stopPropagation();
+            const menu = document.getElementById('files-more-menu');
+            if (menu) menu.hidden = !menu.hidden;
+        });
+        this._menuOutside = (event) => {
+            if (!event.target.closest || !event.target.closest('.files-menu-wrap')) this._closeMenu();
+        };
+        document.addEventListener('click', this._menuOutside);
+        const openReview = document.getElementById('files-open-review');
+        if (openReview) openReview.addEventListener('click', () => {
+            this._closeMenu();
+            this._openReviewDrawer();
+        });
+        const reviewClose = document.getElementById('files-review-close');
+        if (reviewClose) reviewClose.addEventListener('click', () => this._closeReviewDrawer());
+        const reviewMask = document.getElementById('files-review-mask');
+        if (reviewMask) reviewMask.addEventListener('click', () => this._closeReviewDrawer());
+        // 结果区 tab：清单与重复组共用一块版面
+        const resultTabs = document.getElementById('files-result-tabs');
+        if (resultTabs) resultTabs.addEventListener('click', (event) => {
+            const btn = event.target.closest('[data-tab]');
+            if (btn) this._showResultTab(btn.dataset.tab);
+        });
+        this._showResultTab('list');
         const prevBtn = document.getElementById('files-prev');
         if (prevBtn) prevBtn.addEventListener('click', () => this._goPage(this._page - 1));
         const nextBtn = document.getElementById('files-next');
@@ -404,6 +479,14 @@ const FilesPage = {
         // 列表内的查看/播放动作用事件委托：清单每次重渲染，逐个绑定会在 DOM 替换后失效。
         const listEl = document.getElementById('files-list');
         if (listEl) listEl.addEventListener('click', (event) => this._onListClick(event));
+        const viewToggle = document.getElementById('files-view-toggle');
+        if (viewToggle) viewToggle.addEventListener('click', (event) => {
+            const btn = event.target.closest('[data-view]');
+            if (btn) this._setViewMode(btn.dataset.view);
+        });
+        this._applyViewMode();
+        this._initHoverPreview();
+        this._bindHoverPreview();
         // 概览块每次刷新都会整体重渲染，委托绑在固定容器上。
         const statsBody = document.getElementById('files-stats-body');
         if (statsBody) statsBody.addEventListener('click', (event) => this._onStatsClick(event));
@@ -445,6 +528,27 @@ const FilesPage = {
     },
 
     destroy() {
+        this._hidePreview();
+        if (this._menuOutside) {
+            document.removeEventListener('click', this._menuOutside);
+            this._menuOutside = null;
+        }
+        this._closeMenu();
+        this._closeReviewDrawer();
+        if (this._hoverPreview) {
+            this._hoverPreview.remove();
+            this._hoverPreview = null;
+        }
+        this._hoverShownAt = 0;
+        if (this._hoverScrollHandler) {
+            window.removeEventListener('scroll', this._hoverScrollHandler, true);
+            this._hoverScrollHandler = null;
+            this._hoverScrollBound = false;
+        }
+        if (this._hoverWheelHandler) {
+            window.removeEventListener('wheel', this._hoverWheelHandler, true);
+            this._hoverWheelHandler = null;
+        }
         if (this._scanTimer) {
             clearInterval(this._scanTimer);
             this._scanTimer = null;
@@ -553,6 +657,56 @@ const FilesPage = {
         } catch (err) {
             body.innerHTML = '<p class="form-hint" style="color:var(--error)">概览加载失败：' + this.esc(err.message || err) + '</p>';
         }
+    },
+
+    // ── 结果 tab / ⋯ 菜单 / 审核抽屉 ─────────────────────────
+    /** 清单与重复组共用一块版面：切 tab 只换内容，不动检索条件。 */
+    _showResultTab(tab) {
+        this._resultTab = tab === 'dups' ? 'dups' : 'list';
+        const tabs = document.querySelectorAll('#files-result-tabs [data-tab]');
+        tabs.forEach((btn) => {
+            const active = btn.dataset.tab === this._resultTab;
+            btn.classList.toggle('is-active', active);
+            btn.setAttribute('aria-selected', String(active));
+        });
+        document.querySelectorAll('.files-result-panel').forEach((panel) => {
+            panel.hidden = panel.dataset.panel !== this._resultTab;
+        });
+        const isDups = this._resultTab === 'dups';
+        const tools = document.getElementById('files-view-toggle');
+        if (tools) tools.hidden = isDups;
+        const count = document.getElementById('files-count');
+        if (count) count.hidden = isDups;
+        const loadDups = document.getElementById('files-load-dups');
+        if (loadDups) loadDups.hidden = !isDups;
+    },
+
+    _syncMoreCount() {
+        const badge = document.getElementById('files-more-count');
+        if (!badge) return;
+        const value = (id) => (document.getElementById(id) || {}).value || '';
+        const count = ['files-ext', 'files-dup', 'files-nsfw'].filter((id) => value(id)).length;
+        badge.textContent = String(count);
+        badge.hidden = count === 0;
+    },
+
+    _closeMenu() {
+        const menu = document.getElementById('files-more-menu');
+        if (menu) menu.hidden = true;
+    },
+
+    _openReviewDrawer() {
+        const mask = document.getElementById('files-review-mask');
+        const drawer = document.getElementById('files-review-drawer');
+        if (mask) mask.hidden = false;
+        if (drawer) drawer.hidden = false;
+    },
+
+    _closeReviewDrawer() {
+        const mask = document.getElementById('files-review-mask');
+        const drawer = document.getElementById('files-review-drawer');
+        if (mask) mask.hidden = true;
+        if (drawer) drawer.hidden = true;
     },
 
     /**
@@ -673,6 +827,7 @@ const FilesPage = {
         const token = act.dataset.stat
             || (act.dataset.kind ? 'kind:' + act.dataset.kind : '')
             || (act.dataset.root ? 'root:' + act.dataset.root : '');
+        this._showResultTab('list');
         this._jumpToCard('list', token || 'list');
     },
 
@@ -681,7 +836,9 @@ const FilesPage = {
         const act = event.target.closest('[data-jump]');
         if (!act) return;
         if (typeof act.blur === 'function') act.blur();
-        this._jumpToCard(act.dataset.jump, 'jump:' + act.dataset.jump);
+        // 重复组的数字指向下方分组明细：先切到「重复组」tab，再定位到结果卡
+        this._showResultTab('dups');
+        this._jumpToCard('list', 'jump:' + act.dataset.jump);
     },
 
     /** 跳到目标卡片：折叠时先展开再滚过去，否则只看见一个标题。
@@ -746,36 +903,74 @@ const FilesPage = {
         }
     },
 
+    // ── 清单渲染：列表 / 卡片网格 ─────────────────────────
+    /** 内容重复与 NSFW 结论徽标；两者都只依赖行数据，列表与网格共用。 */
+    _itemBadges(item) {
+        const dupBadge = Number(item.dup_count) > 1
+            ? `<span class="files-badge files-badge-dup">重复 ×${this.esc(item.dup_count)}</span>`
+            : `<span class="files-badge files-badge-ok">唯一</span>`;
+        return `${dupBadge}${this._nsfwBadge(item)}`;
+    },
+
+    /** 行/卡片底部动作按钮；删除只对可写媒体根开放，避免点了才被拒绝。 */
+    _itemActions(item, index) {
+        let actions = '';
+        if (item.kind === 'image') {
+            actions = `<button class="btn btn-secondary btn-sm" data-act="view" data-index="${index}">普通查看</button>
+                       <button class="btn btn-secondary btn-sm" data-act="pano" data-index="${index}">VR 全景</button>`;
+        } else if (item.kind === 'video') {
+            actions = `<a class="btn btn-secondary btn-sm" href="${this.esc(this._videoUrl(item))}" target="_blank" rel="noopener">播放</a>`;
+        }
+        const rootInfo = this._roots[item.root];
+        const delBtn = (rootInfo && rootInfo.writable)
+            ? `<button class="btn btn-danger btn-sm" data-act="delete" data-root="${this.esc(item.root)}" data-relpath="${this.esc(item.relpath)}">删除</button>`
+            : '';
+        return `${actions}${delBtn}`;
+    },
+
+    /** 缩略图内容：图片走 360 缩略图，视频用 ts=0 的抽帧做海报，文本显示图标。 */
+    _thumbMarkup(item) {
+        if (item.kind === 'image') {
+            return `<img class="files-thumb" src="${this.esc(this._thumbUrl(item))}" loading="lazy" alt="">`;
+        }
+        if (item.kind === 'video') {
+            // 海报在图标的上面，加载失败时由 error 捕获移除 img，图标自然露出来
+            return `<span class="files-thumb files-thumb-icon files-thumb-video">${this._kindIcon('video')}`
+                + `<img class="files-video-poster" src="${this.esc(this._frameUrl(item))}" loading="lazy" alt=""></span>`;
+        }
+        return `<span class="files-thumb files-thumb-icon">${this._kindIcon(item.kind)}</span>`;
+    },
+
+    /** 缩略图外壳：图片/视频包成按钮，既能点开也能悬停预览；文本保持静态。 */
+    _thumbCell(item, index) {
+        const inner = this._thumbMarkup(item);
+        if (item.kind !== 'image' && item.kind !== 'video') {
+            return `<span class="files-thumb-wrap">${inner}</span>`;
+        }
+        const act = item.kind === 'image' ? 'view' : 'play';
+        const label = item.kind === 'image' ? '悬停预览，点击查看大图' : '悬停预览，点击播放';
+        return `<button type="button" class="files-thumb-btn" data-act="${act}" data-index="${index}"`
+            + ` data-preview-index="${index}" aria-label="${this.esc(label)}" title="${this.esc(label)}">${inner}</button>`;
+    },
+
     _renderList() {
         const listEl = document.getElementById('files-list');
         if (!listEl) return;
+        this._hidePreview();
+        listEl.dataset.view = this._viewMode;
         if (!this._items.length) {
             listEl.innerHTML = '<div class="empty-state"><p class="empty-state-title">没有匹配的文件</p></div>';
             return;
         }
-        listEl.innerHTML = this._items.map((item, index) => {
-            const dupBadge = Number(item.dup_count) > 1
-                ? `<span class="files-badge files-badge-dup">重复 ×${this.esc(item.dup_count)}</span>`
-                : `<span class="files-badge files-badge-ok">唯一</span>`;
-            const nsfwBadge = this._nsfwBadge(item);
-            const thumb = item.kind === 'image'
-                ? `<img class="files-thumb" src="${this.esc(this._thumbUrl(item))}" loading="lazy" alt="">`
-                : `<span class="files-thumb files-thumb-icon">${this._kindIcon(item.kind)}</span>`;
-            const actions = item.kind === 'image'
-                ? `<button class="btn btn-secondary btn-sm" data-act="view" data-index="${index}">普通查看</button>
-                   <button class="btn btn-secondary btn-sm" data-act="pano" data-index="${index}">VR 全景</button>`
-                : (item.kind === 'video'
-                    ? `<a class="btn btn-secondary btn-sm" href="${this.esc(this._videoUrl(item))}" target="_blank" rel="noopener">播放</a>`
-                    : '');
-            // 删除为破坏性操作，仅对可写媒体根开放；只读根不显示按钮，避免点了才被拒绝。
-            const rootInfo = this._roots[item.root];
-            const delBtn = (rootInfo && rootInfo.writable)
-                ? `<button class="btn btn-danger btn-sm" data-act="delete" data-root="${this.esc(item.root)}" data-relpath="${this.esc(item.relpath)}">删除</button>`
-                : '';
+        listEl.innerHTML = this._viewMode === 'grid' ? this._renderCards() : this._renderRows();
+    },
+
+    _renderRows() {
+        return this._items.map((item, index) => {
             const sha = item.content_sha256 ? this.esc(item.content_sha256.slice(0, 12)) : '—';
             return `
                 <div class="files-row">
-                    ${thumb}
+                    ${this._thumbCell(item, index)}
                     <div class="files-main">
                         <div class="files-path" title="${this.esc(item.relpath)}">${this.esc(item.relpath)}</div>
                         <div class="files-meta">
@@ -784,19 +979,232 @@ const FilesPage = {
                             <span class="files-meta-item">大小：${this.esc(this._formatSize(item.size))}</span>
                             <span class="files-meta-item">摘要：${sha}</span>
                         </div>
-                        <div class="files-actions">${dupBadge}${nsfwBadge}${actions}${delBtn}</div>
+                        <div class="files-actions">${this._itemBadges(item)}${this._itemActions(item, index)}</div>
                     </div>
                 </div>`;
         }).join('');
+    },
+
+    _renderCards() {
+        return `<div class="files-cards">${this._items.map((item, index) => `
+            <article class="files-card">
+                <div class="files-card-media">${this._thumbCell(item, index)}</div>
+                <div class="files-card-body">
+                    <div class="files-path" title="${this.esc(item.relpath)}">${this.esc(item.relpath)}</div>
+                    <div class="files-meta">
+                        <span class="files-badge">${this.esc(this._kindLabel(item.kind))}</span>
+                        <span class="files-meta-item">${this.esc(item.root)}</span>
+                        <span class="files-meta-item">${this.esc(this._formatSize(item.size))}</span>
+                    </div>
+                    <div class="files-actions">${this._itemBadges(item)}${this._itemActions(item, index)}</div>
+                </div>
+            </article>`).join('')}</div>`;
     },
 
     _onListClick(event) {
         const act = event.target.closest('[data-act]');
         if (!act) return;
         const index = Number(act.dataset.index);
-        if (act.dataset.act === 'view') this._openViewer(this._viewerImages, index);
-        else if (act.dataset.act === 'pano') this._openViewer(this._viewerImages, index, true);
-        else if (act.dataset.act === 'delete') this._confirmDelete(act.dataset.root, act.dataset.relpath);
+        const item = this._items[index];
+        if (act.dataset.act === 'view' || act.dataset.act === 'pano') {
+            // 行号是清单行号，查看器集合只含图片，必须按 root/relpath 重新定位，
+            // 否则文本/视频混排时会把第 N 行图片错位成第 N 张图片。
+            const imageIndex = item
+                ? this._viewerImages.findIndex((row) => row.root === item.root && row.relpath === item.relpath)
+                : -1;
+            if (imageIndex < 0) return;
+            this._openViewer(this._viewerImages, imageIndex, act.dataset.act === 'pano');
+        } else if (act.dataset.act === 'play') {
+            if (item) window.open(this._videoUrl(item), '_blank', 'noopener');
+        } else if (act.dataset.act === 'delete') {
+            this._confirmDelete(act.dataset.root, act.dataset.relpath);
+        }
+    },
+
+    // ── 展示方式与悬停预览 ────────────────────────────────
+    _readViewMode() {
+        try {
+            return window.localStorage.getItem(this._viewModeKey) === 'grid' ? 'grid' : 'list';
+        } catch (err) {
+            return 'list';
+        }
+    },
+
+    _applyViewMode() {
+        const listEl = document.getElementById('files-list');
+        if (listEl) listEl.dataset.view = this._viewMode;
+        document.querySelectorAll('#files-view-toggle [data-view]').forEach((btn) => {
+            const active = btn.dataset.view === this._viewMode;
+            btn.classList.toggle('is-active', active);
+            btn.setAttribute('aria-pressed', active ? 'true' : 'false');
+        });
+    },
+
+    _setViewMode(mode) {
+        if ((mode !== 'list' && mode !== 'grid') || mode === this._viewMode) return;
+        this._viewMode = mode;
+        try {
+            // 隐私模式禁写只影响「下次记住」，切换本身照常生效
+            window.localStorage.setItem(this._viewModeKey, mode);
+        } catch (err) { /* 忽略存储失败 */ }
+        this._hidePreview();
+        this._applyViewMode();
+        this._renderList();
+    },
+
+    _initHoverPreview() {
+        const old = document.getElementById('files-hover-preview');
+        if (old) old.remove();
+        const el = document.createElement('div');
+        el.id = 'files-hover-preview';
+        el.className = 'files-hover-preview';
+        el.setAttribute('aria-hidden', 'true');
+        // 视频默认静音循环：悬停预览不能突然出声；浮层不接收指针事件，不会挡住点击
+        el.innerHTML = '<img alt=""><video muted loop playsinline preload="metadata"></video>'
+            + '<span class="files-hover-hint"></span>';
+        document.body.appendChild(el);
+        this._hoverPreview = el;
+    },
+
+    _bindHoverPreview() {
+        const listEl = document.getElementById('files-list');
+        if (!listEl || listEl.dataset.hoverBound === '1') return;
+        listEl.dataset.hoverBound = '1';
+        const targetOf = (event) => event.target.closest && event.target.closest('[data-preview-index]');
+        listEl.addEventListener('mouseover', (event) => {
+            const target = targetOf(event);
+            if (!target) return;
+            // 在同一个缩略图内部移动不算重新进入，否则会反复重置延时
+            if (event.relatedTarget && target.contains(event.relatedTarget)) return;
+            this._queuePreview(target, 220);
+        });
+        listEl.addEventListener('mouseout', (event) => {
+            const target = targetOf(event);
+            if (!target) return;
+            if (event.relatedTarget && target.contains(event.relatedTarget)) return;
+            this._hidePreview();
+        });
+        // 键盘可达：Tab 聚焦缩略图也给出同样的预览
+        listEl.addEventListener('focusin', (event) => {
+            const target = targetOf(event);
+            if (target) this._queuePreview(target, 0);
+        });
+        listEl.addEventListener('focusout', () => this._hidePreview());
+        // error 不冒泡，只能捕获：视频海报拉不到时移除 img 退回图标，避免破图
+        listEl.addEventListener('error', (event) => {
+            const img = event.target;
+            if (img && img.classList && img.classList.contains('files-video-poster')) img.remove();
+        }, true);
+        // 浮层用 fixed 定位，滚动后会和缩略图脱锚，直接收起更稳
+        if (!this._hoverScrollBound) {
+            this._hoverScrollBound = true;
+            this._hoverScrollHandler = () => {
+                // 触发悬停的那次滚动事件可能晚于浮层显示才到达：刚显示时先放过，
+                // 否则「滚动到某张卡片立刻悬停」会出现浮层一闪即收。
+                // 350ms 覆盖「切视图/滚动定位」引发的平滑滚动动画尾段，避免预览刚出现就被收掉
+                if (performance.now() - (this._hoverShownAt || 0) < 350) return;
+                this._hidePreview();
+            };
+            window.addEventListener('scroll', this._hoverScrollHandler, { passive: true, capture: true });
+            // 滚轮/触摸是明确的用户滚动意图，不受上面那段时间窗保护
+            this._hoverWheelHandler = () => this._hidePreview();
+            window.addEventListener('wheel', this._hoverWheelHandler, { passive: true, capture: true });
+        }
+    },
+
+    _queuePreview(target, delay) {
+        this._cancelPreview();
+        const index = Number(target.dataset.previewIndex);
+        if (!Number.isFinite(index)) return;
+        this._hoverTimer = window.setTimeout(() => {
+            this._hoverTimer = null;
+            this._showPreview(index, target);
+        }, delay);
+    },
+
+    _cancelPreview() {
+        if (this._hoverTimer) {
+            window.clearTimeout(this._hoverTimer);
+            this._hoverTimer = null;
+        }
+    },
+
+    _showPreview(index, anchor) {
+        const item = this._items[index];
+        const el = this._hoverPreview;
+        if (!item || !el || !anchor.isConnected) return;
+        const img = el.querySelector('img');
+        const video = el.querySelector('video');
+        const hint = el.querySelector('.files-hover-hint');
+        if (!img || !video) return;
+        img.onload = null;
+        video.onloadedmetadata = null;
+        img.style.display = 'none';
+        video.style.display = 'none';
+        img.removeAttribute('src');
+        el.style.width = '320px';
+
+        // 默认放在缩略图右侧；右侧放不下就翻到左侧，上下夹在视口内。
+        // 用 offsetWidth/Height 而不是常量：浮层高度含底部提示条，宽度随媒体比例变化。
+        const place = () => {
+            const rect = anchor.getBoundingClientRect();
+            const width = el.offsetWidth || 320;
+            const height = el.offsetHeight || 240;
+            let left = rect.right + 12;
+            if (left + width > window.innerWidth - 8) left = Math.max(8, rect.left - width - 12);
+            const top = Math.max(8, Math.min(rect.top - 32, window.innerHeight - height - 8));
+            el.style.left = `${left}px`;
+            el.style.top = `${top}px`;
+        };
+        // 按媒体真实比例定宽（上限 320×240）：竖屏视频/图片不再塞进 16:9 的黑框里
+        const fit = (media) => {
+            const nw = media.naturalWidth || media.videoWidth || 0;
+            const nh = media.naturalHeight || media.videoHeight || 0;
+            if (!nw || !nh) {
+                place();
+                return;
+            }
+            const scale = Math.min(320 / nw, 240 / nh);
+            el.style.width = `${Math.max(120, Math.round(nw * scale))}px`;
+            place();
+        };
+
+        if (item.kind === 'image') {
+            img.onload = () => fit(img);
+            img.src = this._thumbUrl(item);
+            img.style.display = 'block';
+            hint.textContent = '点击查看大图';
+            if (img.complete && img.naturalWidth) fit(img);
+        } else if (item.kind === 'video') {
+            video.onloadedmetadata = () => fit(video);
+            video.src = this._videoUrl(item);
+            video.style.display = 'block';
+            hint.textContent = '静音预览 · 点击播放';
+            if (video.readyState >= 1) fit(video);
+            const played = video.play();
+            if (played && played.catch) played.catch(() => {});
+        } else {
+            return;
+        }
+        place();
+        el.classList.add('is-visible');
+        this._hoverShownAt = performance.now();
+    },
+
+    _hidePreview() {
+        this._cancelPreview();
+        const el = this._hoverPreview;
+        if (!el) return;
+        el.classList.remove('is-visible');
+        const img = el.querySelector('img');
+        const video = el.querySelector('video');
+        if (img) img.removeAttribute('src');
+        if (video) {
+            try { video.pause(); } catch (err) { /* 元素已卸载时忽略 */ }
+            video.removeAttribute('src');
+            // load() 中止正在进行的流式请求，避免悬停结束后继续在后台拉整个视频
+            try { video.load(); } catch (err) { /* 同上 */ }
+        }
     },
 
     /** 删除前二次确认；确认后先删物理文件、再清索引，两者都成功才刷新。 */
@@ -1618,6 +2026,9 @@ const FilesPage = {
 
     _search() {
         this._page = 0;
+        // 改了检索条件就回到清单：否则停在重复组 tab 上，用户看不到结果变化
+        this._showResultTab('list');
+        this._syncMoreCount();
         this._loadList();
     },
 
@@ -1628,6 +2039,10 @@ const FilesPage = {
         const kind = document.getElementById('files-kind'); if (kind) kind.value = '';
         const dup = document.getElementById('files-dup'); if (dup) dup.value = '';
         const nsfw = document.getElementById('files-nsfw'); if (nsfw) nsfw.value = '';
+        // 重置也把「更多筛选」收起、角标归零，不留上一次的展开状态
+        const adv = document.getElementById('files-adv-filters'); if (adv) adv.hidden = true;
+        this._syncMoreCount();
+        this._showResultTab('list');
         this._search();
     },
 

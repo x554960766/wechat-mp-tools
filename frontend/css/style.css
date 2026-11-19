@@ -2380,6 +2380,23 @@ body {
     display: block;
 }
 .content-cover.is-broken img { opacity: 0; }
+/* 视频内容卡的播放角标：和 badge 同层但不抢点击，悬停预览时才真的播 */
+.content-play {
+    position: absolute;
+    right: 8px;
+    bottom: 8px;
+    width: 26px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-left: 2px;
+    border-radius: 50%;
+    background: rgba(0, 0, 0, 0.55);
+    color: #fff;
+    font-size: 0.72rem;
+    pointer-events: none;
+}
 .content-cover-fallback {
     position: absolute;
     inset: 0;
@@ -2828,7 +2845,7 @@ body {
     gap: 2px;
     padding: 10px;
     border-radius: 10px;
-    background: var(--bg-subtle, #f6f8fb);
+    background: var(--bg-card);
     border: 1px solid var(--border-color);
 }
 .files-stat-value {
@@ -2898,6 +2915,206 @@ body {
 }
 .files-row:hover {
     border-color: var(--accent-color, #4a9eff);
+}
+
+/* ── 文件清单：列表 / 卡片网格切换 + 悬停放大预览 ───────── */
+.files-list-tools {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+}
+.files-view-toggle {
+    display: inline-flex;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    overflow: hidden;
+}
+.files-view-btn {
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    padding: 4px 10px;
+    cursor: pointer;
+    transition: background var(--transition-fast, .15s), color var(--transition-fast, .15s);
+}
+.files-view-btn + .files-view-btn {
+    border-left: 1px solid var(--border-color);
+}
+.files-view-btn:hover {
+    background: var(--bg-hover, rgba(0, 0, 0, .04));
+    color: var(--text-primary);
+}
+.files-view-btn.is-active {
+    background: var(--accent-color, #4a9eff);
+    color: #fff;
+}
+.files-thumb-wrap {
+    flex: 0 0 auto;
+    align-self: flex-start;
+    display: inline-flex;
+}
+.files-thumb-btn {
+    flex: 0 0 auto;
+    align-self: flex-start;
+    display: inline-flex;
+    padding: 0;
+    border: none;
+    background: none;
+    cursor: zoom-in;
+    border-radius: 8px;
+}
+.files-thumb-btn:focus-visible {
+    outline: 2px solid var(--accent-color, #4a9eff);
+    outline-offset: 2px;
+}
+.files-thumb-video {
+    position: relative;
+    overflow: hidden;
+}
+.files-video-poster {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: inherit;
+}
+.files-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    gap: 12px;
+}
+.files-card {
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    overflow: hidden;
+    background: var(--bg-card, #fff);
+    transition: border-color var(--transition-fast, .15s), transform var(--transition-fast, .15s);
+}
+.files-card:hover {
+    border-color: var(--accent-color, #4a9eff);
+    transform: translateY(-1px);
+}
+.files-card-media .files-thumb-btn,
+.files-card-media .files-thumb-wrap {
+    display: block;
+    width: 100%;
+}
+.files-card-media .files-thumb {
+    width: 100%;
+    height: 130px;
+    border-radius: 0;
+    font-size: 2rem;
+}
+.files-card-body {
+    padding: 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+.files-card .files-path {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    white-space: normal;
+    font-size: 0.85rem;
+    line-height: 1.35;
+}
+.files-card .files-actions {
+    margin-top: 4px;
+    gap: 6px;
+}
+/* 悬停预览浮层：fixed 跟随缩略图，pointer-events 关闭，不影响点击与滚动 */
+.files-hover-preview {
+    position: fixed;
+    z-index: 1200;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #0b0e14;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .35);
+    opacity: 0;
+    transform: translateY(4px) scale(.98);
+    pointer-events: none;
+    transition: opacity .12s ease, transform .12s ease;
+    display: flex;
+    flex-direction: column;
+}
+.files-hover-preview.is-visible {
+    opacity: 1;
+    transform: none;
+}
+/* 宽度由 JS 按媒体真实比例设定（上限 320×240），避免竖屏视频被塞进 16:9 黑框 */
+.files-hover-preview img,
+.files-hover-preview video {
+    width: 100%;
+    height: auto;
+    max-height: 240px;
+    object-fit: contain;
+    display: block;
+    background: #0b0e14;
+}
+.files-hover-hint {
+    padding: 4px 10px;
+    font-size: 0.72rem;
+    color: rgba(255, 255, 255, .75);
+    background: rgba(0, 0, 0, .55);
+    text-align: center;
+}
+@media (max-width: 720px) {
+    .files-cards {
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    }
+}
+/* 触屏没有 hover，浮层永远不出现，避免点按后残留一块遮罩 */
+@media (hover: none) {
+    .files-hover-preview {
+        display: none !important;
+    }
+}
+/* 检索页卡片悬停预览：视觉与文件页浮层一致，类名独立以免两页互相牵连 */
+.hover-preview {
+    position: fixed;
+    z-index: 1400;
+    border-radius: 10px;
+    overflow: hidden;
+    background: #0b0e14;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, .4);
+    opacity: 0;
+    transform: translateY(4px) scale(.98);
+    pointer-events: none;
+    transition: opacity .12s ease, transform .12s ease;
+}
+.hover-preview.is-visible {
+    opacity: 1;
+    transform: none;
+}
+/* 宽度由 JS 按 media 真实比例反算（上限 420×320），竖屏图/视频不留横向黑边 */
+.hover-preview img,
+.hover-preview video {
+    display: block;
+    width: auto;
+    height: auto;
+    max-width: 420px;
+    max-height: 320px;
+    object-fit: contain;
+    background: #0b0e14;
+}
+.hover-preview-hint {
+    padding: 4px 10px;
+    font-size: 0.72rem;
+    color: rgba(255, 255, 255, .75);
+    background: rgba(0, 0, 0, .55);
+    text-align: center;
+}
+@media (hover: none) {
+    .hover-preview {
+        display: none !important;
+    }
 }
 .files-thumb {
     width: 64px;
@@ -3090,4 +3307,495 @@ body {
     .files-nsfw-grid {
         grid-template-columns: 1fr;
     }
+}
+
+
+/* ==================== 工作台 UI 收敛：素材检索检索条 / 筛选抽屉 ==================== */
+.ms-search-card {
+    padding: var(--spacing-lg);
+    margin-bottom: var(--spacing-lg);
+}
+.ms-search-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+}
+.ms-search-row .ms-q {
+    flex: 1;
+    min-width: 220px;
+}
+.ms-search-row .btn {
+    white-space: nowrap;
+}
+/* 筛选角标：只在有条件生效时出现，避免常驻一个 0 */
+.ms-filter-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    margin-left: 6px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: var(--primary-light);
+    color: #fff;
+    font-size: 0.72rem;
+    line-height: 1;
+}
+.ms-filter-count[hidden] {
+    display: none;
+}
+.ms-scope-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin-top: var(--spacing-md);
+    padding-top: var(--spacing-md);
+    border-top: 1px solid var(--border-color);
+}
+.ms-scope-row .ms-scope-label {
+    margin: 0;
+    white-space: nowrap;
+}
+.ms-account-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-left: auto;
+    max-width: 100%;
+}
+.ms-account-group .ms-account-select {
+    width: 200px;
+    max-width: 100%;
+}
+/* .ms-account-download 是 display:flex，[hidden] 的默认 display:none 挡不住它 */
+.ms-account-download[hidden] {
+    display: none;
+}
+.ms-menu-wrap {
+    position: relative;
+}
+.ms-menu-btn {
+    padding: 0 12px;
+    line-height: 1;
+}
+.ms-menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 6px);
+    z-index: 30;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 170px;
+    padding: 6px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+}
+.ms-menu[hidden] {
+    display: none;
+}
+.ms-menu button {
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 6px;
+    background: none;
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    text-align: left;
+    cursor: pointer;
+}
+.ms-menu button:hover {
+    background: var(--bg-card);
+    color: var(--text-primary);
+}
+.ms-image-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: var(--spacing-md);
+    padding-top: var(--spacing-md);
+    border-top: 1px dashed var(--border-color);
+}
+.ms-image-panel[hidden] {
+    display: none;
+}
+.ms-image-panel .media-search-bar,
+.ms-image-panel .ms-image-preview {
+    margin-bottom: 0;
+}
+.ms-hits-toggle {
+    margin-left: auto;
+}
+.ms-hits-toggle[hidden] {
+    display: none;
+}
+
+/* 筛选抽屉：右侧滑出，遮罩吃掉页面滚动 */
+.ms-drawer-mask {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background: rgba(6, 8, 16, 0.55);
+}
+.ms-drawer-mask[hidden] {
+    display: none;
+}
+.ms-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    z-index: 61;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-md);
+    width: 360px;
+    max-width: 92vw;
+    height: 100vh;
+    padding: 20px;
+    overflow: auto;
+    /* 抽屉要挡住底下的页面：--bg-card 是半透明卡片色，直接用会透出页面文字 */
+    background: #14142b;
+    border-left: 1px solid var(--border-color);
+    box-shadow: -20px 0 40px rgba(0, 0, 0, 0.45);
+}
+.ms-drawer[hidden] {
+    display: none;
+}
+.ms-drawer-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.ms-drawer-head h3 {
+    margin: 0;
+    font-size: 1rem;
+}
+.ms-drawer-field {
+    margin: 0;
+}
+.ms-drawer-toggle {
+    margin: 0;
+}
+.ms-tag-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.ms-tag-row .ms-tag-filter {
+    flex: 1;
+    min-width: 0;
+}
+.ms-drawer-foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: auto;
+    padding-top: var(--spacing-md);
+    border-top: 1px solid var(--border-color);
+}
+
+
+/* ==================== 工作台 UI 收敛：全局文件检索条 / 统计条 / 结果 tab ==================== */
+.files-search-card {
+    padding: var(--spacing-lg);
+    /* 卡片默认 overflow:hidden 会把 ⋯ 菜单裁掉，这里放开并抬高整卡层级 */
+    position: relative;
+    z-index: 5;
+    overflow: visible;
+}
+.files-search-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+}
+.files-search-row .files-q {
+    flex: 1;
+    min-width: 200px;
+}
+.files-search-row .files-kind,
+.files-search-row .files-root {
+    width: 140px;
+    flex: none;
+}
+.files-more-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 18px;
+    margin-left: 6px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: var(--primary-light);
+    color: #fff;
+    font-size: 0.72rem;
+    line-height: 1;
+}
+.files-more-count[hidden] {
+    display: none;
+}
+.files-menu-wrap {
+    position: relative;
+}
+.files-menu-btn {
+    padding: 0 12px;
+    line-height: 1;
+}
+.files-menu {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 6px);
+    z-index: 40;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 260px;
+    padding: 8px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
+}
+.files-menu[hidden] {
+    display: none;
+}
+.files-menu-section {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 8px;
+    border-radius: 8px;
+    background: var(--bg-card);
+}
+.files-menu-label {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+}
+.files-menu-actions {
+    display: flex;
+    gap: 8px;
+}
+.files-menu-actions .btn {
+    flex: 1;
+}
+.files-menu-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 10px;
+    border: 0;
+    border-radius: 6px;
+    background: none;
+    color: var(--text-primary);
+    font-size: 0.85rem;
+    text-align: left;
+    cursor: pointer;
+}
+.files-menu-item:hover {
+    background: var(--bg-card);
+}
+.files-menu-item-sub {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    font-weight: 400;
+}
+/* 更多筛选：展开时排三列，收起时整块不占位 */
+.files-adv-filters {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: var(--spacing-md);
+    padding-top: var(--spacing-md);
+    border-top: 1px dashed var(--border-color);
+}
+.files-adv-filters[hidden] {
+    display: none;
+}
+.files-adv-filters .form-group {
+    margin: 0;
+}
+/* 概览与重复情况合并成一条：数字一排，重复结论跟在下面 */
+.files-summary .files-stats-rows {
+    margin-bottom: 8px;
+}
+.files-dup-inline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin-top: 6px;
+    padding-top: 8px;
+    border-top: 1px dashed var(--border-color);
+}
+.files-dup-inline .files-block-title {
+    margin: 0;
+}
+.files-dup-inline #files-dups-body {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+/* 工具条按钮的 [hidden] 要显式置空：.btn 是 inline-flex，默认 display:none 会被盖掉 */
+.files-list-tools [hidden] {
+    display: none;
+}
+.files-dup-inline .files-stat {
+    flex: none;
+    flex-direction: row;
+    align-items: baseline;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+}
+.files-dup-inline .files-stat-value {
+    font-size: 0.9rem;
+}
+/* 结果 tab：清单与重复组共用一块版面 */
+.files-result-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 2px;
+    border-radius: 999px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+}
+.files-result-tab {
+    padding: 4px 12px;
+    border: 0;
+    border-radius: 999px;
+    background: none;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    cursor: pointer;
+}
+.files-result-tab.is-active {
+    background: var(--primary);
+    color: #fff;
+}
+.files-result-panel[hidden] {
+    display: none;
+}
+.files-result-tools [hidden] {
+    display: none;
+}
+/* 审核抽屉：整块工作台搬进来，遮罩挡住页面滚动 */
+.files-drawer-mask {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background: rgba(6, 8, 16, 0.55);
+}
+.files-drawer-mask[hidden] {
+    display: none;
+}
+.files-drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    z-index: 61;
+    display: flex;
+    flex-direction: column;
+    gap: var(--spacing-md);
+    width: min(720px, 94vw);
+    height: 100vh;
+    padding: 20px;
+    overflow: auto;
+    background: #14142b;
+    border-left: 1px solid var(--border-color);
+    box-shadow: -20px 0 40px rgba(0, 0, 0, 0.45);
+}
+.files-drawer[hidden] {
+    display: none;
+}
+.files-drawer-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+.files-drawer-head h3 {
+    margin: 0;
+    font-size: 1rem;
+}
+.files-drawer-card {
+    margin: 0;
+}
+
+
+/* ==================== 工作台 UI 收敛：按号归档分段建卡 / 任务卡 ==================== */
+.ma-create-card .card-header {
+    gap: 12px;
+}
+/* 三种建任务方式：分段控件，一个主按钮，表单随分段换 */
+.ma-mode-tabs {
+    display: flex;
+    gap: 4px;
+    padding: 2px;
+    border-radius: 999px;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+}
+.ma-mode-tab {
+    padding: 5px 14px;
+    border: 0;
+    border-radius: 999px;
+    background: none;
+    color: var(--text-secondary);
+    font-size: 0.82rem;
+    cursor: pointer;
+    white-space: nowrap;
+}
+.ma-mode-tab.is-active {
+    background: var(--primary);
+    color: #fff;
+}
+.ma-panel[hidden] {
+    display: none;
+}
+.ma-fallback {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px dashed var(--border-color);
+}
+.ma-task-tools {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+/* 任务卡：进度、NAS、历史任务共用一块版面 */
+#ma-progress-card {
+    padding-bottom: 6px;
+    border-bottom: 1px dashed var(--border-color);
+    margin-bottom: 10px;
+}
+.ma-nas-block {
+    padding: 10px 0 4px;
+    margin-bottom: 6px;
+    border-bottom: 1px dashed var(--border-color);
+}
+.ma-nas-block[hidden] {
+    display: none;
+}
+.ma-nas-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 6px;
+}
+
+/* 归档卡的「两列一组」：项目里没有 .grid-2 的网格实现，此前每个字段各占一整行 */
+.ma-create-card .grid-2 {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px var(--spacing-md);
+    margin-bottom: var(--spacing-md);
+}
+.ma-create-card .grid-2 .form-group {
+    margin-bottom: 0;
 }

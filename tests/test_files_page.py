@@ -142,9 +142,12 @@ def test_stats_click_clears_filters_and_scrolls(source):
 
 
 def test_every_card_has_a_collapse_toggle(source):
-    # 卡片折叠是统一入口：每张卡都带 data-card，init 时装按钮并包一层 body
-    for key in ("stats", "dupStats", "filters", "index", "probe", "review", "list", "dupGroups"):
+    # 卡片折叠是统一入口：可折叠的卡都带 data-card，init 时装按钮并包一层 body
+    for key in ("stats", "list", "probe", "review"):
         assert f'data-card="{key}"' in source, f"卡片 {key} 缺 data-card 标记"
+    # 检索条与索引管理已不再是卡片：前者常驻页首，后者收进 ⋯ 菜单
+    assert "files-search-row" in source
+    assert 'id="files-more-menu"' in source
     init = _between(source, "async init() {", "destroy() {")
     assert "this._initCards();" in init
     cards = _between(source, "_initCards() {", "_readCardState() {")
@@ -153,6 +156,39 @@ def test_every_card_has_a_collapse_toggle(source):
     assert "body.dataset.cardBody = key" in cards
     # 头部是 space-between，按钮与标题必须包成一组，否则右侧按钮会被挤到中间
     assert "card-head-main" in cards
+
+
+def test_filters_split_into_common_and_advanced(source):
+    # 常驻 3 个条件（关键词/类型/媒体根），其余收进「更多筛选」，避免一屏 6 个输入
+    row = _between(source, 'class="files-search-row"', 'class="files-adv-filters"')
+    for cid in ("files-q", "files-kind", "files-root", "files-more-filters"):
+        assert f'id="{cid}"' in row, f"{cid} 应常驻检索条"
+    adv = _between(source, 'class="files-adv-filters"', 'class="card files-summary"')
+    for cid in ("files-ext", "files-dup", "files-nsfw"):
+        assert f'id="{cid}"' in adv, f"{cid} 应放进更多筛选"
+    assert 'id="files-adv-filters" hidden' in source
+
+
+def test_review_block_lives_in_fullscreen_drawer(source):
+    # 内容审核不占检索版面：整块收进全屏抽屉，由 ⋯ 菜单打开
+    assert 'id="files-review-drawer" hidden' in source
+    assert 'id="files-review-mask" hidden' in source
+    drawer = _between(source, 'id="files-review-drawer"', "</aside>")
+    for cid in ("files-probe-scope", "files-nsfw-panel", "files-nsfw-load", "files-probe-card"):
+        assert f'id="{cid}"' in drawer, f"{cid} 应在审核抽屉内"
+    init = _between(source, "async init() {", "destroy() {")
+    assert "files-review-close" in init
+    assert "files-open-review" in init
+
+
+def test_results_use_tabs_instead_of_two_stacked_cards(source):
+    # 清单与重复组合成一块结果区，用 tab 切换，共用一份版面
+    assert 'data-tab="list"' in source and 'data-tab="dups"' in source
+    assert 'data-panel="list"' in source and 'data-panel="dups"' in source
+    assert 'data-panel="dups" hidden' in source
+    assert 'id="files-load-dups" hidden' in source
+    init = _between(source, "async init() {", "destroy() {")
+    assert "this._showResultTab" in init
 
 
 def test_list_card_collapsed_by_default_and_state_persisted(source):
@@ -175,8 +211,8 @@ def test_stats_click_delegated_on_stable_container(source):
 
 
 def test_duplicate_stats_tiles_jump_to_groups(source):
-    # 「重复情况」卡的两个数字以前是死数字，现在都跳到下方分组明细；
-    # 该卡内容整体重渲染，点击同样只能委托到固定容器 #files-dups-body。
+    # 「重复情况」的数字以前是死数字，现在切到「重复组」tab 并定位到结果卡；
+    # 该块内容整体重渲染，点击同样只能委托到固定容器 #files-dups-body。
     dups = _between(source, "_loadDuplicates() {", "_renderDuplicates() {")
     assert 'data-jump="dupGroups"' in dups
     assert "files-stat-link" in dups
@@ -184,7 +220,8 @@ def test_duplicate_stats_tiles_jump_to_groups(source):
     assert "getElementById('files-dups-body')" in init
     assert "this._onDupStatsClick(event)" in init
     jump = _between(source, "_onDupStatsClick(event) {", "_previewDup(sha")
-    assert "this._jumpToCard(act.dataset.jump, 'jump:' + act.dataset.jump);" in jump
+    assert "this._showResultTab('dups');" in jump
+    assert "this._jumpToCard('list', 'jump:' + act.dataset.jump);" in jump
 
 
 def test_dup_members_have_preview_thumbnail(source):
@@ -234,3 +271,93 @@ def test_pager_accepts_page_number_input(source):
     # 越界钳制在 _goPage 里：输入 999 应该落到最后一页，而不是报错或空白
     go = _between(source, "_goPage(page) {", "this._loadList();")
     assert "Math.min(totalPages - 1, page)" in go
+
+
+def test_view_mode_toggle_switches_and_remembers(source):
+    # 文件清单要能在「列表」与「卡片网格」之间互相切换，并记住上次选择；
+    # 默认仍是列表，否则老用户一进来找不到原来的行视图。
+    assert 'id="files-view-toggle"' in source
+    assert 'data-view="list"' in source and 'data-view="grid"' in source
+    assert "_viewMode: 'list'" in source
+    assert "localStorage.getItem(this._viewModeKey)" in source
+    assert "localStorage.setItem(this._viewModeKey, mode)" in source
+    render = _between(source, "_renderList() {", "_renderRows() {")
+    assert "this._viewMode === 'grid' ? this._renderCards() : this._renderRows()" in render
+
+
+def test_grid_renders_cards_from_items(source):
+    # 卡片网格必须是清单数据的另一套模板，不能只靠 CSS 把行挤成方块
+    cards = _between(source, "_renderCards() {", "_onListClick(event) {")
+    assert 'class="files-cards"' in cards
+    assert 'class="files-card"' in cards
+    assert "this._itemActions(item, index)" in cards
+    # 缩略图与动作在两种视图里共用同一套生成逻辑，避免改一处漏一处
+    rows = _between(source, "_renderRows() {", "_renderCards() {")
+    assert "this._thumbCell(item, index)" in rows
+    assert "this._itemActions(item, index)" in rows
+
+
+def test_video_thumbnail_uses_sampled_frame(source):
+    # 视频没有缩略图接口，用抽帧扫描写入的 ts=0 代表帧；拉不到时前端要能退回图标
+    frame = _between(source, "_frameUrl(item, ts = 0) {", "_formatSize(bytes) {")
+    assert "/media/api/media/frame" in frame
+    assert "ts=${ts}" in frame
+    thumb = _between(source, "_thumbMarkup(item) {", "_thumbCell(item, index) {")
+    assert "files-video-poster" in thumb
+    assert "this._frameUrl(item)" in thumb
+    bind = _between(source, "_bindHoverPreview() {", "_queuePreview(target, delay) {")
+    assert "files-video-poster" in bind
+    assert "img.remove()" in bind
+
+
+def test_hover_preview_plays_muted_video_and_cleans_up(source):
+    # 悬停预览不能让页面突然出声，也不能在收起后继续在后台拉流
+    init = _between(source, "_initHoverPreview() {", "_bindHoverPreview() {")
+    assert '<video muted loop playsinline' in init
+    show = _between(source, "_showPreview(index, anchor) {", "_hidePreview() {")
+    assert "this._videoUrl(item)" in show
+    assert "video.play()" in show
+    hide = _between(source, "_hidePreview() {", "/** 删除前二次确认")
+    assert "video.pause()" in hide
+    assert "video.removeAttribute('src')" in hide
+    assert "video.load()" in hide
+    # 切页/离页时必须把浮层和滚动监听一起清掉，否则会留下孤儿 DOM 与全局监听
+    destroy = _between(source, "destroy() {", "async _loadRoots() {")
+    assert "_hidePreview()" in destroy
+    assert "removeEventListener('scroll'" in destroy
+
+
+def test_hover_preview_does_not_eat_pointer_events(source):
+    # 浮层若不关闭指针事件，会挡住缩略图导致 mouseout/mouseover 反复触发
+    css = (PAGE.parents[2] / "css" / "style.css").read_text(encoding="utf-8")
+    block = css[css.index(".files-hover-preview {"):]
+    block = block[:block.index("}")]
+    assert "pointer-events: none" in block
+    # 触屏设备没有 hover，浮层应彻底隐藏
+    assert "@media (hover: none)" in css
+
+
+def test_hover_preview_fits_media_ratio(source):
+    # 竖屏视频若固定 320×240 会留大黑边：先按真实比例算出宽度，再重新夹视口
+    show = _between(source, "_showPreview(index, anchor) {", "_hidePreview() {")
+    assert "const fit = (media) =>" in show
+    assert "media.naturalWidth || media.videoWidth" in show
+    assert "Math.min(320 / nw, 240 / nh)" in show
+    assert "el.style.width = `${Math.max(120, Math.round(nw * scale))}px`" in show
+    assert "img.onload = () => fit(img)" in show
+    assert "video.onloadedmetadata = () => fit(video)" in show
+    # 夹视口用实测尺寸（浮层高度还含底部提示条），不能用常量
+    assert "const width = el.offsetWidth || 320" in show
+    assert "const height = el.offsetHeight || 240" in show
+
+
+def test_hover_preview_ignores_scroll_right_after_show(source):
+    # 触发悬停的那次滚动事件可能晚于浮层显示才到，不能用它把刚出现的预览收掉
+    bind = _between(source, "_bindHoverPreview() {", "_queuePreview(target, delay) {")
+    assert "_hoverShownAt" in bind
+    assert "< 350" in bind
+    # 滚轮/触摸是明确的滚动意图，不受时间窗保护，应立即收起
+    assert "_hoverWheelHandler" in bind
+    assert "addEventListener('wheel'" in bind
+    show = _between(source, "_showPreview(index, anchor) {", "_hidePreview() {")
+    assert "this._hoverShownAt = performance.now()" in show
