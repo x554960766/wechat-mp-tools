@@ -169,3 +169,35 @@ def test_item_carries_stable_work_key(tmp_path, monkeypatch):
     rows, _total, terms = store.search_contents("")
     item = media_routes._content_out(rows[0], terms)
     assert item["work_key"].startswith("wechat|https://mp.weixin.qq.com/s/")
+
+
+def test_video_item_without_image_cover_falls_back_to_sampled_frame(tmp_path, monkeypatch):
+    """视频作品没有单独封面图时，卡片封面退回 ts=0 抽帧，并带上播放入口。
+
+    抖音的 video 条目 cover_relpath 为空，封面只能来自抽帧；没有这条回退时前端会
+    渲染成深色平台兜底块（用户看到的「黑卡」），且拿不到可播放地址。
+    """
+    root = tmp_path / "dy"
+    video = root / "小鲸鱼" / "7412345678901234567_雪山日落.mp4"
+    video.parent.mkdir(parents=True)
+    video.write_bytes(b"\x00")
+    monkeypatch.setattr(config, "MEDIA_ROOTS",
+                        ({"id": "douyin", "type": "local", "path": str(root), "writable": True},))
+    store = Store(tmp_path / "index.sqlite")
+    monkeypatch.setattr(media_routes, "STORE", store)
+    files, _ = media.list_files("douyin")
+    store.sync_contents(contents.discover("douyin", files))
+    relpath = "小鲸鱼/7412345678901234567_雪山日落.mp4"
+    store.replace_frames("douyin", relpath, "a" * 64, 12.0, [(0.0, "b" * 64, None)])
+
+    rows, _total, terms = store.search_contents("")
+    item = media_routes._content_out(rows[0], terms)
+    assert item["kind"] == "video"
+    cover = item["cover"]
+    assert cover, "视频条目应回退到抽帧封面"
+    assert cover["relpath"] == relpath
+    assert cover["thumb"] == cover["file"], "帧图本身就是 JPEG，缩略图与大图用同一个地址"
+    assert parse_qs(urlparse(cover["thumb"]).query) == {
+        "root": ["douyin"], "relpath": [relpath], "ts": ["0"]}
+    assert cover["video"].startswith("/api/media/video?")
+    assert "version=" + "a" * 64 in cover["video"]

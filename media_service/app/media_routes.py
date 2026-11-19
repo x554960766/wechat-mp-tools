@@ -513,17 +513,33 @@ def _snippet(body, terms, width=140):
 
 
 def _cover(row):
-    """封面的缩略图地址；封面图没被图片索引收录时返回 None，前端退回占位。"""
+    """封面的缩略图地址；没有可用封面图时返回 None，前端退回占位。"""
     cover=row.get("cover_relpath")
-    if not cover:
+    if cover:
+        image=STORE.get(row["root"],cover)
+        if image is not None and image["state"]=="ready":
+            return {"root":row["root"],"relpath":cover,"version":image["content_version"],
+                    # 缩略图缓存只实现 size=360；写别的尺寸会让卡片封面每次请求都 422
+                    "thumb":_media_url("/api/media/thumb",row["root"],cover,image["content_version"],size=360),
+                    "file":_media_url("/api/media/file",row["root"],cover,image["content_version"],display=1)}
+    # 视频作品通常没有单独的封面图：封面走「无图片索引」分支时卡片会空成平台兜底块。
+    # 抽帧扫描已经把 ts=0 帧落成 JPEG，直接拿它当封面，并附上播放入口供前端悬停预览。
+    return _video_cover(row)
+
+
+def _video_cover(row):
+    """视频内容没有图片封面时的回退：ts=0 抽帧当封面，另给受版本约束的播放地址。"""
+    if row.get("kind")!="video":
         return None
-    image=STORE.get(row["root"],cover)
-    if image is None or image["state"]!="ready":
+    root,relpath=row["root"],row["relpath"]
+    record=STORE.video_record(root,relpath)
+    if record is None:
         return None
-    return {"root":row["root"],"relpath":cover,"version":image["content_version"],
-            # 缩略图缓存只实现 size=360；写别的尺寸会让卡片封面每次请求都 422
-            "thumb":_media_url("/api/media/thumb",row["root"],cover,image["content_version"],size=360),
-            "file":_media_url("/api/media/file",row["root"],cover,image["content_version"],display=1)}
+    version=record["content_sha256"]
+    frame="/api/media/frame?"+urlencode({"root":root,"relpath":relpath,"ts":0})
+    return {"root":root,"relpath":relpath,"version":version,
+            "thumb":frame,"file":frame,
+            "video":_media_url("/api/media/video",root,relpath,version)}
 
 
 def _content_out(row, terms):
