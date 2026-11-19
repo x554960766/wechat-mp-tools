@@ -38,7 +38,50 @@
                 </div>
             </div>
 
+            <!-- 全局检索：回车或点击放大镜跳到「素材检索」页并携带关键词 -->
+            <div class="sidebar-global-search">
+                <span class="sidebar-search-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/>
+                        <path d="M20 20L16.5 16.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    </svg>
+                </span>
+                <input id="sidebar-global-q" class="sidebar-search-input" type="search"
+                       placeholder="素材检索" aria-label="全局检索素材"
+                       autocomplete="off" spellcheck="false">
+            </div>
+
             <nav class="sidebar-nav">
+                <!-- ================= 全局工作台 导航组 ================= -->
+                <!-- 素材检索与按号归档不绑定单一平台：检索跨全部平台账号，
+                     归档状态卡也汇总各平台作品，因此独立成组放在最上方。 -->
+                <div class="nav-group-title" data-group="global">
+                    <span>全局工作台</span>
+                    <span class="group-arrow">▼</span>
+                </div>
+
+                <div class="nav-group-items" id="items-global">
+                    <a href="#media_search" class="nav-item" data-page="media_search" id="nav-media-search">
+                        <span class="nav-icon">
+                            <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><line x1="16.5" y1="16.5" x2="21" y2="21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                        </span>
+                        <span class="nav-label">素材检索</span>
+                    </a>
+                    <a href="#media_archive" class="nav-item" data-page="media_archive" id="nav-media-archive">
+                        <span class="nav-icon">
+                            <svg viewBox="0 0 24 24" fill="none"><path d="M3 7H21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M5 7V19C5 20.1 5.9 21 7 21H17C18.1 21 19 20.1 19 19V7" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M9 3H15L17 7H7L9 3Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><line x1="10" y1="12" x2="10" y2="17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="14" y1="12" x2="14" y2="17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+                        </span>
+                        <span class="nav-label">按号归档</span>
+                    </a>
+                    <a href="#files" class="nav-item" data-page="files" id="nav-files">
+                        <span class="nav-icon">
+                            <svg viewBox="0 0 24 24" fill="none"><path d="M3 5C3 4.45 3.45 4 4 4H9L11 9H17C17.55 9 18 9.45 18 10V19C18 19.55 17.55 20 17 20H4C3.45 20 3 19.55 3 19V5Z" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M11 4V9H17V4" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/></svg>
+                        </span>
+                        <span class="nav-label">全局文件</span>
+                    </a>
+                </div>
+
+                <div class="nav-divider"></div>
                 <!-- ================= 微信公众号 导航组 ================= -->
                 <div class="nav-group-title" data-group="wechat">
                     <span>微信公众号</span>
@@ -404,6 +447,10 @@
     <script src="/js/components/proxy.js"></script>
     <script src="/js/components/settings.js"></script>
     <script src="/js/components/transcode.js"></script>
+    <script src="/js/utils/media_viewer.js"></script>
+    <script src="/js/components/media_search.js"></script>
+    <script src="/js/components/media_archive.js"></script>
+    <script src="/js/components/files.js"></script>
 
     <!-- Douyin Pages -->
     <script src="/js/components/douyin/dy_login.js"></script>

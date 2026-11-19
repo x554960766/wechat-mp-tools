@@ -57,6 +57,21 @@ app.register_blueprint(articles_bp)
 app.register_blueprint(account_pool_bp)
 app.register_blueprint(proxy_bp)
 
+# ── AI 媒体服务反代（必须在 SPA 兜底 /<path:path> 之前注册）──
+from backend.media_host import MediaHost, init_blueprint
+media_host = MediaHost()
+app.config["MEDIA_HOST_OBJ"] = media_host
+app.register_blueprint(init_blueprint(app))
+media_host.start_in_thread()
+
+# NAS 自动归档：只读状态/任务查询（实际提交在下载线程里登记）
+from backend.nas_archive import init_blueprint as init_nas_archive
+app.register_blueprint(init_nas_archive(app))
+
+# 按号归档：轻量版只装公众号，xhs/bilibili/kuaishou 不在本包依赖里
+from backend.archive_by_account import init_blueprint as init_archive_by_account
+app.register_blueprint(init_archive_by_account(app, platforms=("wechat",)))
+
 ensure_dirs()
 migrate_legacy_config()
 start_session_keepalive_thread()
@@ -78,6 +93,7 @@ def healthz():
         "status": "ok",
         "version": APP_VERSION,
         "modules": len(ENABLED_MODULES),
+        "media": media_host.status(),
     })
 
 

@@ -1,0 +1,1778 @@
+/**
+ * 素材检索：检索粒度是「内容条目」——公众号文章、视频号/抖音/快手/B站视频、
+ * 小红书笔记——而不是单张图片。标题、正文、账号名都进全文索引。
+ *
+ * 所有请求都走宿主的 /media 反代，本页不认识媒体服务的端口；后端返回的
+ * thumb/file 是媒体服务内部路径，必须由 API.media 补 /media 前缀。
+ */
+const MediaSearchPage = {
+    _items: [],
+    _total: 0,
+    _limit: 24,
+    _offset: 0,
+    _query: '',
+    _platform: '',
+    _account: '',
+    _root: '',
+    _roots: [],
+    _facets: { platforms: [], accounts: [], total: 0 },
+    _scanTimer: null,
+    _keyHandler: null,
+    _detail: null,
+    _nsfwOnly: false,
+    _images: [],
+    _viewerCtrl: null,
+    _archivePlatforms: [],
+    _downloadTimer: null,
+    _downloadTaskId: '',
+    _downloadLog: [],
+    _logTimer: null,
+    _hoverPreview: null,
+    _hoverTimer: null,
+    _hoverShownAt: 0,
+    _hoverPoint: { x: 0, y: 0 },
+    _hoverBound: null,
+
+    render() {
+        return `
+            <div class="page-header">
+                <h2 class="page-title">素材检索</h2>
+                <p class="page-description">按标题、正文和账号检索已下载的内容：公众号文章、视频号/抖音/快手/B站视频、小红书笔记。留空直接看最近入库。</p>
+            </div>
+
+            <div class="card ms-search-card" id="ms-search-card">
+                <div class="ms-search-row">
+                    <input type="search" class="form-input ms-q" id="ms-q" autocomplete="off"
+                           placeholder="例如：手机壁纸 / 翰墨修心 / 咖啡 手写">
+                    <button class="btn btn-primary" id="ms-go">检索</button>
+                    <div class="ms-filter-wrap">
+                        <button class="btn btn-secondary" id="ms-filter-open" type="button"
+                                title="按 NSFW、标签筛选结果">
+                            筛选<span class="ms-filter-count" id="ms-filter-count" hidden>0</span>
+                        </button>
+                        <div class="ms-filter-pop" id="ms-filter-drawer" hidden role="dialog" aria-label="筛选">
+                            <div class="ms-filter-head">
+                                <h3>筛选</h3>
+                                <button class="modal-close" id="ms-filter-close" type="button"
+                                        aria-label="关闭筛选" title="关闭">✕</button>
+                            </div>
+                            <p class="form-hint">更改后立即生效；「重置全部」会清空关键词、平台、账号、标签与查询图。</p>
+
+                            <label class="media-toggle ms-filter-toggle"
+                                   title="只显示含疑似 NSFW 图片的条目；标记不改变检索排序">
+                                <input type="checkbox" id="ms-nsfw-only"> 只看含疑似 NSFW
+                            </label>
+
+                            <div class="form-group ms-filter-field">
+                                <label class="form-label" for="ms-tag-filter">按标签浏览图片</label>
+                                <div class="ms-tag-row">
+                                    <select class="form-input ms-tag-filter" id="ms-tag-filter">
+                                        <option value="">按标签浏览</option>
+                                    </select>
+                                    <button class="btn btn-secondary btn-sm" id="ms-tag-rename"
+                                            title="整体改名选中的标签；新名字已存在时两边合并成一个标签" hidden>改名</button>
+                                </div>
+                            </div>
+
+                            <div class="form-group ms-filter-field">
+                                <label class="form-label" for="ms-root">媒体来源（仅扫描用）</label>
+                                <select class="form-input" id="ms-root"><option value="">读取中…</option></select>
+                                <span class="form-hint">这个选择只用于「扫描选中来源」，不参与检索。</span>
+                            </div>
+
+                            <div class="ms-filter-foot">
+                                <button class="btn btn-secondary btn-sm" id="ms-filter-reset" type="button">重置全部</button>
+                                <button class="btn btn-primary btn-sm" id="ms-filter-apply" type="button">完成</button>
+                            </div>
+                        </div>
+                    </div>
+                    <button class="btn btn-secondary" id="ms-image-toggle" type="button"
+                            title="上传图片或粘贴图片网址，按图找相似内容">📷 以图找图</button>
+                    <div class="ms-menu-wrap">
+                        <button class="btn btn-secondary ms-menu-btn" id="ms-more" type="button"
+                                title="管理动作">⋯</button>
+                        <div class="ms-menu" id="ms-more-menu" hidden>
+                            <button type="button" id="ms-nsfw-review">待复核图片</button>
+                            <button type="button" id="ms-download-log">下载记录</button>
+                            <button type="button" id="ms-scan">扫描选中来源</button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="ms-scope-row">
+                    <span class="form-label ms-scope-label">范围</span>
+                    <div class="media-roots" id="ms-platforms">
+                        <span class="form-hint">正在读取平台…</span>
+                    </div>
+                    <div class="ms-account-group">
+                        <select class="form-input ms-account-select" id="ms-account" aria-label="账号 / UP主">
+                            <option value="">全部账号</option>
+                        </select>
+                        <div class="ms-account-download" id="ms-account-download" hidden>
+                            <input type="number" class="form-input ms-dl-limit" id="ms-dl-limit"
+                                   min="1" max="50" step="1" value="10" title="下载篇数，1–50">
+                            <button class="btn btn-primary btn-sm" id="ms-dl-account" type="button">下载该账号</button>
+                            <input type="url" class="form-input ms-dl-link" id="ms-dl-link"
+                                   placeholder="或贴快手主页链接" hidden>
+                            <span class="form-hint" id="ms-dl-hint"></span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="ms-image-panel" id="ms-image-panel" hidden>
+                    <div class="media-search-bar">
+                        <input type="file" class="form-input" id="ms-image" accept="image/*,.heic,.heif">
+                        <button class="btn btn-primary" id="ms-image-go">以图搜图</button>
+                    </div>
+                    <div class="media-search-bar">
+                        <input type="url" class="form-input" id="ms-image-url"
+                               placeholder="或粘贴图片网址（http/https）">
+                        <button class="btn btn-secondary" id="ms-image-url-go">搜网图</button>
+                    </div>
+                    <div class="ms-image-preview" id="ms-image-preview" hidden>
+                        <img class="ms-image-preview-img" id="ms-image-preview-img" alt=""
+                             onerror="this.style.visibility='hidden'">
+                        <div class="ms-image-preview-meta">
+                            <span class="ms-image-preview-name" id="ms-image-preview-name"></span>
+                            <span class="ms-image-preview-sub" id="ms-image-preview-sub"></span>
+                        </div>
+                        <span class="ms-image-preview-tag" id="ms-image-preview-tag"></span>
+                        <button class="btn btn-secondary btn-sm" id="ms-image-clear" type="button"
+                                title="移除查询图，回到文本检索">移除</button>
+                    </div>
+                    <p class="form-hint">也可以把图片直接拖进本页；图片模式一次只展示图片命中。</p>
+                </div>
+
+                <div class="media-toolbar">
+                    <span class="form-hint" id="ms-stats"></span>
+                    <span class="form-hint" id="ms-filter-note"></span>
+                    <button class="btn btn-secondary btn-sm ms-hits-toggle" id="ms-hits-toggle"
+                            type="button" hidden>画面命中 <span id="ms-hits-count">0</span> 条 ▾</button>
+                    <span class="media-toolbar-right">
+                        <span class="form-hint" id="ms-scan-state"></span>
+                    </span>
+                </div>
+            </div>
+
+
+            <div id="ms-image-hits" class="media-results" hidden></div>
+            <p id="ms-image-status" class="form-hint" role="status"></p>
+
+            <div id="ms-video-hits" class="media-video-hits" hidden></div>
+
+            <div id="ms-results" class="media-results">
+                <div class="empty-state">
+                    <div class="empty-state-icon">🔍</div>
+                    <h3 class="empty-state-title">正在读取索引…</h3>
+                    <p class="empty-state-desc">索引来自各平台下载目录，扫描一次之后新内容会持续入库。</p>
+                </div>
+            </div>
+            <div class="content-pager" id="ms-pager" hidden></div>
+        `;
+    },
+
+    async init(params) {
+        this._items = [];
+        this._total = 0;
+        this._offset = 0;
+        this._platform = '';
+        this._account = '';
+        this._query = '';
+        this._nsfwOnly = false;
+        this._images = [];
+        this._flaggedMode = false;
+        this._imageMode = false;
+
+        // 侧栏全局检索跳转携带的关键词：预填输入框，随后的 search() 会读取它
+        const q = document.getElementById('ms-q');
+        if (q && params && typeof params.q === 'string') {
+            q.value = params.q;
+        }
+        if (q) {
+            q.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') this.search(true);
+            });
+        }
+        const go = document.getElementById('ms-go');
+        if (go) go.addEventListener('click', () => this.search(true));
+        const scan = document.getElementById('ms-scan');
+        if (scan) scan.addEventListener('click', () => { this.closeMoreMenu(); this.triggerScan(); });
+        const nsfwOnly = document.getElementById('ms-nsfw-only');
+        if (nsfwOnly) {
+            nsfwOnly.checked = this._nsfwOnly;
+            nsfwOnly.addEventListener('change', () => {
+                this._nsfwOnly = nsfwOnly.checked;
+                // 纯前端筛选当前页：不重新请求，避免标记开关改变检索结果顺序
+                this.syncFilterCount();
+                this.renderResults();
+            });
+        }
+        const nsfwReview = document.getElementById('ms-nsfw-review');
+        if (nsfwReview) nsfwReview.addEventListener('click', () => {
+            this.closeMoreMenu();
+            this.loadNsfwFlagged();
+        });
+        const tagFilter = document.getElementById('ms-tag-filter');
+        if (tagFilter) tagFilter.addEventListener('change', () => {
+            this.syncTagRenameButton();
+            this.syncFilterCount();
+            if (tagFilter.value) this.loadImagesByTag(tagFilter.value);
+            else this.search(true); // 清空选择回到常规检索结果
+        });
+        const tagRename = document.getElementById('ms-tag-rename');
+        if (tagRename) tagRename.addEventListener('click', () => this.renameSelectedTag());
+        const account = document.getElementById('ms-account');
+        if (account) {
+            account.addEventListener('change', () => {
+                this._account = account.value;
+                this.updateDownloadEntry();
+                this.syncFilterCount();
+                this.search(true);
+            });
+        }
+        const dlAccount = document.getElementById('ms-dl-account');
+        if (dlAccount) dlAccount.addEventListener('click', () => this.startAccountDownload());
+        const dlLimit = document.getElementById('ms-dl-limit');
+        if (dlLimit) dlLimit.addEventListener('change', () => this.updateDownloadEntry());
+        const dlLink = document.getElementById('ms-dl-link');
+        if (dlLink) dlLink.addEventListener('input', () => this.updateDownloadEntry());
+        const downloadLog = document.getElementById('ms-download-log');
+        if (downloadLog) downloadLog.addEventListener('click', () => {
+            this.closeMoreMenu();
+            this.openDownloadLog();
+        });
+        const imageGo = document.getElementById('ms-image-go');
+        if (imageGo) imageGo.addEventListener('click', () => this.imageSearch());
+        const imageInput = document.getElementById('ms-image');
+        if (imageInput) {
+            imageInput.addEventListener('change', () => {
+                if (imageInput.files && imageInput.files[0]) this.imageSearch();
+            });
+        }
+        const imageClear = document.getElementById('ms-image-clear');
+        if (imageClear) imageClear.addEventListener('click', () => this.clearImageSource());
+        const imageUrlGo = document.getElementById('ms-image-url-go');
+        if (imageUrlGo) imageUrlGo.addEventListener('click', () => this.imageSearch());
+
+        // 检索条上的「筛选」「以图找图」「⋯」：抽屉与菜单只在本页存活，不跨页保存
+        const filterOpen = document.getElementById('ms-filter-open');
+        if (filterOpen) filterOpen.addEventListener('click', () => {
+            const pop = document.getElementById('ms-filter-drawer');
+            // 再点一次同一个按钮就收起，省得用户去找空白处点
+            if (pop && !pop.hidden) this.closeFilterDrawer();
+            else this.openFilterDrawer();
+        });
+        const filterClose = document.getElementById('ms-filter-close');
+        if (filterClose) filterClose.addEventListener('click', () => this.closeFilterDrawer());
+        const filterApply = document.getElementById('ms-filter-apply');
+        if (filterApply) filterApply.addEventListener('click', () => this.closeFilterDrawer());
+        const filterReset = document.getElementById('ms-filter-reset');
+        if (filterReset) filterReset.addEventListener('click', () => this.clearAll());
+        const imageToggle = document.getElementById('ms-image-toggle');
+        if (imageToggle) imageToggle.addEventListener('click', () => this.setImageMode(!this._imageMode));
+        const hitsToggle = document.getElementById('ms-hits-toggle');
+        if (hitsToggle) hitsToggle.addEventListener('click', () => this.toggleHits());
+        const more = document.getElementById('ms-more');
+        if (more) more.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const menu = document.getElementById('ms-more-menu');
+            if (menu) menu.hidden = !menu.hidden;
+        });
+
+        this.bindImageDrop();
+        this._initHoverPreview();
+        // ⋯ 菜单点外部自动收起；监听挂在 document 上，destroy 里要解绑
+        this._menuOutside = (e) => {
+            if (!e.target.closest || !e.target.closest('.ms-menu-wrap')) this.closeMoreMenu();
+            const wrap = document.querySelector('.ms-filter-wrap');
+            if (wrap && !wrap.contains(e.target)) this.closeFilterDrawer();
+        };
+        document.addEventListener('click', this._menuOutside);
+        // 先取归档平台元数据，账号行的下载门控依赖它；失败也继续，只是下载按钮禁用。
+        await this.loadArchivePlatforms();
+        await this.loadFacets();
+        await this.loadRoots();
+        this.loadTagFilter();
+        this.loadStats();
+        this.syncFilterCount();
+        await this.search(true);
+    },
+
+    destroy() {
+        clearInterval(this._scanTimer);
+        this._scanTimer = null;
+        clearInterval(this._downloadTimer);
+        this._downloadTimer = null;
+        clearInterval(this._logTimer);
+        this._logTimer = null;
+        this.closeViewer();
+        this.detachKeys();
+        this._teardownHoverPreview();
+        if (this._menuOutside) {
+            document.removeEventListener('click', this._menuOutside);
+            this._menuOutside = null;
+        }
+        this.closeFilterDrawer();
+        this.closeMoreMenu();
+    },
+
+    // ── 平台 / 账号筛选 ────────────────────────────────
+    async loadFacets() {
+        try {
+            const data = await API.media.contentsFacets();
+            this._facets = {
+                platforms: (data && data.platforms) || [],
+                accounts: (data && data.accounts) || [],
+                total: (data && data.total) || 0,
+            };
+        } catch (err) {
+            this._facets = { platforms: [], accounts: [], total: 0 };
+        }
+        this.renderPlatforms();
+        this.renderAccounts();
+    },
+
+    renderPlatforms() {
+        const box = document.getElementById('ms-platforms');
+        if (!box) return;
+        const items = this._facets.platforms || [];
+        const total = this._facets.total || 0;
+        const chip = (value, label, count, active) => `
+            <button type="button" class="media-chip${active ? ' is-active' : ''}" data-platform="${this.esc(value)}">
+                <span>${this.esc(label)}</span>${count ? `<span class="media-chip-count">${count}</span>` : ''}
+            </button>`;
+        box.innerHTML = '<span class="media-roots-label">平台：</span>'
+            + chip('', '全部', total, this._platform === '')
+            + items.map((p) => chip(p.platform, p.label || p.platform, p.count, this._platform === p.platform)).join('');
+        box.querySelectorAll('[data-platform]').forEach((button) => {
+            button.addEventListener('click', async () => {
+                this._platform = button.dataset.platform || '';
+                this._account = '';
+                const select = document.getElementById('ms-account');
+                if (select) select.value = '';
+                // 平台切换后重新拉取分组计数：索引可能刚被下载后的扫描更新过，
+                // 只重渲染本地缓存会让计数停留在旧值。
+                await this.loadFacets();
+                this.syncFilterCount();
+                this.search(true);
+            });
+        });
+    },
+
+    renderAccounts() {
+        const select = document.getElementById('ms-account');
+        if (!select) return;
+        const rows = (this._facets.accounts || []).filter((row) => !this._platform || row.platform === this._platform);
+        const options = ['<option value="">全部账号</option>'].concat(rows.map((row) => {
+            const label = `${row.account}（${row.count}）`;
+            return `<option value="${this.esc(row.account)}">${this.esc(label)}</option>`;
+        }));
+        select.innerHTML = options.join('');
+        if (this._account) select.value = this._account;
+        this.updateDownloadEntry();
+    },
+
+    // ── 账号级下载入口（复用 wmp 的 /api/archive/*）────
+    /**
+     * 下载执行全部在 wmp 侧，本页只做触发与展示：账号行提供入口，
+     * 门控按 wmp 实际支持的平台（/api/archive/platforms 的 enabled）决定。
+     */
+    async loadArchivePlatforms() {
+        try {
+            const data = await API.archive.platforms();
+            this._archivePlatforms = (data && data.platforms) || [];
+        } catch (err) {
+            // 服务还是旧进程、/api/archive 未注册时拿到 404，下载入口直接禁用。
+            this._archivePlatforms = [];
+        }
+        this.updateDownloadEntry();
+    },
+
+    archivePlatform(platformId) {
+        return this._archivePlatforms.find((p) => p.id === platformId) || null;
+    },
+
+    /** 素材检索的账号名可能跨平台出现，用它反推能落到哪个归档平台。 */
+    accountPlatforms(accountName) {
+        const name = (accountName || '').trim().toLowerCase();
+        if (!name) return [];
+        const rows = (this._facets && this._facets.accounts) || [];
+        const seen = new Set();
+        rows.forEach((row) => {
+            if ((row.account || '').trim().toLowerCase() !== name) return;
+            if (row.platform) seen.add(row.platform);
+        });
+        return Array.from(seen);
+    },
+
+    /** 下载目标平台：优先用当前平台筛选；未筛选用账号名反推；撞名或推不出返回空。 */
+    downloadPlatform() {
+        if (this._platform) return { platform: this._platform, ambiguous: false };
+        const platforms = this.accountPlatforms(this._account);
+        if (platforms.length === 1) return { platform: platforms[0], ambiguous: false };
+        if (platforms.length > 1) return { platform: '', ambiguous: true };
+        return { platform: '', ambiguous: false };
+    },
+
+    /** 账号行下载入口的门控：只按「是否选中账号」决定显隐，平台不支持时禁用并给原因。 */
+    updateDownloadEntry() {
+        const box = document.getElementById('ms-account-download');
+        if (!box) return;
+        const account = this._account;
+        // 显隐只看账号：否则默认的「全部平台」下入口永远不出现，看起来像没有这个功能。
+        box.hidden = !account;
+        if (box.hidden) return;
+
+        const target = this.downloadPlatform();
+        const meta = this.archivePlatform(target.platform);
+        const support = !target.ambiguous && Boolean(meta && meta.enabled !== false);
+        const btn = document.getElementById('ms-dl-account');
+        const hint = document.getElementById('ms-dl-hint');
+        const linkInput = document.getElementById('ms-dl-link');
+
+        if (btn) {
+            btn.disabled = !support;
+            btn.textContent = support && meta && meta.name
+                ? `下载该账号（${meta.name}）`
+                : '下载该账号';
+        }
+        // 只有支持贴链接的平台（快手）才显示主页链接输入，其余平台保持隐藏。
+        if (linkInput) linkInput.hidden = !(support && meta && meta.allow_link);
+        if (hint) {
+            if (target.ambiguous) {
+                hint.textContent = '该账号名在多个平台存在，请先在上方平台筛选里选定一个再下载';
+            } else if (!support) {
+                hint.textContent = '该平台暂不支持按账号下载，请到对应采集页操作';
+            } else {
+                hint.textContent = meta.note || '';
+            }
+        }
+    },
+
+    /** 把素材检索的账号名解析成 wmp 收藏账号的 id / 主页链接。 */
+    async resolveAccount(platform, accountName) {
+        // 后端缺省会按 wechat 查，留空会把小红书账号错解析成公众号，这里直接拒绝。
+        if (!platform) return null;
+        const data = await API.archive.accounts(platform);
+        const rows = (data && data.accounts) || [];
+        const wanted = (accountName || '').trim().toLowerCase();
+        return rows.find((a) => (a.name || '').trim().toLowerCase() === wanted) || null;
+    },
+
+    async startAccountDownload() {
+        const accountName = this._account;
+        if (!accountName) return;
+        const target = this.downloadPlatform();
+        if (target.ambiguous) {
+            Toast.error('该账号名在多个平台存在，请先选择平台');
+            return;
+        }
+        const platform = target.platform;
+        if (!platform) {
+            Toast.error('无法确定该账号属于哪个平台，请先在上方选择平台');
+            return;
+        }
+        const meta = this.archivePlatform(platform);
+        if (!meta || meta.enabled === false) {
+            Toast.error('该平台暂不支持按账号下载，请到对应采集页操作');
+            return;
+        }
+        const limit = Number(document.getElementById('ms-dl-limit')?.value || 10);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+            Toast.error('篇数需在 1..50');
+            return;
+        }
+        const link = (document.getElementById('ms-dl-link')?.value || '').trim();
+
+        try {
+            const hit = await this.resolveAccount(platform, accountName);
+            const accountId = hit ? (hit.id || '') : '';
+            // 解析不到且平台不支持贴链接时，直接提示到采集页，不发起注定失败的下载。
+            if (!accountId && !link) {
+                Toast.error(meta.allow_link
+                    ? '收藏列表里没有该账号，请粘贴作者主页链接'
+                    : '收藏列表里没有该账号，请到对应采集页操作');
+                return;
+            }
+            const started = await API.archive.start({
+                platform,
+                account_id: accountId,
+                account_name: accountId ? (hit.name || accountName) : (link || ''),
+                limit,
+                profile_url: meta.allow_link ? link : '',
+            });
+            Toast.info(`已提交${meta.name || platform}下载任务`);
+            this.pollArchiveDownload(started.task_id, platform);
+        } catch (err) {
+            Toast.error(`下载启动失败: ${err.message}`);
+        }
+    },
+
+    pollArchiveDownload(taskId, platform) {
+        clearInterval(this._downloadTimer);
+        this._downloadTaskId = taskId;
+        const tick = async () => {
+            let task;
+            try {
+                task = await API.archive.status(platform, taskId);
+            } catch (err) {
+                clearInterval(this._downloadTimer);
+                this._downloadTimer = null;
+                this._downloadTaskId = '';
+                Toast.error(`下载状态读取失败: ${err.message}`);
+                return;
+            }
+            const total = task.total || task.requested || 0;
+            const done = (task.completed || 0) + (task.failed || 0);
+            const label = {
+                idle: '启动中', running: '下载中', completed: '已完成',
+                failed: '失败', cancelled: '已取消',
+            }[task.status] || task.status;
+            const hint = document.getElementById('ms-dl-hint');
+            if (hint) {
+                hint.textContent = `${label}　${done}/${total}　成功 ${task.completed || 0}　失败 ${task.failed || 0}`
+                    + `${task.skipped ? `　跳过 ${task.skipped}` : ''}${task.current ? '　' + task.current : ''}`;
+            }
+            if (['completed', 'failed', 'cancelled'].includes(task.status)) {
+                clearInterval(this._downloadTimer);
+                this._downloadTimer = null;
+                this._downloadTaskId = '';
+                // 下载终态后本机索引可能已更新，重拉筛选与统计，让新内容立刻可检索。
+                this.loadFacets();
+                this.loadStats();
+                this.search(false);
+                this.refreshDownloadLog(true);
+            }
+        };
+        this._downloadTimer = setInterval(tick, 1200);
+        tick();
+    },
+
+    // ── 下载记录面板 ─────────────────────────────────
+    async openDownloadLog() {
+        Modal.open({
+            title: '<span>下载记录</span>',
+            content: `
+                <div class="ms-dl-log-note form-hint">
+                    按账号发起的下载会记录在这里（最近 200 条 / 7 天）。点击任一条可展开进度与扫描结果。
+                </div>
+                <div id="ms-dl-log-list" class="ms-dl-log-list">正在读取…</div>`,
+            footer: `<button class="btn btn-secondary" onclick="MediaSearchPage.closeDownloadLog()">关闭</button>`,
+        });
+        await this.refreshDownloadLog();
+        this.pollDownloadLog();
+    },
+
+    closeDownloadLog() {
+        clearInterval(this._logTimer);
+        this._logTimer = null;
+        if (typeof Modal !== 'undefined' && Modal.close) Modal.close();
+    },
+
+    async refreshDownloadLog(silent) {
+        const list = document.getElementById('ms-dl-log-list');
+        if (!list) return;
+        if (!silent) list.innerHTML = '<div class="form-hint">正在读取…</div>';
+        try {
+            const data = await API.archive.tasks();
+            this._downloadLog = (data && data.tasks) || [];
+        } catch (err) {
+            this._downloadLog = [];
+            list.innerHTML = `<div class="form-hint">下载记录读取失败：${this.esc(err.message || '')}</div>`;
+            return;
+        }
+        this.renderDownloadLog(list);
+    },
+
+    renderDownloadLog(list) {
+        const rows = this._downloadLog;
+        if (!rows.length) {
+            list.innerHTML = '<div class="form-hint">还没有按账号下载的记录。</div>';
+            return;
+        }
+        const statusLabel = {
+            idle: '启动中', running: '下载中', completed: '已完成',
+            failed: '失败', cancelled: '已取消',
+        };
+        list.innerHTML = rows.map((t) => {
+            const scan = t.scan_error
+                ? '<span class="media-badge is-warn">扫描异常</span>'
+                : (t.scan_job_id ? '<span class="media-badge">已扫描</span>' : '<span class="form-hint">未扫描</span>');
+            return `
+                <div class="ms-dl-log-item" data-task="${this.esc(t.task_id)}">
+                    <div class="ms-dl-log-head">
+                        <span class="ms-dl-log-status">${this.esc(statusLabel[t.status] || t.status)}</span>
+                        <span class="ms-dl-log-title">${this.esc(t.platform_label || t.platform)} · ${this.esc(t.account_name || t.account_id || '未知账号')}</span>
+                        <span class="ms-dl-log-count">${Number(t.completed || 0)}/${Number(t.requested || 0)}</span>
+                        <span class="ms-dl-log-scan">${scan}</span>
+                        <span class="ms-dl-log-date">${this.esc(this.fmtDateTime(t.created_at))}</span>
+                    </div>
+                    <div class="ms-dl-log-body" hidden>
+                        <div class="form-hint">请求 ${Number(t.requested || 0)} 篇 · 成功 ${Number(t.completed || 0)} · 失败 ${Number(t.failed || 0)}${Number(t.skipped) ? ` · 跳过 ${t.skipped}` : ''}${t.current ? ' · 当前：' + this.esc(t.current) : ''}</div>
+                        <div class="form-hint">媒体根：${this.esc(t.root || '')}</div>
+                        ${t.scan_job_id ? `<div class="form-hint">扫描任务：${this.esc(t.scan_job_id)}</div>` : ''}
+                        ${t.scan_error ? `<div class="form-hint">扫描错误：${this.esc(t.scan_error)}</div>` : ''}
+                        ${t.note ? `<div class="form-hint">备注：${this.esc(t.note)}</div>` : ''}
+                    </div>
+                </div>`;
+        }).join('');
+        list.querySelectorAll('.ms-dl-log-item').forEach((item) => {
+            item.addEventListener('click', () => {
+                const body = item.querySelector('.ms-dl-log-body');
+                if (body) body.hidden = !body.hidden;
+            });
+        });
+    },
+
+    pollDownloadLog() {
+        clearInterval(this._logTimer);
+        const tick = async () => {
+            if (!document.getElementById('ms-dl-log-list')) {
+                clearInterval(this._logTimer);
+                this._logTimer = null;
+                return;
+            }
+            await this.refreshDownloadLog(true);
+        };
+        this._logTimer = setInterval(tick, 3000);
+        tick();
+    },
+
+    // 台账时间戳是 epoch 秒（浮点），这里格式化成「YYYY-MM-DD HH:MM」。
+    // 注意：不能叫 fmtTs——本对象里已有 fmtTs(seconds) 做「分:秒」，同名会被后者覆盖。
+    fmtDateTime(ts) {
+        if (!ts) return '';
+        const d = new Date(Number(ts) * 1000);
+        if (Number.isNaN(d.getTime())) return '';
+        const p = (n) => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+    },
+
+    // ── 媒体根与统计 ──────────────────────────────────
+    async loadRoots() {
+        const select = document.getElementById('ms-root');
+        try {
+            const data = await API.media.roots();
+            this._roots = (data && data.items) || [];
+        } catch (err) {
+            this._roots = [];
+            if (select) select.innerHTML = `<option value="">媒体服务不可用（${err.status || '网络'}）</option>`;
+            return;
+        }
+        if (!select) return;
+        if (!this._roots.length) {
+            select.innerHTML = '<option value="">没有配置媒体根</option>';
+            return;
+        }
+        select.innerHTML = this._roots.map((r) => {
+            const state = r.reachable === true ? '在线' : (r.reachable === false ? '离线' : '未知');
+            return `<option value="${this.esc(r.id)}">${this.esc(r.label || r.id)}（${state}）</option>`;
+        }).join('');
+        const preferred = this.defaultRootId();
+        select.value = preferred;
+        this._root = preferred;
+        select.addEventListener('change', () => { this._root = select.value; });
+    },
+
+    /** 默认媒体来源：优先文章全量根，否则第一个；没有配置返回空串。 */
+    defaultRootId() {
+        if (!this._roots.length) return '';
+        const hit = this._roots.find((r) => r.id === 'articles-full');
+        return (hit || this._roots[0]).id;
+    },
+
+    async loadStats() {
+        const el = document.getElementById('ms-stats');
+        if (!el) return;
+        try {
+            const data = await API.media.contentsFacets();
+            const platforms = (data && data.platforms) || [];
+            const parts = platforms.map((p) => `${p.label || p.platform} ${p.count}`);
+            el.textContent = `已索引 ${data.total || 0} 条内容${parts.length ? '：' + parts.join(' · ') : ''}`;
+        } catch (err) {
+            el.textContent = '索引统计不可用';
+        }
+    },
+
+    // ── 检索 ─────────────────────────────────────────
+    async search(reset) {
+        if (reset) this._offset = 0;
+        // 文本检索与图片模式互斥：点到「检索」就回到文本结果
+        if (this._imageMode) this.leaveImageMode();
+        this._query = (document.getElementById('ms-q')?.value || '').trim();
+        const box = document.getElementById('ms-results');
+        if (box) box.innerHTML = `<div class="loading-screen"><div class="spinner"></div><p>检索中…</p></div>`;
+        try {
+            const data = await API.media.contentsSearch({
+                q: this._query,
+                platform: this._platform,
+                account: this._account,
+                limit: this._limit,
+                offset: this._offset,
+            });
+            this._items = (data && data.items) || [];
+            this._total = (data && data.total) || 0;
+            this.renderResults();
+            this.renderPager();
+            this.searchVideoHits();
+        } catch (err) {
+            this._items = [];
+            this._total = 0;
+            this.renderResults(err);
+            this.renderPager();
+        }
+    },
+
+    /**
+     * 视频画面命中：把查询文本同时送进图片/视频帧向量（媒体服务一次编码两用），
+     * 结果按视频归并，每个视频给出代表帧与命中时间点。
+     *
+     * 与内容检索互相独立：这里失败只是没有画面命中，不影响上面已经渲染的条目列表。
+     */
+    async searchVideoHits() {
+        const box = document.getElementById('ms-video-hits');
+        if (!box) return;
+        if (!this._query) {
+            box.hidden = true;
+            box.innerHTML = '';
+            this.setHitsToggle(0);
+            return;
+        }
+        try {
+            const data = await API.media.searchText({ q: this._query, k: 8, videos: true }, { showError: false });
+            this.renderVideoHits((data && data.videos) || []);
+        } catch (err) {
+            box.hidden = true;
+            box.innerHTML = '';
+        }
+    },
+
+    renderVideoHits(groups) {
+        const box = document.getElementById('ms-video-hits');
+        if (!box) return;
+        if (!groups.length) {
+            box.hidden = true;
+            box.innerHTML = '';
+            this.setHitsToggle(0);
+            return;
+        }
+        const esc = (v) => this.esc(v);
+        const cards = groups.map((group) => {
+            const poster = group.hits && group.hits[0] ? `/media${group.hits[0].thumb}` : '';
+            const chips = (group.hits || []).map((hit) => {
+                const url = `/media${group.file}#t=${Math.max(0, Math.round(hit.ts))}`;
+                return `<a class="video-ts" href="${esc(url)}" target="_blank" rel="noopener">${esc(this.fmtTs(hit.ts))}</a>`;
+            }).join('');
+            const duration = group.duration ? `${Math.round(group.duration)} 秒` : '未知时长';
+            return `
+                <article class="video-hit" data-preview-video="${esc(group.file ? '/media' + group.file : '')}">
+                    ${poster ? `<img src="${esc(poster)}" loading="lazy" alt="">` : ''}
+                    <div class="video-hit-body">
+                        <p class="video-hit-title" title="${esc(group.relpath)}">${esc(group.relpath)}</p>
+                        <p class="form-hint">${esc(group.source_label || group.root)} · ${esc(duration)} · 画面相似度 ${Number(group.score).toFixed(2)}</p>
+                        <div class="video-hit-times">${chips || '<span class="form-hint">暂无命中帧</span>'}</div>
+                    </div>
+                </article>`;
+        }).join('');
+        // 内容条目与画面命中是两套索引：仅画面命中时把空态说清楚，别让人以为检索失败
+        const empty = document.querySelector('#ms-results .empty-state-title');
+        if (empty && empty.textContent.includes('没有匹配的内容')) empty.textContent = '没有匹配的内容条目';
+        box.innerHTML = `
+            <div class="card">
+                <div class="media-toolbar">
+                    <span class="form-hint">视频画面命中 ${groups.length} 条（点时间点从该处播放）</span>
+                </div>
+                <div class="video-hit-list">${cards}</div>
+            </div>`;
+        // 默认只留摘要条；图片模式下画面命中不展示，避免和图片结果抢版面。
+        box.hidden = true;
+        // 图片模式下画面命中不占位，连摘要条一起收起来
+        this.setHitsToggle(this._imageMode ? 0 : groups.length, false);
+    },
+
+    // ── 以图搜图 ──────────────────────────────────────
+    /**
+     * 上传一张图，在当前媒体根里找语义最相近的图片。
+     *
+     * 请求体是 FormData：接口收 multipart，不能走 JSON 序列化（见 API.request 的
+     * FormData 分支）。roots 用当前「媒体来源」选择，未指定时由后端按全部根检索。
+     * 失败只清空图片结果并提示，不影响同页的内容检索。
+     */
+    async imageSearch(file, url) {
+        const hasFile = file !== undefined && file !== null;
+        const hasUrl = url !== undefined && url !== null;
+        const input = document.getElementById('ms-image');
+        const chosen = hasFile ? file : (hasUrl ? null : (input && input.files && input.files[0]));
+        const imageUrl = hasUrl ? url : '';
+        if (!chosen && !imageUrl) {
+            this.imageStatus('请先选择一张图片，或粘贴图片网址');
+            return;
+        }
+        if (chosen && !/^image\//.test(chosen.type) && !/\.(heic|heif)$/i.test(chosen.name)) {
+            this.imageStatus('只支持图片文件');
+            return;
+        }
+        if (!chosen && !/^https?:\/\//i.test(imageUrl)) {
+            this.imageStatus('图片网址需以 http:// 或 https:// 开头');
+            return;
+        }
+        // 回显查询图来源：选文件、拖入、贴网址三种入口都能看到当前实际用的是哪个
+        this.renderImagePreview(chosen, imageUrl);
+        const hits = document.getElementById('ms-image-hits');
+        if (hits) {
+            hits.hidden = false;
+            hits.innerHTML = `<div class="loading-screen"><div class="spinner"></div><p>正在检索相似图片…</p></div>`;
+        }
+        this.imageStatus('正在检索…');
+        try {
+            const fd = new FormData();
+            if (chosen) fd.append('file', chosen);
+            else fd.append('url', imageUrl);
+            if (this._root) fd.append('roots', this._root);
+            fd.append('k', 24);
+            fd.append('review', String(this._nsfwOnly));
+            const data = await API.media.searchImage(fd, { showError: false });
+            this._images = (data && data.items) || [];
+            this._flaggedMode = false;
+            this.renderImageResults();
+            this.renderVideoHits((data && data.videos) || []);
+            this.imageStatus(this._images.length
+                ? `以图搜图命中 ${this._images.length} 张相似图片`
+                : '没有匹配的相似图片');
+        } catch (err) {
+            this._images = [];
+            this.renderImageResults(err);
+            this.imageStatus(`以图搜图失败：${err.message}`);
+        }
+    },
+
+    /**
+     * 回显当前查询图。本地文件显示缩略图、文件名与体积；网图显示网址与来源标签，
+     * 并尝试让浏览器直接加载缩略图（部分站点防盗链会失败，失败时图自动隐藏，网址仍在）。
+     */
+    renderImagePreview(file, url) {
+        const box = document.getElementById('ms-image-preview');
+        if (!box) return;
+        const img = document.getElementById('ms-image-preview-img');
+        const name = document.getElementById('ms-image-preview-name');
+        const sub = document.getElementById('ms-image-preview-sub');
+        const tag = document.getElementById('ms-image-preview-tag');
+        if (file) {
+            if (img) {
+                img.style.visibility = '';
+                img.src = URL.createObjectURL(file);
+                img.alt = file.name;
+            }
+            if (name) name.textContent = file.name;
+            if (sub) sub.textContent = this.fmtBytes(file.size);
+            if (tag) tag.textContent = '本地文件';
+        } else if (url) {
+            if (img) {
+                img.style.visibility = '';
+                img.src = url;
+                img.alt = url;
+            }
+            if (name) name.textContent = url;
+            if (sub) sub.textContent = '网图（后端下载后检索）';
+            if (tag) tag.textContent = '网址';
+        } else {
+            // 清空必须把缩略图 src 一并抹掉：只设 hidden 不够——.ms-image-preview 的
+            // display:flex 会盖掉 hidden 的默认 display:none，旧图会一直留在框里。
+            if (img) {
+                const stale = img.src;
+                img.src = '';
+                if (stale.startsWith('blob:')) URL.revokeObjectURL(stale);
+            }
+            if (name) name.textContent = '';
+            if (sub) sub.textContent = '';
+            if (tag) tag.textContent = '';
+            box.hidden = true;
+            return;
+        }
+        box.hidden = false;
+    },
+
+    /** 清空查询图来源：文件框、网址框、回显与图片结果一起复位，避免残留旧图误导。 */
+    clearImageSource() {
+        const input = document.getElementById('ms-image');
+        if (input) input.value = '';
+        const urlInput = document.getElementById('ms-image-url');
+        if (urlInput) urlInput.value = '';
+        this.renderImagePreview(null, '');
+        const hits = document.getElementById('ms-image-hits');
+        if (hits) { hits.hidden = true; hits.innerHTML = ''; }
+        this._images = [];
+        this._flaggedMode = false;
+        this.imageStatus('');
+    },
+
+    /**
+     * 清空整张检索表单：关键词、平台、账号、媒体来源、标签、NSFW 开关与查询图一并复位，
+     * 关掉图片模式并重新检索一次回到默认的「最近入库」列表——只清输入框不清结果的话，
+     * 列表还停在旧条件的结果上，看起来像没清干净。
+     */
+    async clearAll() {
+        const q = document.getElementById('ms-q');
+        if (q) q.value = '';
+        this._query = '';
+
+        this.clearImageSource();
+        this.leaveImageMode();
+
+        // 平台用 chip 呈现，靠重渲染复位高亮；重新拉分组计数让「全部」的数量是最新的。
+        this._platform = '';
+        this._account = '';
+        await this.loadFacets();
+
+        // 媒体来源是扫描目标，没有「空」这个选项，回到默认根即可。
+        const root = document.getElementById('ms-root');
+        if (root) root.value = this.defaultRootId();
+        this._root = this.defaultRootId();
+
+        const tag = document.getElementById('ms-tag-filter');
+        if (tag) tag.value = '';
+        this.syncTagRenameButton();
+
+        this._nsfwOnly = false;
+        const nsfwOnly = document.getElementById('ms-nsfw-only');
+        if (nsfwOnly) nsfwOnly.checked = false;
+
+        // 账号行的下载参数也是本页输入框，一并回默认值，避免下次选中账号时带着旧条件。
+        const dlLimit = document.getElementById('ms-dl-limit');
+        if (dlLimit) dlLimit.value = '10';
+        const dlLink = document.getElementById('ms-dl-link');
+        if (dlLink) dlLink.value = '';
+        this.updateDownloadEntry();
+
+        const videoHits = document.getElementById('ms-video-hits');
+        if (videoHits) { videoHits.hidden = true; videoHits.innerHTML = ''; }
+        this.setHitsToggle(0);
+
+        this.syncFilterCount();
+        this.closeFilterDrawer();
+        this.closeMoreMenu();
+        await this.search(true);
+    },
+
+    // ── 检索条上的抽屉 / 菜单 / 图片模式 ────────────────
+    openFilterDrawer() {
+        const pop = document.getElementById('ms-filter-drawer');
+        if (pop) pop.hidden = false;
+    },
+
+    closeFilterDrawer() {
+        const pop = document.getElementById('ms-filter-drawer');
+        if (pop) pop.hidden = true;
+    },
+
+    closeMoreMenu() {
+        const menu = document.getElementById('ms-more-menu');
+        if (menu) menu.hidden = true;
+    },
+
+    /** 筛选角标 = 已启用的非默认条件数；0 时不显示，避免「筛选 0」这种噪音。 */
+    syncFilterCount() {
+        const badge = document.getElementById('ms-filter-count');
+        if (!badge) return;
+        const tag = document.getElementById('ms-tag-filter');
+        const count = (this._nsfwOnly ? 1 : 0)
+            + (tag && tag.value ? 1 : 0)
+            + (this._platform ? 1 : 0)
+            + (this._account ? 1 : 0);
+        badge.textContent = String(count);
+        badge.hidden = count === 0;
+    },
+
+    /** 图片模式：面板展开、文本结果让位；离开时重新检索一次把文本结果找回来。 */
+    setImageMode(on) {
+        if (on) {
+            this._imageMode = true;
+            const panel = document.getElementById('ms-image-panel');
+            if (panel) panel.hidden = false;
+            const results = document.getElementById('ms-results');
+            if (results) results.hidden = true;
+            const pager = document.getElementById('ms-pager');
+            if (pager) pager.hidden = true;
+            const hits = document.getElementById('ms-video-hits');
+            if (hits) hits.hidden = true;
+            const hitsToggle = document.getElementById('ms-hits-toggle');
+            if (hitsToggle) hitsToggle.hidden = true;
+            this.imageStatus(this._images.length
+                ? `以图搜图命中 ${this._images.length} 张相似图片`
+                : '选择图片或粘贴图片网址后开始检索');
+            return;
+        }
+        this.leaveImageMode();
+        this.search(true);
+    },
+
+    /** 只复位图片模式的显示状态，不发请求；clearAll / search 里自己决定要不要重查。 */
+    leaveImageMode() {
+        this._imageMode = false;
+        const panel = document.getElementById('ms-image-panel');
+        if (panel) panel.hidden = true;
+        const results = document.getElementById('ms-results');
+        if (results) results.hidden = false;
+        const imageHits = document.getElementById('ms-image-hits');
+        if (imageHits) imageHits.hidden = true;
+        this.imageStatus('');
+    },
+
+    /** 画面命中默认收起：它是辅助线索，不该和内容列表抢同一块版面。 */
+    toggleHits() {
+        const hits = document.getElementById('ms-video-hits');
+        const toggle = document.getElementById('ms-hits-toggle');
+        if (!hits || !toggle) return;
+        hits.hidden = !hits.hidden;
+        const open = !hits.hidden;
+        toggle.textContent = toggle.textContent.replace(/[▾▴]$/, open ? '▴' : '▾');
+    },
+
+    setHitsToggle(count, open) {
+        const toggle = document.getElementById('ms-hits-toggle');
+        const num = document.getElementById('ms-hits-count');
+        if (!toggle) return;
+        if (num) num.textContent = String(count);
+        toggle.hidden = !count;
+        const arrow = open ? '▴' : '▾';
+        toggle.innerHTML = `画面命中 <span id="ms-hits-count">${count}</span> 条 ${arrow}`;
+    },
+
+
+    fmtBytes(bytes) {
+        const n = Number(bytes) || 0;
+        if (!n) return '0 B';
+        const units = ['B', 'KB', 'MB', 'GB'];
+        let value = n;
+        let unit = 0;
+        while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+        return `${value.toFixed(value >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
+    },
+
+    imageStatus(msg) {
+        const el = document.getElementById('ms-image-status');
+        if (!el) return;
+        el.textContent = msg || '';
+    },
+
+    nsfwOf(image) {
+        if (!image) return null;
+        if (image.nsfw && image.nsfw.status === 'ok') return image.nsfw;
+        if (image.review && image.review.status === 'ok') return image.review;
+        return null;
+    },
+
+    /** 集中复核：列出仍判疑似敏感、且未被人工复核过的图片（second 级结论会使其出列）。 */
+    async loadNsfwFlagged() {
+        const status = document.getElementById('ms-image-status');
+        if (status) status.textContent = '正在读取待复核图片…';
+        try {
+            const data = await API.media.nsfwFlagged({ include_reviewed: false, limit: 60 });
+            const items = (data.items || []).map((row) => ({
+                ...row,
+                nsfw: { label: row.label, score: row.score, stage: row.stage, status: 'ok',
+                        nsfw_type: row.nsfw_type, reviewed_by: row.reviewed_by,
+                        reviewed_at: row.reviewed_at },
+            }));
+            this._images = items;
+            this._flaggedMode = true;
+            this.renderNsfwFlagged(data.total != null ? data.total : items.length);
+        } catch (err) {
+            if (status) status.textContent = '';
+            Toast.error('读取待复核图片失败：' + (err && err.message ? err.message : '请求失败'));
+        }
+    },
+
+    renderNsfwFlagged(total) {
+        const box = document.getElementById('ms-image-hits');
+        if (!box) return;
+        const status = document.getElementById('ms-image-status');
+        if (status) status.textContent = total ? `待复核 ${total} 张（按分数从高到低，打开大图可复核）` : '';
+        box.hidden = false;
+        if (!this._images.length) {
+            box.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">🛡️</div>
+                    <h3 class="empty-state-title">没有待复核的图片</h3>
+                    <p class="empty-state-desc">当前索引里没有仍判疑似敏感、且未被人工复核过的图片。</p>
+                </div>`;
+            return;
+        }
+        this.renderImageCards(box, this._images, (item) => {
+            const score = item.nsfw && item.nsfw.score != null ? Number(item.nsfw.score).toFixed(2) : '—';
+            return { cls: 'is-warn', text: `疑似 ${score}` };
+        });
+    },
+
+    /** 一批图片卡片（待复核 / 按标签浏览共用）：缩略图 + 角标 + 路径，点击打开查看器。 */
+    renderImageCards(box, items, badgeFor) {
+        const esc = (v) => this.esc(v);
+        box.innerHTML = `<div class="content-grid">${items.map((item, i) => {
+            const badge = badgeFor ? badgeFor(item) : null;
+            return `<button type="button" class="content-card ms-image-card" data-index="${i}" data-preview-image="${esc('/media' + (item.file || item.thumb || ''))}">
+                        <span class="content-cover">
+                            <img src="${esc('/media' + (item.thumb || ''))}" loading="lazy" alt=""
+                                 onerror="this.closest('.content-cover').classList.add('is-broken')">
+                            ${badge ? `<span class="media-badge ${esc(badge.cls)}">${esc(badge.text)}</span>` : ''}
+                        </span>
+                        <span class="content-meta">
+                            <span class="content-title">${esc(item.relpath || '')}</span>
+                            <span class="content-sub">${esc(item.root || '')}</span>
+                        </span>
+                    </button>`;
+        }).join('')}</div>`;
+        box.querySelectorAll('.ms-image-card').forEach((card) => {
+            card.addEventListener('click', () => this.openImage(Number(card.dataset.index)));
+        });
+    },
+
+    /** 标签下拉：字典来自 /api/tags（文件行 + 作品行的使用次数）。读不到不影响检索。 */
+    async loadTagFilter() {
+        const select = document.getElementById('ms-tag-filter');
+        if (!select) return;
+        const esc = (v) => this.esc(v);
+        try {
+            const data = await API.media.tags({ showError: false });
+            const rows = data && data.items ? data.items : [];
+            const current = select.value;
+            select.innerHTML = '<option value="">按标签浏览</option>' + rows.map((row) => (
+                `<option value="${esc(row.tag)}">${esc(row.tag)}（${esc(row.count)}）</option>`
+            )).join('');
+            // 重新读取后保留用户已选的标签，避免刚打完标签下拉就跳回「按标签浏览」
+            if (current && rows.some((row) => row.tag === current)) select.value = current;
+            this.syncTagRenameButton();
+        } catch (err) {
+            select.innerHTML = '<option value="">按标签浏览</option>';
+        }
+    },
+
+    /** 选中标签时显示「改名」按钮，清空选择时隐藏。 */
+    syncTagRenameButton() {
+        const btn = document.getElementById('ms-tag-rename');
+        if (!btn) return;
+        const select = document.getElementById('ms-tag-filter');
+        btn.hidden = !(select && select.value);
+    },
+
+    /** 把当前选中的标签整体改名；新名已存在时后端合并为同一标签。 */
+    renameSelectedTag() {
+        const select = document.getElementById('ms-tag-filter');
+        const oldTag = select ? select.value : '';
+        if (!oldTag) return;
+        Modal.prompt('标签改名', `把「${oldTag}」改名为：`, oldTag, async (value) => {
+            const newTag = (value || '').trim();
+            if (!newTag || newTag === oldTag) return; // 没改名字就不发请求
+            try {
+                const result = await API.media.renameTag(oldTag, newTag, { showError: false });
+                await this.loadTagFilter();
+                select.value = newTag;
+                this.syncTagRenameButton();
+                const merged = result && result.merged ? '，并合并了同名标签' : '';
+                Toast.success(`已改名：${oldTag} → ${newTag}（图片 ${result.images || 0} 张、作品 ${result.contents || 0} 个${merged}）`);
+                this.loadImagesByTag(newTag);
+            } catch (err) {
+                Toast.error('标签改名失败：' + (err && err.message ? err.message : '请求失败'));
+            }
+        }, { placeholder: '新标签名' });
+    },
+
+    /** 按标签列图片：行结构与搜索结果同构，可直接喂给同一个查看器。 */
+    async loadImagesByTag(tag) {
+        const status = document.getElementById('ms-image-status');
+        if (status) status.textContent = `正在读取「${tag}」的图片…`;
+        try {
+            const data = await API.media.imagesByTag(tag, { limit: 60 });
+            this._images = data && data.items ? data.items : [];
+            this._flaggedMode = false;
+            this.renderTagResults(tag, data || {});
+        } catch (err) {
+            if (status) status.textContent = '';
+            Toast.error('按标签读取图片失败：' + (err && err.message ? err.message : '请求失败'));
+        }
+    },
+
+    renderTagResults(tag, data) {
+        const box = document.getElementById('ms-image-hits');
+        if (!box) return;
+        const status = document.getElementById('ms-image-status');
+        const items = this._images;
+        box.hidden = false;
+        if (status) {
+            status.textContent = items.length
+                ? `标签「${tag}」共 ${items.length} 张${data.has_more ? '（仅显示前 ' + items.length + ' 张）' : ''}`
+                : '';
+        }
+        if (!items.length) {
+            box.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">🏷️</div>
+                    <h3 class="empty-state-title">这个标签下还没有图片</h3>
+                    <p class="empty-state-desc">打开任意图片的查看器输入标签，即可把图片归到这里。</p>
+                </div>`;
+            return;
+        }
+        this.renderImageCards(box, items, (item) => {
+            const nsfw = this.nsfwOf(item);
+            if (!nsfw || nsfw.label !== 'nsfw') return null;
+            const score = nsfw.score != null ? Number(nsfw.score).toFixed(2) : '—';
+            return { cls: 'is-warn', text: `疑似 ${score}` };
+        });
+    },
+
+    bindImageDrop() {
+        const card = document.getElementById('ms-search-card');
+        if (!card) return;
+        card.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            card.classList.add('dragover');
+        });
+        card.addEventListener('dragleave', (e) => {
+            if (e.target === card) card.classList.remove('dragover');
+        });
+        card.addEventListener('drop', async (e) => {
+            e.preventDefault();
+            card.classList.remove('dragover');
+            const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+            if (!file) return;
+            // 拖图即搜：先切到图片模式，结果区只留图片命中
+            this.setImageMode(true);
+            await this.imageSearch(file);
+        });
+    },
+
+    renderImageResults(err) {
+        const box = document.getElementById('ms-image-hits');
+        if (!box) return;
+        if (err) {
+            const code = err.status ? `HTTP ${err.status}` : '请求失败';
+            box.hidden = false;
+            box.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">⚠️</div>
+                    <h3 class="empty-state-title">以图搜图失败（${code}）</h3>
+                    <p class="empty-state-desc">${this.esc(err.message || '')}</p>
+                </div>`;
+            return;
+        }
+        if (!this._images.length) {
+            box.hidden = false;
+            box.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">🫧</div>
+                    <h3 class="empty-state-title">没有匹配的相似图片</h3>
+                    <p class="empty-state-desc">换一张特征更独特的图片，或先对来源目录点一次「扫描选中来源」补齐索引。</p>
+                </div>`;
+            return;
+        }
+        const esc = (v) => this.esc(v);
+        box.hidden = false;
+        box.innerHTML = `<div class="content-grid">${this._images.map((item, i) => {
+            const thumb = '/media' + (item.thumb || '');
+            const title = (item.article && item.article.title) || item.relpath || '图片';
+            const sub = `相似度 ${Number(item.score).toFixed(2)} · ${item.shot_at || '时间未知'}`;
+            const risky = item.review && item.review.status === 'ok' && item.review.label === 'nsfw'
+                ? `疑似 NSFW ${Number(item.review.score).toFixed(2)}`
+                : (item.nsfw && item.nsfw.status === 'ok' && item.nsfw.label === 'nsfw'
+                    ? `疑似 NSFW ${Number(item.nsfw.score).toFixed(2)}` : '');
+            return `<button type="button" class="content-card ms-image-card" data-index="${i}" data-preview-image="${esc('/media' + (item.file || item.thumb || ''))}">
+                        <span class="content-cover">
+                            <img src="${esc(thumb)}" loading="lazy" alt=""
+                                 onerror="this.closest('.content-cover').classList.add('is-broken')">
+                            <span class="media-badge">${esc(item.source_label || item.root || '')}</span>
+                            ${risky ? `<span class="media-badge is-warn">${esc(risky)}</span>` : ''}
+                        </span>
+                        <span class="content-meta">
+                            <span class="content-title">${esc(title)}</span>
+                            <span class="content-sub">${esc(sub)}</span>
+                        </span>
+                    </button>`;
+        }).join('')}</div>`;
+        box.querySelectorAll('.ms-image-card').forEach((card) => {
+            card.addEventListener('click', () => this.openImage(Number(card.dataset.index)));
+        });
+    },
+
+    openImage(index) {
+        const image = this._images[index];
+        if (!image) return;
+        // _images 里的字段（file / relpath / nsfw）与详情图同构，可直接喂给查看器
+        this.openViewer(this._images, index);
+    },
+
+    // ── 卡片悬停预览 ─────────────────────────────────
+    /**
+     * 悬停卡片放大预览：图片显示 display=1 的原始大图，视频命中卡直接播放原片。
+     *
+     * 事件委托挂在 document：结果区每次检索都整体重渲染，逐卡片绑的监听会随
+     * innerHTML 一起丢掉。浮层自身 pointer-events:none，鼠标不会因浮层盖住卡片而抖动。
+     */
+    _initHoverPreview() {
+        if (this._hoverPreview) return;
+        const box = document.createElement('div');
+        box.className = 'hover-preview';
+        box.setAttribute('aria-hidden', 'true');
+        box.innerHTML = '<div class="hover-preview-media"></div><div class="hover-preview-hint"></div>';
+        document.body.appendChild(box);
+        this._hoverPreview = box;
+
+        const target = (node) => (node && node.closest ? node.closest('[data-preview-image],[data-preview-video]') : null);
+        const onOver = (event) => {
+            const card = target(event.target);
+            if (!card || !card.isConnected) return;
+            if (card.contains(event.relatedTarget)) return;
+            const src = card.dataset.previewVideo || card.dataset.previewImage;
+            if (!src) return;
+            clearTimeout(this._hoverTimer);
+            this._hoverTimer = setTimeout(() => this._showPreview(card, src, event.clientX, event.clientY), 180);
+        };
+        const onOut = (event) => {
+            const card = target(event.target);
+            if (!card || card.contains(event.relatedTarget)) return;
+            clearTimeout(this._hoverTimer);
+            this._hoverTimer = null;
+            this._hidePreview();
+        };
+        const onMove = (event) => {
+            this._hoverPoint = { x: event.clientX, y: event.clientY };
+        };
+        // 滚动会让浮层停在错的卡片旁边；平滑滚动期间连续触发，只让第一次生效
+        const onScroll = () => {
+            if (Date.now() - this._hoverShownAt < 350) return;
+            clearTimeout(this._hoverTimer);
+            this._hoverTimer = null;
+            this._hidePreview();
+        };
+        const onWheel = () => {
+            clearTimeout(this._hoverTimer);
+            this._hoverTimer = null;
+            this._hidePreview();
+        };
+        document.addEventListener('mouseover', onOver);
+        document.addEventListener('mouseout', onOut);
+        document.addEventListener('mousemove', onMove);
+        document.addEventListener('scroll', onScroll, true);
+        document.addEventListener('wheel', onWheel, { passive: true });
+        this._hoverBound = { onOver, onOut, onMove, onScroll, onWheel };
+    },
+
+    _teardownHoverPreview() {
+        clearTimeout(this._hoverTimer);
+        this._hoverTimer = null;
+        const bound = this._hoverBound;
+        if (bound) {
+            document.removeEventListener('mouseover', bound.onOver);
+            document.removeEventListener('mouseout', bound.onOut);
+            document.removeEventListener('mousemove', bound.onMove);
+            document.removeEventListener('scroll', bound.onScroll, true);
+            document.removeEventListener('wheel', bound.onWheel);
+            this._hoverBound = null;
+        }
+        if (this._hoverPreview) {
+            this._hoverMediaReset(this._hoverPreview);
+            this._hoverPreview.remove();
+            this._hoverPreview = null;
+        }
+        this._hoverShownAt = 0;
+    },
+
+    _hoverMediaReset(box) {
+        const media = box.querySelector('.hover-preview-media');
+        if (!media) return;
+        media.querySelectorAll('video').forEach((video) => {
+            video.pause();
+            video.removeAttribute('src');
+            video.load();
+        });
+        media.innerHTML = '';
+    },
+
+    _showPreview(card, src, x, y) {
+        const box = this._hoverPreview;
+        if (!box) return;
+        this._hoverMediaReset(box);
+        const media = box.querySelector('.hover-preview-media');
+        const hint = box.querySelector('.hover-preview-hint');
+        const isVideo = !!card.dataset.previewVideo;
+        let node;
+        if (isVideo) {
+            node = document.createElement('video');
+            node.muted = true;   // 自动播放必须静音，否则浏览器直接拒绝
+            node.loop = true;
+            node.playsInline = true;
+            node.preload = 'metadata';
+            node.autoplay = true;
+            // 内容卡片可点开详情；视频命中卡片只有下方时间点链接能跳播，文案必须对得上
+            hint.textContent = card.classList.contains('content-card')
+                ? '视频预览 · 点击查看详情'
+                : '画面命中预览 · 点时间点从该处播放';
+        } else {
+            node = document.createElement('img');
+            node.alt = '';
+            hint.textContent = card.classList.contains('content-card') ? '点击查看详情' : '点击放大';
+        }
+        node.addEventListener('load', () => this._sizePreview(node, x, y));
+        node.addEventListener('loadedmetadata', () => {
+            this._sizePreview(node, x, y);
+            const playing = node.play();
+            if (playing && typeof playing.catch === 'function') playing.catch(() => {});
+        });
+        node.addEventListener('error', () => this._hidePreview());
+        node.src = src;
+        media.appendChild(node);
+        box.classList.add('is-visible');
+        this._hoverShownAt = Date.now();
+        this._placePreview(x, y);
+    },
+
+    _sizePreview(node, x, y) {
+        const box = this._hoverPreview;
+        if (!box) return;
+        const width = node.naturalWidth || node.videoWidth || 0;
+        const height = node.naturalHeight || node.videoHeight || 0;
+        const MAX_W = 420;
+        const MAX_H = 320;
+        if (width && height) {
+            // 按真实比例反算宽度：写死尺寸会把竖屏图/视频塞进横向黑框
+            const scale = Math.min(MAX_W / width, MAX_H / height, 1);
+            node.style.width = `${Math.round(width * scale)}px`;
+        }
+        this._placePreview(x, y);
+    },
+
+    _placePreview(x, y) {
+        const box = this._hoverPreview;
+        if (!box) return;
+        const px = (this._hoverPoint && this._hoverPoint.x) || x;
+        const py = (this._hoverPoint && this._hoverPoint.y) || y;
+        const width = box.offsetWidth || 200;
+        const height = box.offsetHeight || 160;
+        const left = Math.max(8, Math.min(px + 18, window.innerWidth - width - 8));
+        const top = Math.max(8, Math.min(py + 18, window.innerHeight - height - 8));
+        box.style.left = `${Math.round(left)}px`;
+        box.style.top = `${Math.round(top)}px`;
+    },
+
+    _hidePreview() {
+        const box = this._hoverPreview;
+        if (!box) return;
+        box.classList.remove('is-visible');
+        this._hoverMediaReset(box);
+        this._hoverShownAt = 0;
+    },
+
+    fmtTs(seconds) {
+        const total = Math.max(0, Math.round(seconds || 0));
+        return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
+    },
+
+    platformIcon(platform) {
+        return { wechat: '📄', channels: '🎬', douyin: '🎵', kuaishou: '⚡', bilibili: '📺', xhs: '📕' }[platform] || '📦';
+    },
+
+    renderResults(err) {
+        const box = document.getElementById('ms-results');
+        if (!box) return;
+        if (err) {
+            const code = err.status ? `HTTP ${err.status}` : '请求失败';
+            box.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">⚠️</div>
+                    <h3 class="empty-state-title">检索失败（${code}）</h3>
+                    <p class="empty-state-desc">${this.esc(err.message || '')}</p>
+                </div>`;
+            return;
+        }
+        if (!this._items.length) {
+            this.renderFilterNote(0);
+            box.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">🫧</div>
+                    <h3 class="empty-state-title">没有匹配的内容</h3>
+                    <p class="empty-state-desc">换个说法，或先对来源目录点一次「扫描选中来源」。留给空输入可以直接浏览最近入库。</p>
+                </div>`;
+            return;
+        }
+        // 筛选只作用于当前页：切换开关不重新请求，检索顺序与条数都不受影响
+        const shown = this._items
+            .map((item, index) => ({ item, index }))
+            .filter((row) => !this._nsfwOnly || this.isRisky(row.item));
+        this.renderFilterNote(shown.length);
+        if (!shown.length) {
+            box.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">🛡️</div>
+                    <h3 class="empty-state-title">当前筛选下没有内容</h3>
+                    <p class="empty-state-desc">本页 ${this._items.length} 条都不含疑似 NSFW 图片；取消勾选即可看全部。</p>
+                </div>`;
+            return;
+        }
+        const esc = (v) => this.esc(v);
+        box.innerHTML = `<div class="content-grid">${shown.map(({ item, index: i }) => {
+            const cover = item.cover
+                ? `<img src="${esc('/media' + item.cover.thumb)}" loading="lazy" alt=""
+                        onerror="this.closest('.content-cover').classList.add('is-broken')">`
+                : `<span class="content-cover-fallback is-${esc(item.platform)}">${this.platformIcon(item.platform)}</span>`;
+            const date = (item.published_at || item.indexed_at || '').slice(0, 10);
+            const snippet = item.snippet || item.digest || '';
+            // 视频作品的封面是 ts=0 抽帧，悬停直接播原视频；图片条目仍用 display=1 大图。
+            // 两者都没有时（未抽帧的老视频）才留空，浮层不出现。
+            const previewVideo = item.cover && item.cover.video ? `/media${item.cover.video}` : '';
+            const previewImage = item.cover && item.cover.file ? `/media${item.cover.file}` : '';
+            const previewAttr = previewVideo
+                ? `data-preview-video="${esc(previewVideo)}"`
+                : `data-preview-image="${esc(previewImage)}"`;
+            return `<button type="button" class="content-card" data-index="${i}" ${previewAttr}>
+                        <span class="content-cover">
+                            ${cover}
+                            ${previewVideo ? '<span class="content-play" aria-hidden="true">▶</span>' : ''}
+                            <span class="media-badge">${esc(item.platform_label || item.platform)}</span>
+                            ${this.isRisky(item) ? `<span class="media-badge is-warn">疑似 NSFW ${Number(item.nsfw.flagged)}</span>` : ''}
+                        </span>
+                        <span class="content-meta">
+                            <span class="content-title">${esc(item.title)}</span>
+                            <span class="content-sub">${esc(item.account || '未知账号')}${date ? ' · ' + esc(date) : ''}${item.media_count ? ' · ' + item.media_count + ' 张图' : ''}</span>
+                            ${snippet ? `<span class="content-snippet">${esc(snippet)}</span>` : ''}
+                        </span>
+                    </button>`;
+        }).join('')}</div>`;
+        box.querySelectorAll('.content-card').forEach((card) => {
+            card.addEventListener('click', () => this.openDetail(Number(card.dataset.index)));
+        });
+    },
+
+    /**
+     * 条目是否含疑似 NSFW 图片。后端只做聚合（该条目已入库图片里初筛命中的张数），
+     * 条目本身没有「是否 NSFW」属性，所以这里只看 flagged 计数。
+     */
+    isRisky(item) {
+        return !!(item && item.nsfw && Number(item.nsfw.flagged) > 0);
+    },
+
+    renderFilterNote(shownCount) {
+        const el = document.getElementById('ms-filter-note');
+        if (!el) return;
+        if (!this._nsfwOnly) {
+            el.textContent = '';
+            return;
+        }
+        const hidden = Math.max(0, this._items.length - shownCount);
+        el.textContent = hidden ? `已按筛选隐藏 ${hidden} 条` : '筛选已开启';
+    },
+
+    renderPager() {
+        const pager = document.getElementById('ms-pager');
+        if (!pager) return;
+        const shown = this._items.length;
+        if (!shown && !this._offset) {
+            pager.hidden = true;
+            pager.innerHTML = '';
+            return;
+        }
+        pager.hidden = false;
+        const start = this._offset + 1;
+        const end = this._offset + shown;
+        pager.innerHTML = `
+            <button class="btn btn-secondary btn-sm" id="ms-prev" ${this._offset === 0 ? 'disabled' : ''}>← 上一页</button>
+            <span class="form-hint">第 ${start}–${end} 条 / 共 ${this._total} 条</span>
+            <button class="btn btn-secondary btn-sm" id="ms-next" ${end >= this._total ? 'disabled' : ''}>下一页 →</button>`;
+        const prev = document.getElementById('ms-prev');
+        if (prev) prev.addEventListener('click', () => {
+            this._offset = Math.max(0, this._offset - this._limit);
+            this.search(false);
+        });
+        const next = document.getElementById('ms-next');
+        if (next) next.addEventListener('click', () => {
+            this._offset += this._limit;
+            this.search(false);
+        });
+    },
+
+    // ── 详情 ─────────────────────────────────────────
+    async openDetail(index) {
+        const item = this._items[index];
+        if (!item) return;
+        this._detail = item.content_id;
+        let detail = item;
+        try {
+            detail = await API.media.contentsDetail(item.content_id);
+        } catch (err) {
+            // 索引刚被清理时详情 404，用列表项兜底，至少不把用户卡在黑屏。
+        }
+        this._detail = detail;
+        const esc = (v) => this.esc(v);
+        const images = (detail.images || []).slice(0, 60);
+        const body = detail.body ? `<div class="content-detail-body">${esc(detail.body)}</div>` : '';
+        const meta = [
+            detail.platform_label || detail.platform,
+            detail.account,
+            (detail.published_at || '').slice(0, 10),
+        ].filter(Boolean).map(esc).join(' · ');
+        Modal.open({
+            title: `<span id="ms-detail-title">${esc(detail.title)}</span>`,
+            content: `
+                <div class="content-detail" id="ms-detail-body">
+                    <div class="media-lightbox-meta">
+                        <div>${meta}</div>
+                        <div class="media-path">${esc(detail.root)} / ${esc(detail.relpath)}</div>
+                        ${detail.url ? `<div><a href="${esc(detail.url)}" target="_blank" rel="noopener">打开原文</a></div>` : ''}
+                    </div>
+                    ${body}
+                    ${images.length ? `<div class="content-assets">${images.map((image, i) => `
+                        <button type="button" class="content-asset" data-image="${i}" title="点击查看大图 / 全景">
+                            <img src="${esc('/media' + image.thumb)}" loading="lazy" alt="">
+                            ${image.nsfw && image.nsfw.label === 'nsfw'
+                                ? `<span class="media-badge is-warn">疑似 ${Number(image.nsfw.score).toFixed(2)}</span>` : ''}
+                        </button>`).join('')}</div>` : ''}
+                </div>`,
+            footer: `<button class="btn btn-secondary" onclick="MediaSearchPage.closeDetail()">关闭</button>`,
+            onClose: () => { this._detail = null; this.closeViewer(); },
+        });
+        const detailBody = document.getElementById('ms-detail-body');
+        if (detailBody) {
+            detailBody.querySelectorAll('[data-image]').forEach((button) => {
+                button.addEventListener('click', () => this.openViewer(images, Number(button.dataset.image)));
+            });
+        }
+    },
+
+    closeDetail() {
+        this._detail = null;
+        this.closeViewer();
+        if (typeof Modal !== 'undefined' && Modal.close) Modal.close();
+    },
+
+    // ── 图片查看器（含 VR 全景）────────────────────────────
+    /**
+     * 查看面板由共享的 MediaViewer 承担（DOM 前缀 ms，样式沿用 .ms-viewer 系列）；
+     * 本页只注入标签与 NSFW 复核所需的数据行为，全景口径与媒体服务自带页一致。
+     */
+    openViewer(images, index) {
+        if (!this._viewerCtrl) this._viewerCtrl = new MediaViewer('ms');
+        this._viewerCtrl.open(images, index, {
+            getNsfw: (image) => this.nsfwOf(image),
+            loadTags: (image) => API.media.imageTags(image.root, image.relpath, { showError: false })
+                .then((data) => data && data.tags),
+            saveTag: (image, tag, mode) => API.media.tagImage({
+                root: image.root, relpath: image.relpath, tag, mode,
+            }).then((data) => data && data.tags),
+            review: async (image, label) => {
+                const data = await API.media.nsfwReview({
+                    root: image.root, relpath: image.relpath, label, reviewed_by: '本机',
+                });
+                image.nsfw = data.nsfw;
+                image.review = null;
+                if (this._flaggedMode) await this.loadNsfwFlagged(); // 误报出列后列表同步
+            },
+            onTagsChanged: () => this.loadTagFilter(), // 新标签立刻出现在「按标签浏览」下拉里
+        });
+    },
+
+    viewerShow(index) {
+        if (this._viewerCtrl) this._viewerCtrl.show(index);
+    },
+
+    viewerStep(delta) {
+        if (this._viewerCtrl) this._viewerCtrl.step(delta);
+    },
+
+    viewerPanorama() {
+        return this._viewerCtrl ? this._viewerCtrl.panorama() : undefined;
+    },
+
+    async loadThree() {
+        if (!this._viewerCtrl) this._viewerCtrl = new MediaViewer('ms');
+        return this._viewerCtrl.loadThree();
+    },
+
+    viewerBuildPano(THREE, image, viewer) {
+        if (this._viewerCtrl) this._viewerCtrl.buildPano(THREE, image, viewer);
+    },
+
+    viewerApplyPanoMode() {
+        if (this._viewerCtrl) this._viewerCtrl.applyPanoMode();
+    },
+
+    viewerExitPano() {
+        if (this._viewerCtrl) this._viewerCtrl.exitPano();
+    },
+
+    disposePano(pano) {
+        if (this._viewerCtrl) this._viewerCtrl.disposePano(pano);
+    },
+
+    viewerStatus(msg) {
+        if (this._viewerCtrl) this._viewerCtrl.status(msg);
+    },
+
+    closeViewer() {
+        if (this._viewerCtrl) this._viewerCtrl.close();
+    },
+
+    // ── 扫描 ─────────────────────────────────────────
+    async triggerScan() {
+        const root = this._root || (document.getElementById('ms-root')?.value || '');
+        if (!root) {
+            Toast.error('没有可扫描的来源');
+            return;
+        }
+        const state = document.getElementById('ms-scan-state');
+        if (state) state.textContent = '正在提交扫描…';
+        try {
+            const job = await API.media.scan(root, false);
+            Toast.info('扫描任务已提交');
+            this.pollScan(job.id);
+        } catch (err) {
+            if (state) state.textContent = '';
+            Toast.error(`扫描提交失败: ${err.message}`);
+        }
+    },
+
+    pollScan(jobId) {
+        clearInterval(this._scanTimer);
+        const tick = async () => {
+            const state = document.getElementById('ms-scan-state');
+            try {
+                const job = await API.media.scanStatus(jobId);
+                if (state) {
+                    state.textContent = `扫描中 ${job.scanned || 0} 个文件${job.current ? '：' + job.current : ''}`;
+                }
+                if (['completed', 'partial', 'failed', 'cancelled', 'interrupted'].includes(job.status)) {
+                    clearInterval(this._scanTimer);
+                    this._scanTimer = null;
+                    const added = job.contents ? (job.contents.new || 0) : 0;
+                    const updated = job.contents ? (job.contents.updated || 0) : 0;
+                    if (state) {
+                        state.textContent = job.status === 'completed'
+                            ? `扫描完成：图片新增 ${job.indexed_new || 0}，内容新增 ${added}、更新 ${updated}`
+                            : `扫描结束（${job.status}）`;
+                    }
+                    await this.loadFacets();
+                    this.loadStats();
+                    this.search(false);
+                }
+            } catch (err) {
+                clearInterval(this._scanTimer);
+                this._scanTimer = null;
+                if (state) state.textContent = '扫描状态读取失败';
+            }
+        };
+        this._scanTimer = setInterval(tick, 1200);
+        tick();
+    },
+
+    detachKeys() {
+        if (this._keyHandler) {
+            document.removeEventListener('keydown', this._keyHandler);
+            this._keyHandler = null;
+        }
+    },
+
+    esc(value) {
+        return String(value == null ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    },
+};

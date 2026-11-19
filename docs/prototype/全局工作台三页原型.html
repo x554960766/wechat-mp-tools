@@ -1,0 +1,843 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>全局工作台三页 · UI 收敛原型</title>
+<style>
+:root{
+  --primary:#667eea; --primary-light:#7c94f4; --primary-dark:#5567d5; --primary-glow:rgba(102,126,234,.3);
+  --gradient-primary:linear-gradient(135deg,#667eea 0%,#764ba2 100%);
+  --gradient-bg:linear-gradient(135deg,#0a0a1a 0%,#1a1a2e 50%,#16213e 100%);
+  --spacing-sm:8px; --spacing-md:16px; --spacing-lg:24px; --spacing-xl:32px;
+  --bg-primary:#0a0a1a; --bg-secondary:#111128;
+  --bg-card:rgba(25,25,50,.6); --bg-card-hover:rgba(35,35,65,.7);
+  --bg-input:rgba(20,20,40,.8); --bg-sidebar:rgba(10,10,26,.95);
+  --bg-glass:rgba(255,255,255,.05); --bg-glass-hover:rgba(255,255,255,.08);
+  --text-primary:#e8e8f0; --text-secondary:#9898b0; --text-muted:#6868a0;
+  --border-color:rgba(255,255,255,.06); --border-hover:rgba(255,255,255,.12);
+  --border-focus:rgba(102,126,234,.5);
+  --success:#43e97b; --error:#f5576c; --warning:#fee140;
+  --radius-sm:8px; --radius-md:12px; --radius-lg:16px; --radius-xl:20px; --radius-full:9999px;
+  --shadow-sm:0 2px 8px rgba(0,0,0,.3); --shadow-md:0 4px 20px rgba(0,0,0,.4); --shadow-lg:0 8px 40px rgba(0,0,0,.5);
+  --font-family:'Inter',-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;
+  --t:.2s ease;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+[hidden]{display:none !important}
+body{font-family:var(--font-family);background:var(--gradient-bg,linear-gradient(135deg,#0a0a1a 0%,#1a1a2e 50%,#16213e 100%));
+  color:var(--text-primary);min-height:100vh;display:flex;font-size:14px;-webkit-font-smoothing:antialiased}
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:3px}
+
+/* 侧栏 */
+.sidebar{width:240px;flex:0 0 240px;background:var(--bg-sidebar);border-right:1px solid var(--border-color);
+  padding:20px 12px;display:flex;flex-direction:column;gap:18px}
+.brand{display:flex;align-items:center;gap:12px;padding:0 8px 4px}
+.brand-mark{width:40px;height:40px;flex:0 0 40px;border-radius:var(--radius-md);background:var(--gradient-primary);
+  display:grid;place-items:center;color:#fff}
+.brand-mark svg{width:22px;height:22px}
+.brand-name{font-size:1.15rem;font-weight:700;letter-spacing:-.02em;line-height:1.2;
+  background:var(--gradient-primary);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.brand-sub{font-size:11px;color:var(--text-secondary);margin-top:2px}
+.nav-group-title{padding:0 10px 8px;font-size:11px;letter-spacing:.12em;color:var(--text-muted);text-transform:uppercase}
+.nav-item{display:flex;align-items:center;gap:16px;padding:10px 16px;border-radius:var(--radius-md);cursor:pointer;
+  color:var(--text-secondary);font-size:.9rem;font-weight:500;transition:var(--t);text-decoration:none}
+.nav-item:hover{background:var(--bg-glass);color:var(--text-primary)}
+.nav-item.active{background:rgba(102,126,234,.12);color:var(--primary-light);
+  box-shadow:inset 3px 0 0 var(--primary)}
+.nav-item.active .nav-icon{color:var(--primary-light)}
+.nav-icon{width:20px;height:20px;display:flex;align-items:center;justify-content:center;color:inherit}
+.nav-icon svg{width:20px;height:20px}
+.nav-badge{margin-left:auto;font-size:10px;padding:1px 7px;border-radius:var(--radius-full);
+  background:rgba(102,126,234,.18);color:#a9b6ff;border:1px solid rgba(102,126,234,.35)}
+.sidebar-search{display:flex;align-items:center;gap:8px;height:38px;padding:0 8px;background:var(--bg-input);
+  border:1px solid var(--border-color);border-radius:var(--radius-md);transition:var(--t)}
+.sidebar-search:focus-within{border-color:var(--border-focus);box-shadow:0 0 0 3px var(--primary-glow)}
+.sidebar-search svg{width:16px;height:16px;flex:0 0 16px;color:var(--text-muted)}
+.sidebar-search input{flex:1;min-width:0;background:none;border:none;outline:none;color:var(--text-primary);font-family:inherit;font-size:.82rem}
+.sidebar-search input::placeholder{color:var(--text-muted)}
+.sidebar-foot{margin-top:auto;padding:10px;border-top:1px solid var(--border-color);font-size:11px;color:var(--text-muted);line-height:1.7}
+
+/* 主区 */
+.main{flex:1;min-width:0;display:flex;flex-direction:column;overflow:hidden}
+.topbar{height:56px;display:flex;align-items:center;gap:14px;padding:0 28px;border-bottom:1px solid var(--border-color);
+  background:rgba(10,10,26,.5);backdrop-filter:blur(12px)}
+.topbar-title{font-weight:600}
+.proto-tag{font-size:11px;padding:2px 9px;border-radius:var(--radius-full);background:rgba(67,233,123,.12);
+  color:#7ef0ab;border:1px solid rgba(67,233,123,.3)}
+.topbar-right{margin-left:auto;color:var(--text-muted);font-size:12px}
+.viewport{flex:1;overflow-y:auto;padding:32px 32px 40px}
+.view{display:none;max-width:1180px}
+.view.active{display:block}
+
+/* 通用 */
+.page-header{margin-bottom:18px}
+.page-title{font-size:1.8rem;font-weight:800;letter-spacing:-.03em;margin-bottom:4px;
+  background:var(--gradient-primary);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
+.page-desc{color:var(--text-secondary);font-size:.95rem;font-weight:400;line-height:1.7;margin-top:6px;max-width:840px}
+.notes{display:flex;flex-wrap:wrap;gap:4px 14px;margin-bottom:24px}
+.note{font-size:.78rem;color:var(--text-muted);padding:2px 0}
+.card{background:var(--bg-card);border:1px solid var(--border-color);border-radius:var(--radius-lg);
+  padding:var(--spacing-lg,24px);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);
+  margin-bottom:24px;transition:var(--t)}
+.card:hover{border-color:var(--border-hover);box-shadow:var(--shadow-md)}
+.card-head{display:flex;align-items:center;gap:12px;margin-bottom:14px;flex-wrap:wrap}
+.card-title{font-size:1rem;font-weight:600;letter-spacing:-.01em}
+.spacer{flex:1}
+.hint{font-size:12px;color:var(--text-muted);line-height:1.6}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.field{display:flex;flex-direction:column;gap:6px;min-width:0}
+.label{font-size:12px;color:var(--text-secondary)}
+.input,select,textarea{background:var(--bg-input);border:1px solid var(--border-color);border-radius:var(--radius-md);
+  color:var(--text-primary);padding:10px 16px;font-size:.9rem;font-family:inherit;outline:none;transition:var(--t);width:100%}
+.input:focus,select:focus,textarea:focus{border-color:var(--border-focus);box-shadow:0 0 0 3px var(--primary-glow)}
+select{appearance:none;background-image:linear-gradient(45deg,transparent 50%,#9898b0 50%),linear-gradient(135deg,#9898b0 50%,transparent 50%);
+  background-position:calc(100% - 18px) 50%,calc(100% - 13px) 50%;background-size:5px 5px,5px 5px;background-repeat:no-repeat;padding-right:34px}
+.btn{border:1px solid var(--border-color);border-radius:var(--radius-md);padding:10px 20px;
+  font-size:.9rem;font-weight:600;font-family:inherit;cursor:pointer;transition:var(--t);white-space:nowrap;
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  color:var(--text-primary);background:var(--bg-glass)}
+.btn:hover{background:var(--bg-glass-hover);border-color:var(--border-hover)}
+.btn:active{transform:scale(.97)}
+.btn-primary{background:var(--gradient-primary);border-color:transparent;color:#fff;
+  box-shadow:0 4px 15px rgba(102,126,234,.3)}
+.btn-primary:hover{box-shadow:0 6px 25px rgba(102,126,234,.45);transform:translateY(-1px)}
+.btn-sm{padding:6px 12px;font-size:.8rem;border-radius:10px}
+.btn-ghost{background:transparent;border-color:transparent}
+.chip{border:1px solid var(--border-color);background:var(--bg-card);color:var(--text-secondary);
+  border-radius:var(--radius-full);padding:5px 10px;font-size:.85rem;cursor:pointer;display:inline-flex;align-items:center;gap:6px;transition:all .15s ease}
+.chip:hover{color:var(--text-primary);border-color:var(--border-hover);background:var(--bg-card-hover)}
+.chip.on{background:rgba(102,126,234,.16);border-color:rgba(102,126,234,.5);color:var(--primary-light)}
+.chip .n{font-size:11px;color:var(--text-muted)}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.stat-strip{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12.5px;color:var(--text-secondary)}
+.stat-num{background:none;border:none;color:#aab6ff;font-family:inherit;font-size:12.5px;cursor:pointer;padding:2px 6px;border-radius:6px;transition:.15s}
+.stat-num:hover{background:rgba(102,126,234,.16);color:#d4dbff}
+.kv-sep{color:var(--text-muted)}
+.badge{font-size:11px;padding:2px 8px;border-radius:var(--radius-full);border:1px solid}
+.badge.ok{color:#7ef0ab;border-color:rgba(67,233,123,.35);background:rgba(67,233,123,.1)}
+.badge.run{color:#a9b6ff;border-color:rgba(102,126,234,.4);background:rgba(102,126,234,.12)}
+.badge.warn{color:#ffd58a;border-color:rgba(254,225,64,.35);background:rgba(254,225,64,.1)}
+.badge.muted{color:var(--text-muted);border-color:var(--border-color);background:var(--bg-glass)}
+.seg{display:inline-flex;padding:4px;gap:4px;background:var(--bg-input);border:1px solid var(--border-color);border-radius:12px}
+.seg button{border:none;background:transparent;color:var(--text-secondary);padding:7px 14px;border-radius:9px;
+  font-size:12.5px;font-family:inherit;cursor:pointer;transition:.18s}
+.seg button.on{background:var(--gradient-primary);color:#fff;font-weight:600}
+.divider{height:1px;background:var(--border-color);margin:14px 0}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--border-color)}
+.tab{border:none;background:transparent;color:var(--text-secondary);padding:8px 14px;font-size:13px;
+  font-family:inherit;cursor:pointer;border-bottom:2px solid transparent;transition:.2s;display:inline-flex;align-items:center;gap:6px}
+.tab.on{color:#fff;border-bottom-color:var(--primary)}
+.toolbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px}
+.toolbar .right{margin-left:auto;display:flex;align-items:center;gap:8px}
+
+/* 结果 */
+.results{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:var(--spacing-md,16px);margin-top:16px}
+.res-card{border:1px solid var(--border-color);border-radius:var(--radius-md);overflow:hidden;background:var(--bg-card);cursor:pointer;transition:transform .15s ease,border-color .15s ease}
+.res-card:hover{border-color:var(--primary-light);transform:translateY(-2px)}
+.cover{aspect-ratio:1/1;display:grid;place-items:center;font-size:22px}
+/* 缩略图占位图标 */
+.cover svg,.thumb-sq svg,.img-thumb svg{width:22px;height:22px;opacity:.8}
+.cover.c1{background:linear-gradient(135deg,#2b2b52,#4b3a6b)}
+.cover.c2{background:linear-gradient(135deg,#1f3d4d,#2f6070)}
+.cover.c3{background:linear-gradient(135deg,#462f4d,#6b3a4a)}
+.cover.c4{background:linear-gradient(135deg,#26324d,#3d4a70)}
+.res-body{padding:10px 12px 12px}
+.res-title{font-size:.86rem;font-weight:500;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.res-meta{font-size:.78rem;color:var(--text-muted);margin-top:4px;display:flex;gap:6px;flex-wrap:wrap}
+.pill{font-size:10.5px;padding:1px 6px;border-radius:5px;background:var(--bg-glass);color:var(--text-secondary)}
+.row-list{display:flex;flex-direction:column;gap:8px}
+.list-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border:1px solid var(--border-color);
+  border-radius:10px;background:rgba(18,18,36,.55)}
+.list-item .name{font-size:12.5px}
+.list-item .meta{font-size:11px;color:var(--text-muted);margin-top:3px}
+.list-item .right{margin-left:auto;display:flex;gap:8px;align-items:center}
+.thumb-sq{width:44px;height:44px;border-radius:8px;flex:0 0 auto;display:grid;place-items:center;font-size:16px}
+.thumb-sq.c1{background:linear-gradient(135deg,#2b2b52,#4b3a6b)}
+.thumb-sq.c2{background:linear-gradient(135deg,#1f3d4d,#2f6070)}
+.thumb-sq.c3{background:linear-gradient(135deg,#462f4d,#6b3a4a)}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th{text-align:left;color:var(--text-muted);font-weight:500;padding:8px 10px;border-bottom:1px solid var(--border-color);font-size:11.5px}
+td{padding:9px 10px;border-bottom:1px solid rgba(255,255,255,.04);color:var(--text-secondary);vertical-align:middle}
+tr:last-child td{border-bottom:none}
+.pager{display:flex;align-items:center;gap:8px;justify-content:center;margin-top:16px}
+.page-input{width:56px;text-align:center;padding:6px 8px}
+.empty{padding:26px;text-align:center;color:var(--text-muted);font-size:12.5px}
+
+/* 抽屉 / 菜单 */
+.drawer-mask{position:fixed;inset:0;background:rgba(4,4,12,.55);opacity:0;pointer-events:none;transition:.22s;z-index:40}
+.drawer-mask.show{opacity:1;pointer-events:auto}
+.drawer{position:fixed;top:0;right:0;bottom:0;width:344px;background:rgba(16,16,32,.97);border-left:1px solid var(--border-color);
+  backdrop-filter:blur(18px);transform:translateX(100%);transition:transform .26s cubic-bezier(.4,0,.2,1);z-index:41;
+  display:flex;flex-direction:column;padding:20px}
+.drawer.show{transform:none}
+.drawer h3{font-size:15px;margin-bottom:4px}
+.drawer .sub{font-size:12px;color:var(--text-muted);margin-bottom:18px;line-height:1.6}
+.drawer .field{margin-bottom:16px}
+.drawer-foot{margin-top:auto;display:flex;gap:10px}
+.drawer-foot .btn{flex:1;justify-content:center}
+input[type=checkbox]{accent-color:var(--primary)}
+.switch{position:relative;width:42px;height:22px;border-radius:999px;background:rgba(255,255,255,.09);
+  border:1px solid var(--border-color);cursor:pointer;transition:.2s;flex:0 0 auto}
+.switch i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#9898b0;transition:.2s}
+.switch.on{background:rgba(102,126,234,.35);border-color:rgba(102,126,234,.5)}
+.switch.on i{left:22px;background:var(--primary)}
+.switch-row{display:flex;align-items:center;gap:10px;justify-content:space-between;padding:8px 0}
+.img-strip{display:flex;align-items:center;gap:12px;margin-top:12px;padding:10px;border:1px dashed rgba(102,126,234,.35);
+  border-radius:12px;background:rgba(102,126,234,.06)}
+.img-thumb{width:56px;height:56px;border-radius:9px;background:linear-gradient(135deg,#2b2b52,#6b3a4a);display:grid;place-items:center;font-size:20px;flex:0 0 auto}
+.menu-wrap{position:relative}
+.menu{position:absolute;right:0;top:calc(100% + 6px);min-width:180px;background:rgba(18,18,36,.98);
+  border:1px solid var(--border-color);border-radius:12px;padding:6px;display:none;z-index:20;box-shadow:0 16px 40px rgba(0,0,0,.45)}
+.menu.show{display:block}
+.menu button{display:flex;width:100%;align-items:center;gap:8px;border:none;background:transparent;color:var(--text-secondary);
+  padding:8px 10px;border-radius:8px;font-size:12.5px;font-family:inherit;cursor:pointer;text-align:left}
+.menu button:hover{background:var(--bg-glass);color:var(--text-primary)}
+.menu .sep{height:1px;background:var(--border-color);margin:4px 2px}
+details.fold{border-top:1px solid var(--border-color);margin-top:12px;padding-top:10px}
+details.fold summary{cursor:pointer;font-size:12px;color:var(--text-secondary);list-style:none}
+details.fold summary::-webkit-details-marker{display:none}
+details.fold summary::before{content:"▸ ";color:var(--text-muted)}
+details.fold[open] summary::before{content:"▾ "}
+.dropzone{border:2px dashed rgba(102,126,234,.35);border-radius:14px;padding:24px 16px;text-align:center;cursor:pointer;
+  background:rgba(102,126,234,.05);transition:.2s}
+.dropzone:hover{border-color:var(--primary);background:rgba(102,126,234,.09)}
+@media (max-width:900px){.sidebar{display:none}.grid-2{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+
+<aside class="sidebar">
+  <div class="brand">
+    <div class="brand-mark"><svg viewBox="0 0 24 24" fill="none"><path d="M12 2L2 7L12 12L22 7L12 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 17L12 22L22 17" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M2 12L12 17L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+    <div><div class="brand-name">Media Tools</div><div class="brand-sub">全能下载与工作台</div></div>
+  </div>
+  <div class="sidebar-search">
+    <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20L16.5 16.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <input placeholder="全局检索…" aria-label="全局检索">
+  </div>
+  <div>
+    <div class="nav-group-title">全局工作台</div>
+    <a class="nav-item active" data-view="search"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/><path d="M20 20L16.5 16.5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span><span>素材检索</span></a>
+    <a class="nav-item" data-view="archive"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none"><path d="M21 8V20C21 21.1 20.1 22 19 22H5C3.9 22 3 21.1 3 20V8" stroke="currentColor" stroke-width="2"/><rect x="2" y="3" width="20" height="5" rx="1" stroke="currentColor" stroke-width="2"/><path d="M10 12H14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span><span>按号归档</span></a>
+    <a class="nav-item" data-view="files"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none"><path d="M4 20C4 21.1 3.1 22 2 22V20" stroke="currentColor" stroke-width="2"/><path d="M22 18C22 19.1 21.1 20 20 20H4C2.9 20 2 19.1 2 18V8C2 6.9 2.9 6 4 6H9L11 4H18C19.1 4 20 4.9 20 6V18Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span><span>全局文件</span></a>
+    <a class="nav-item" data-view="review"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none"><path d="M12 22S20 18 20 12V5L12 2L4 5V12C4 18 12 22 12 22Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M9 12L11 14L15 10" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span><span>内容审核</span><span class="nav-badge">新增</span></a>
+  </div>
+  <div>
+    <div class="nav-group-title">公众号</div>
+    <a class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none"><path d="M17 21V19C17 16.79 15.21 15 13 15H5C2.79 15 1 16.79 1 19V21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="9" cy="7" r="4" stroke="currentColor" stroke-width="2"/><path d="M23 21V19C23 17.34 21.94 15.91 20.44 15.34" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M16.44 3.34C17.94 3.91 19 5.34 19 7C19 8.66 17.94 10.09 16.44 10.66" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span><span>账号池</span></a>
+    <a class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none"><path d="M14 2H6C4.9 2 4 2.9 4 4V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V8L14 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="14,2 14,8 20,8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="16" y1="13" x2="8" y2="13" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><line x1="16" y1="17" x2="8" y2="17" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span><span>文章下载</span></a>
+    <a class="nav-item"><span class="nav-icon"><svg viewBox="0 0 24 24" fill="none"><path d="M3 3v5h5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M3.05 13A9 9 0 1 0 5.64 6.64L3 8" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M12 7v5l3 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span><span>下载历史</span></a>
+  </div>
+  <div class="sidebar-foot">UI 收敛原型 · 静态假数据<br>仅演示结构与交互，非最终视觉。</div>
+</aside>
+
+<div class="main">
+
+  <div class="viewport">
+
+    <!-- ===== 视图：素材检索 ===== -->
+    <section class="view active" id="view-search">
+      <div class="page-header">
+        <h2 class="page-title">素材检索</h2>
+        <p class="page-desc">按标题、正文和账号检索已下载的内容：公众号文章、视频号/抖音/快手/B站视频、小红书笔记。留空直接看最近入库。</p>
+      </div>
+      <div class="notes">
+        <span class="note">合并：关键词 / 文件 / 网址 三行 → 一条检索条</span>
+        <span class="note">合并：平台 chip + 账号 → 范围行</span>
+        <span class="note">移动：媒体来源 → 扫描弹层</span>
+        <span class="note">降级：视频画面命中 → 可展开摘要</span>
+        <span class="note">统一：清空 → 重置全部</span>
+      </div>
+
+      <div class="card">
+        <div class="row">
+          <input class="input" id="q" style="flex:1;min-width:220px" placeholder="例如：手机壁纸 / 翰墨修心 / 咖啡 手写">
+          <button class="btn btn-primary">检索</button>
+          <button class="btn" id="open-filter">筛选 <span class="badge run" id="filter-count">2</span></button>
+          <button class="btn" id="img-mode-btn">以图找图</button>
+        </div>
+
+        <div class="row" style="margin-top:12px">
+          <span class="hint">平台：</span>
+          <div class="chips" id="platform-chips">
+            <button class="chip on" data-p="">全部 <span class="n">1204</span></button>
+            <button class="chip" data-p="wechat">公众号 <span class="n">812</span></button>
+            <button class="chip" data-p="channels">视频号 <span class="n">96</span></button>
+            <button class="chip" data-p="douyin">抖音 <span class="n">142</span></button>
+            <button class="chip" data-p="kuaishou">快手 <span class="n">48</span></button>
+            <button class="chip" data-p="bilibili">B站 <span class="n">61</span></button>
+            <button class="chip" data-p="xhs">小红书 <span class="n">45</span></button>
+          </div>
+          <select style="max-width:190px"><option>全部账号</option><option>翰墨修心（36）</option><option>某某设计（21）</option></select>
+        </div>
+
+        <div class="img-strip" id="img-strip" hidden>
+          <div class="img-thumb"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="9" r="2" stroke="currentColor" stroke-width="2"/><path d="M21 15L16 10L5 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:12.5px">sample-wallpaper.jpg</div>
+            <div class="hint">本地文件 · 248 KB · 当前处于图片模式</div>
+          </div>
+          <button class="btn btn-sm">换图</button>
+          <button class="btn btn-sm" id="img-exit">移除</button>
+        </div>
+
+        <div class="toolbar">
+          <span class="hint" id="search-stats">共 1204 条 · 已启用筛选 2 项</span>
+          <button class="btn btn-sm btn-ghost" id="hits-toggle">画面命中 12 条 ▾</button>
+          <div class="right"><span class="hint">按相关度</span></div>
+        </div>
+
+        <div id="video-hits" hidden style="margin-top:10px">
+          <div class="row-list">
+            <div class="list-item">
+              <div class="thumb-sq c3"><svg viewBox="0 0 24 24" fill="none"><rect x="2" y="4" width="20" height="16" rx="3" stroke="currentColor" stroke-width="2"/><path d="M10 9L15 12L10 15V9Z" stroke="currentColor" stroke-width="2"/></svg></div>
+              <div><div class="name">汽车贴膜实拍.mp4</div>
+                <div class="meta">抖音 · 46 秒 · 画面相似度 0.82 · 命中 3 处（00:12 / 00:25 / 00:38）</div></div>
+            </div>
+            <div class="list-item">
+              <div class="thumb-sq c2"><svg viewBox="0 0 24 24" fill="none"><rect x="2" y="4" width="20" height="16" rx="3" stroke="currentColor" stroke-width="2"/><path d="M10 9L15 12L10 15V9Z" stroke="currentColor" stroke-width="2"/></svg></div>
+              <div><div class="name">手写过程记录.mov</div>
+                <div class="meta">B站 · 128 秒 · 画面相似度 0.76 · 命中 2 处</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="results" id="text-results">
+        <article class="res-card"><div class="cover c1"><svg viewBox="0 0 24 24" fill="none"><path d="M14 2H6C4.9 2 4 2.9 4 4V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V8L14 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="14,2 14,8 20,8" stroke="currentColor" stroke-width="2"/></svg></div><div class="res-body"><div class="res-title">手机壁纸｜把秋天装进锁屏</div><div class="res-meta"><span class="pill">公众号</span><span class="pill">翰墨修心</span></div></div></article>
+        <article class="res-card"><div class="cover c2"><svg viewBox="0 0 24 24" fill="none"><path d="M14 2H6C4.9 2 4 2.9 4 4V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V8L14 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="14,2 14,8 20,8" stroke="currentColor" stroke-width="2"/></svg></div><div class="res-body"><div class="res-title">手写体排版练习，第 12 期</div><div class="res-meta"><span class="pill">公众号</span><span class="pill">某某设计</span></div></div></article>
+        <article class="res-card"><div class="cover c3"><svg viewBox="0 0 24 24" fill="none"><rect x="2" y="4" width="20" height="16" rx="3" stroke="currentColor" stroke-width="2"/><path d="M10 9L15 12L10 15V9Z" stroke="currentColor" stroke-width="2"/></svg></div><div class="res-body"><div class="res-title">咖啡与手写的清晨</div><div class="res-meta"><span class="pill">视频号</span><span class="pill">46 秒</span></div></div></article>
+        <article class="res-card"><div class="cover c4"><svg viewBox="0 0 24 24" fill="none"><path d="M14 2H6C4.9 2 4 2.9 4 4V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V8L14 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="14,2 14,8 20,8" stroke="currentColor" stroke-width="2"/></svg></div><div class="res-body"><div class="res-title">小红书｜深色壁纸合集 40 张</div><div class="res-meta"><span class="pill">小红书</span><span class="pill">45 图</span></div></div></article>
+        <article class="res-card"><div class="cover c2"><svg viewBox="0 0 24 24" fill="none"><rect x="2" y="4" width="20" height="16" rx="3" stroke="currentColor" stroke-width="2"/><path d="M10 9L15 12L10 15V9Z" stroke="currentColor" stroke-width="2"/></svg></div><div class="res-body"><div class="res-title">汽车贴膜实拍</div><div class="res-meta"><span class="pill">抖音</span><span class="pill">画面命中</span></div></div></article>
+        <article class="res-card"><div class="cover c1"><svg viewBox="0 0 24 24" fill="none"><path d="M14 2H6C4.9 2 4 2.9 4 4V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V8L14 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="14,2 14,8 20,8" stroke="currentColor" stroke-width="2"/></svg></div><div class="res-body"><div class="res-title">翰墨修心｜本周更新合辑</div><div class="res-meta"><span class="pill">公众号</span><span class="pill">6 篇</span></div></div></article>
+      </div>
+
+      <div class="results" id="image-results" hidden>
+        <article class="res-card"><div class="cover c4"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="9" r="2" stroke="currentColor" stroke-width="2"/><path d="M21 15L16 10L5 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div><div class="res-body"><div class="res-title">相似度 0.94 · 2026-11-12</div><div class="res-meta"><span class="pill">公众号配图</span></div></div></article>
+        <article class="res-card"><div class="cover c3"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="9" r="2" stroke="currentColor" stroke-width="2"/><path d="M21 15L16 10L5 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div><div class="res-body"><div class="res-title">相似度 0.91 · 2026-11-09</div><div class="res-meta"><span class="pill">小红书</span></div></div></article>
+        <article class="res-card"><div class="cover c1"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="9" r="2" stroke="currentColor" stroke-width="2"/><path d="M21 15L16 10L5 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div><div class="res-body"><div class="res-title">相似度 0.88 · 2026-11-03</div><div class="res-meta"><span class="pill">抖音帧</span></div></div></article>
+        <article class="res-card"><div class="cover c2"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="9" r="2" stroke="currentColor" stroke-width="2"/><path d="M21 15L16 10L5 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div><div class="res-body"><div class="res-title">相似度 0.85 · 2026-10-28</div><div class="res-meta"><span class="pill">B站封面</span></div></div></article>
+      </div>
+
+      <div class="pager">
+        <button class="btn btn-sm">上一页</button>
+        <input class="input page-input" value="1">
+        <span class="hint">/ 51</span>
+        <button class="btn btn-sm">下一页</button>
+      </div>
+    </section>
+
+    <!-- ===== 视图：按号归档 ===== -->
+    <section class="view" id="view-archive">
+      <div class="page-header">
+        <h2 class="page-title">按号归档</h2>
+        <p class="page-desc">按平台选号，采集最近 N 篇落盘并自动增量入库；也可以对任意平台已下载的作品手动登记到 NAS 归档队列。</p>
+      </div>
+      <div class="notes">
+        <span class="note">合并：① / ② / ⑤ → 一张卡三段</span>
+        <span class="note">合并：③进度 + ⑥历史 → 任务卡</span>
+        <span class="note">简化：目标根 + 子目录 4 处 → 1 处</span>
+        <span class="note">降级：④NAS → 状态徽标</span>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3 class="card-title">新建归档任务</h3><span class="spacer"></span>
+          <div class="seg" id="arch-seg">
+            <button class="on" data-seg="account">按账号</button>
+            <button data-seg="links">粘贴链接</button>
+            <button data-seg="existing">登记已下载</button>
+          </div>
+        </div>
+
+        <div data-panel="account">
+          <div class="grid-2">
+            <div class="field"><span class="label">平台</span>
+              <select><option>微信视频号</option><option>小红书</option><option>B站</option><option>快手</option></select></div>
+            <div class="field"><span class="label">账号</span>
+              <select><option>翰墨修心</option><option>汽车大鹏</option><option>手写实验室</option></select></div>
+          </div>
+          <div class="grid-2" style="margin-top:12px">
+            <div class="field"><span class="label">最近几篇</span>
+              <input class="input" type="number" value="10">
+              <span class="hint">已下载的自动跳过，只取增量</span></div>
+            <div class="field"><span class="label">或贴作者主页链接</span>
+              <input class="input" placeholder="账号还没收藏时用这个">
+              <span class="hint">不在收藏列表里也能归档</span></div>
+          </div>
+        </div>
+
+        <div data-panel="links" hidden>
+          <div class="field"><span class="label">粘贴链接</span>
+            <textarea rows="4" placeholder="https://mp.weixin.qq.com/s?...（一行一条，或整段分享文案）"></textarea>
+            <span class="hint">自动抽公众号文章链接，按 __biz/mid/idx 去重；单任务上限 500 条</span></div>
+          <div class="row" style="margin-top:10px">
+            <input class="input" style="flex:1" placeholder="或上传 txt / csv / zip">
+            <button class="btn btn-sm">选择文件</button>
+          </div>
+        </div>
+
+        <div data-panel="existing" hidden>
+          <div class="grid-2">
+            <div class="field"><span class="label">平台</span>
+              <select><option>微信公众号</option><option>微信视频号</option><option>抖音</option><option>快手</option><option>B站</option><option>小红书</option></select></div>
+            <div class="field"><span class="label">账号（可空）</span>
+              <input class="input" placeholder="留空 = 该平台全部">
+              <span class="hint">抖音/快手填作者名，公众号填公众号名</span></div>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+        <div class="row" id="arch-target" hidden>
+          <div class="field" style="flex:1;min-width:200px"><span class="label">目标媒体根</span>
+            <select><option>articles-full</option><option>media-library</option></select></div>
+          <div class="field" style="flex:1;min-width:200px"><span class="label">目标子目录（可空）</span>
+            <input class="input" placeholder="例如 汽车/某号"></div>
+        </div>
+        <div class="row" style="margin-top:14px">
+          <button class="btn btn-primary" id="arch-main">归档最近 10 篇</button>
+          <button class="btn">只扫描新增</button>
+        </div>
+
+        <details class="fold"><summary>兜底：该号不在账号池里（fakeid 直采）</summary>
+          <div class="grid-2" style="margin-top:12px">
+            <div class="field"><span class="label">公众号 fakeid</span><input class="input" placeholder="例如 MzA5..."></div>
+            <div class="field"><span class="label">抓取篇数</span><input class="input" type="number" value="10"></div>
+          </div>
+          <div class="row" style="margin-top:12px"><button class="btn btn-sm">交给媒体服务归档</button></div>
+        </details>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3 class="card-title">任务</h3>
+          <span class="badge run">1 个进行中</span>
+          <span class="spacer"></span>
+          <button class="btn btn-sm btn-ghost" id="nas-toggle">NAS 自动归档 5/6 ▾</button>
+        </div>
+
+        <div id="nas-panel" hidden class="row-list" style="margin-bottom:14px">
+          <div class="list-item"><div><div class="name">微信视频号</div><div class="meta">最近一次 21:04 · 成功</div></div><span class="badge ok" style="margin-left:auto">正常</span></div>
+          <div class="list-item"><div><div class="name">抖音</div><div class="meta">最近一次 20:51 · 成功</div></div><span class="badge ok" style="margin-left:auto">正常</span></div>
+          <div class="list-item"><div><div class="name">小红书</div><div class="meta">未启程 · 未配置 NAS 目录</div></div><span class="badge muted" style="margin-left:auto">未启用</span></div>
+        </div>
+
+        <div class="row-list">
+          <div class="list-item">
+            <div style="flex:1"><div class="name">下载（wmp）· 翰墨修心 · 最近 10 篇</div>
+              <div class="meta">进行中 4/10 · 预计 1 分钟</div></div>
+            <span class="badge run">进行中</span>
+          </div>
+          <div class="list-item">
+            <div style="flex:1"><div class="name">入库（媒体服务）</div>
+              <div class="meta">等待下载完成后自动触发增量扫描</div></div>
+            <span class="badge muted">待开始</span>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+        <table>
+          <thead><tr><th>时间</th><th>平台</th><th>账号</th><th>篇数</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr><td>11-19 20:12</td><td>视频号</td><td>汽车大鹏</td><td>10</td><td><span class="badge ok">完成</span></td><td><button class="btn btn-sm btn-ghost">详情</button></td></tr>
+            <tr><td>11-19 09:31</td><td>公众号</td><td>翰墨修心</td><td>8</td><td><span class="badge ok">完成</span></td><td><button class="btn btn-sm btn-ghost">详情</button></td></tr>
+            <tr><td>11-18 22:47</td><td>快手</td><td>手写实验室</td><td>12</td><td><span class="badge warn">待验证</span></td><td><button class="btn btn-sm">恢复任务</button></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ===== 视图：全局文件 ===== -->
+    <section class="view" id="view-files">
+      <div class="page-header">
+        <h2 class="page-title">全局文件检索</h2>
+        <p class="page-desc">跨全部媒体根检索已入库文件，并按内容摘要识别重复。图片支持普通查看与 VR 全景，文本与视频只展示元数据。</p>
+      </div>
+      <div class="notes">
+        <span class="note">合并：概览 + 重复情况 → 可点击统计条</span>
+        <span class="note">简化：6 个条件 → 3 常驻 + 更多筛选</span>
+        <span class="note">收进菜单：索引管理</span>
+        <span class="note">合并：清单 + 重复组 → 同卡两 tab</span>
+        <span class="note">迁出：内容审核 → 独立页</span>
+      </div>
+
+      <div class="card" style="padding:14px 18px">
+        <div class="row">
+          <input class="input" style="flex:1;min-width:200px" placeholder="文件名关键词，回车检索">
+          <select style="width:130px"><option>全部类型</option><option>图片</option><option>视频</option><option>文本</option></select>
+          <select style="width:160px"><option>全部媒体根</option><option>articles-full</option><option>media-library</option></select>
+          <button class="btn btn-primary">检索</button>
+          <button class="btn" id="more-filter">更多筛选 <span class="badge run">2</span></button>
+          <div class="menu-wrap">
+            <button class="btn" id="files-menu-btn">⋯</button>
+            <div class="menu" id="files-menu">
+              <button>扫描新增</button>
+              <button>重建索引</button>
+              <div class="sep"></div>
+              <button>内容审核（独立页）</button>
+            </div>
+          </div>
+        </div>
+
+        <div id="more-filters" hidden style="margin-top:12px">
+          <div class="row">
+            <input class="input" style="width:150px" placeholder="扩展名，如 jpg">
+            <select style="width:150px"><option>重复状态：全部</option><option>只看重复</option><option>只看唯一</option></select>
+            <select style="width:170px"><option>NSFW：全部</option><option>只看疑似</option><option>只看待复核</option></select>
+            <span class="hint">这些条件组合才会触发重查</span>
+          </div>
+        </div>
+
+        <div class="stat-strip" style="margin-top:14px">
+          <span>共 <button class="stat-num">13,204</button> 件</span><span class="kv-sep">·</span>
+          <span>图片 <button class="stat-num">9,870</button></span><span class="kv-sep">/</span>
+          <span>视频 <button class="stat-num">210</button></span><span class="kv-sep">/</span>
+          <span>文本 <button class="stat-num">3,124</button></span><span class="kv-sep">·</span>
+          <span>重复 <button class="stat-num">46</button> 组</span><span class="kv-sep">·</span>
+          <span>疑似 NSFW <button class="stat-num">81</button></span>
+          <span class="hint" style="margin-left:4px">点数字即筛选</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <div class="tabs" style="border-bottom:none">
+            <button class="tab on" data-ftab="list">清单 <span class="badge muted">13,204</span></button>
+            <button class="tab" data-ftab="dups">重复组 <span class="badge muted">46</span></button>
+          </div>
+          <span class="spacer"></span>
+          <div class="seg" id="view-toggle">
+            <button class="on" data-vm="list">☰ 列表</button>
+            <button data-vm="grid">▦ 网格</button>
+          </div>
+        </div>
+
+        <div id="ftab-list">
+          <div class="row-list">
+            <div class="list-item">
+              <div class="thumb-sq c1"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="9" r="2" stroke="currentColor" stroke-width="2"/><path d="M21 15L16 10L5 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
+              <div><div class="name">文章/翰墨修心/2026-11/壁纸-01.jpg</div>
+                <div class="meta">articles-full · 1.2 MB · 3024×4032 · 已入库</div></div>
+              <div class="right"><button class="btn btn-sm">查看</button><button class="btn btn-sm">VR</button></div>
+            </div>
+            <div class="list-item">
+              <div class="thumb-sq c2"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="9" r="2" stroke="currentColor" stroke-width="2"/><path d="M21 15L16 10L5 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
+              <div><div class="name">文章/某某设计/2026-11/排版练习-03.jpg</div>
+                <div class="meta">articles-full · 860 KB · 重复 1 处</div></div>
+              <div class="right"><button class="btn btn-sm">查看</button><button class="btn btn-sm">VR</button></div>
+            </div>
+            <div class="list-item">
+              <div class="thumb-sq c3"><svg viewBox="0 0 24 24" fill="none"><rect x="2" y="4" width="20" height="16" rx="3" stroke="currentColor" stroke-width="2"/><path d="M10 9L15 12L10 15V9Z" stroke="currentColor" stroke-width="2"/></svg></div>
+              <div><div class="name">视频/抖音/汽车贴膜实拍.mp4</div>
+                <div class="meta">media-library · 46 秒 · 未重复</div></div>
+              <div class="right"><button class="btn btn-sm">播放</button></div>
+            </div>
+            <div class="list-item">
+              <div class="thumb-sq c4"><svg viewBox="0 0 24 24" fill="none"><path d="M14 2H6C4.9 2 4 2.9 4 4V20C4 21.1 4.9 22 6 22H18C19.1 22 20 21.1 20 20V8L14 2Z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><polyline points="14,2 14,8 20,8" stroke="currentColor" stroke-width="2"/></svg></div>
+              <div><div class="name">文章/翰墨修心/2026-11/index.md</div>
+                <div class="meta">articles-full · 4 KB · 文本</div></div>
+              <div class="right"><button class="btn btn-sm">打开</button></div>
+            </div>
+          </div>
+          <div class="pager">
+            <button class="btn btn-sm">上一页</button>
+            <input class="input page-input" value="1">
+            <span class="hint">/ 240</span>
+            <button class="btn btn-sm">下一页</button>
+          </div>
+        </div>
+
+        <div id="ftab-dups" hidden>
+          <div class="row-list">
+            <div class="list-item">
+              <div class="thumb-sq c1"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="9" r="2" stroke="currentColor" stroke-width="2"/><path d="M21 15L16 10L5 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
+              <div style="flex:1"><div class="name">组 #12 · 3 个副本</div>
+                <div class="meta">摘要 a91f… · 3 张相同图片，分布在 articles-full 与 media-library</div></div>
+              <button class="btn btn-sm">展开</button>
+            </div>
+            <div class="list-item">
+              <div class="thumb-sq c2"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="9" r="2" stroke="currentColor" stroke-width="2"/><path d="M21 15L16 10L5 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
+              <div style="flex:1"><div class="name">组 #31 · 2 个副本</div>
+                <div class="meta">摘要 7c2e… · 2 张相同图片</div></div>
+              <button class="btn btn-sm">展开</button>
+            </div>
+            <div class="empty">这里与「清单」共用视图切换与分页，不再单独占一张卡。</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== 视图：内容审核（独立页 · 方案 A） ===== -->
+    <section class="view" id="view-review">
+      <div class="page-header">
+        <h2 class="page-title">内容审核（NSFW）</h2>
+        <p class="page-desc">统一检测工作台：媒体库、任意目录、单个文件三种范围共用一个结果区。一次性检测结果只落临时目录，需要留档的文件在结果里单独「入库」。</p>
+      </div>
+      <div class="notes">
+        <span class="note">从「全局文件」整块迁出，逻辑不变</span>
+        <span class="note">范围分段 + 参数 + 进度 + 结果 + 待复核</span>
+        <span class="note">备选方案 B：文件页全屏抽屉，DOM 复用</span>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3 class="card-title">检测范围</h3><span class="spacer"></span>
+          <div class="seg" id="review-seg">
+            <button class="on" data-rseg="library">媒体库</button>
+            <button data-rseg="path">任意目录</button>
+            <button data-rseg="upload">单个文件</button>
+          </div>
+        </div>
+
+        <div data-rpanel="library">
+          <div class="row">
+            <button class="btn btn-sm">检测未判定</button>
+            <button class="btn btn-sm">全部重检</button>
+            <span class="hint">只扫已入库索引，结论写入索引并计入覆盖率</span>
+          </div>
+        </div>
+
+        <div data-rpanel="path" hidden>
+          <div class="row">
+            <div class="field" style="flex:1;min-width:220px"><span class="label">目录绝对路径</span>
+              <input class="input" placeholder="/Users/you/Pictures"></div>
+            <div class="field" style="width:150px"><span class="label">检测类型</span>
+              <select><option>图片 + 视频</option><option>仅图片</option><option>仅视频</option></select></div>
+            <div class="field" style="width:130px"><span class="label">视频抽帧间隔</span>
+              <select><option>2 秒</option><option selected>5 秒</option><option>10 秒</option></select></div>
+          </div>
+          <div class="row" style="margin-top:12px">
+            <button class="btn btn-sm">预检</button>
+            <button class="btn btn-primary btn-sm">开始检测</button>
+            <span class="hint">先预检确认路径可读、能扫到多少文件</span>
+          </div>
+        </div>
+
+        <div data-rpanel="upload" hidden>
+          <div class="dropzone">
+            <div style="font-weight:600">把图片或视频拖到这里</div>
+            <div class="hint" style="margin-top:6px">也可以点击选择文件。只检测这一个文件，原件保留到你决定是否入库为止。</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3 class="card-title">本次检测结果</h3>
+          <span class="badge warn">命中 3</span>
+          <span class="spacer"></span>
+          <label class="hint" style="display:flex;align-items:center;gap:6px">
+            <input type="checkbox" checked> 只看疑似
+          </label>
+          <button class="btn btn-sm">加载更多</button>
+        </div>
+        <div class="row-list">
+          <div class="list-item">
+            <div class="thumb-sq c3"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="9" r="2" stroke="currentColor" stroke-width="2"/><path d="M21 15L16 10L5 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
+            <div style="flex:1"><div class="name">IMG_0412.jpg</div>
+              <div class="meta">疑似 0.87 · 命中帧 1/1</div></div>
+            <button class="btn btn-sm">查看</button>
+            <button class="btn btn-sm">入库</button>
+          </div>
+          <div class="list-item">
+            <div class="thumb-sq c1"><svg viewBox="0 0 24 24" fill="none"><rect x="2" y="4" width="20" height="16" rx="3" stroke="currentColor" stroke-width="2"/><path d="M10 9L15 12L10 15V9Z" stroke="currentColor" stroke-width="2"/></svg></div>
+            <div style="flex:1"><div class="name">VID_0021.mp4</div>
+              <div class="meta">疑似 0.71 · 命中 00:14 / 00:36 · 抽帧 12</div></div>
+            <button class="btn btn-sm">查看</button>
+            <button class="btn btn-sm">入库</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3 class="card-title">待复核（媒体库）</h3><span class="badge warn">17</span></div>
+        <div class="row-list">
+          <div class="list-item">
+            <div class="thumb-sq c2"><svg viewBox="0 0 24 24" fill="none"><rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" stroke-width="2"/><circle cx="9" cy="9" r="2" stroke="currentColor" stroke-width="2"/><path d="M21 15L16 10L5 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></div>
+            <div style="flex:1"><div class="name">文章/某某设计/2026-11/图-07.jpg</div>
+              <div class="meta">疑似 0.52 · 未复核</div></div>
+            <button class="btn btn-sm">确认敏感</button>
+            <button class="btn btn-sm">标为误报</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+</div>
+
+<!-- ===== 筛选抽屉（素材检索共用模板） ===== -->
+<div class="drawer-mask" id="drawer-mask"></div>
+<div class="drawer" id="drawer">
+  <h3>筛选</h3>
+  <div class="sub">只影响当前检索结果；点「应用」后重新检索。</div>
+
+  <div class="switch-row">
+    <div><div style="font-size:12.5px">只看含疑似 NSFW</div>
+      <div class="hint" style="margin-top:2px">纯前端筛选当前页，不改变排序</div></div>
+    <div class="switch on" id="sw-nsfw"><i></i></div>
+  </div>
+
+  <div class="field" style="margin-top:14px">
+    <span class="label">按标签浏览</span>
+    <select><option>全部标签</option><option>壁纸（412）</option><option>手写（96）</option><option>汽车（33）</option></select>
+  </div>
+
+  <div class="field">
+    <span class="label">媒体来源（仅扫描用）</span>
+    <select><option>articles-full（在线）</option><option>media-library（在线）</option></select>
+    <span class="hint">这个选择只用于「扫描」动作，不参与检索</span>
+  </div>
+
+  <div class="drawer-foot">
+    <button class="btn btn-primary" id="apply-filter">应用</button>
+    <button class="btn" id="reset-filter">重置全部</button>
+  </div>
+</div>
+
+<script>
+(function(){
+  'use strict';
+
+  /* 视图切换 */
+  var titles = { search:'素材检索', archive:'按号归档', files:'全局文件', review:'内容审核' };
+  document.querySelectorAll('.nav-item[data-view]').forEach(function(item){
+    item.addEventListener('click', function(){
+      document.querySelectorAll('.nav-item').forEach(function(n){ n.classList.remove('active'); });
+      item.classList.add('active');
+      document.querySelectorAll('.view').forEach(function(v){ v.classList.remove('active'); });
+      document.getElementById('view-' + item.dataset.view).classList.add('active');
+    });
+  });
+
+  /* 平台 chip */
+  document.querySelectorAll('#platform-chips .chip').forEach(function(chip){
+    chip.addEventListener('click', function(){
+      document.querySelectorAll('#platform-chips .chip').forEach(function(c){ c.classList.remove('on'); });
+      chip.classList.add('on');
+    });
+  });
+
+  /* 筛选抽屉 */
+  var mask = document.getElementById('drawer-mask');
+  var drawer = document.getElementById('drawer');
+  function openDrawer(){ mask.classList.add('show'); drawer.classList.add('show'); }
+  function closeDrawer(){ mask.classList.remove('show'); drawer.classList.remove('show'); }
+  document.getElementById('open-filter').addEventListener('click', openDrawer);
+  mask.addEventListener('click', closeDrawer);
+  document.getElementById('sw-nsfw').addEventListener('click', function(){ this.classList.toggle('on'); });
+  document.getElementById('apply-filter').addEventListener('click', closeDrawer);
+  document.getElementById('reset-filter').addEventListener('click', function(){
+    document.getElementById('q').value = '';
+    document.querySelectorAll('#platform-chips .chip').forEach(function(c,i){ c.classList.toggle('on', i === 0); });
+    var sw = document.getElementById('sw-nsfw'); sw.classList.remove('on');
+    drawer.querySelectorAll('select').forEach(function(s){ s.selectedIndex = 0; });
+    document.getElementById('filter-count').textContent = '0';
+    document.getElementById('search-stats').textContent = '共 1204 条 · 无筛选条件（最近入库）';
+    exitImageMode();
+    closeDrawer();
+  });
+
+  /* 图片模式 */
+  var strip = document.getElementById('img-strip');
+  var textRes = document.getElementById('text-results');
+  var imgRes = document.getElementById('image-results');
+  var hitsBtn = document.getElementById('hits-toggle');
+  var hits = document.getElementById('video-hits');
+  function enterImageMode(){
+    strip.hidden = false;
+    textRes.hidden = true; imgRes.hidden = false;
+    hits.hidden = true; hitsBtn.hidden = true;
+    document.getElementById('search-stats').textContent = '图片模式 · 命中 4 张相似图片';
+  }
+  function exitImageMode(){
+    strip.hidden = true;
+    textRes.hidden = false; imgRes.hidden = true;
+    hitsBtn.hidden = false;
+    document.getElementById('search-stats').textContent = '共 1204 条 · 已启用筛选 2 项';
+  }
+  document.getElementById('img-mode-btn').addEventListener('click', enterImageMode);
+  document.getElementById('img-exit').addEventListener('click', exitImageMode);
+
+  /* 画面命中展开 */
+  hitsBtn.addEventListener('click', function(){
+    hits.hidden = !hits.hidden;
+    hitsBtn.textContent = hits.hidden ? '画面命中 12 条 ▾' : '画面命中 12 条 ▴';
+  });
+
+  /* 按号归档：分段 */
+  var archMain = document.getElementById('arch-main');
+  var archTarget = document.getElementById('arch-target');
+  var segLabels = { account:'归档最近 10 篇', links:'用粘贴的链接建任务', existing:'登记该平台已下载作品' };
+  document.querySelectorAll('#arch-seg button').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      document.querySelectorAll('#arch-seg button').forEach(function(b){ b.classList.remove('on'); });
+      btn.classList.add('on');
+      var seg = btn.dataset.seg;
+      document.querySelectorAll('[data-panel]').forEach(function(p){ p.hidden = p.dataset.panel !== seg; });
+      archTarget.hidden = seg === 'account';
+      archMain.textContent = segLabels[seg];
+    });
+  });
+
+  /* NAS 展开 */
+  var nasToggle = document.getElementById('nas-toggle');
+  nasToggle.addEventListener('click', function(){
+    var panel = document.getElementById('nas-panel');
+    panel.hidden = !panel.hidden;
+    nasToggle.textContent = panel.hidden ? 'NAS 自动归档 5/6 ▾' : 'NAS 自动归档 5/6 ▴';
+  });
+
+  /* 全局文件：更多筛选 / 菜单 / tab */
+  document.getElementById('more-filter').addEventListener('click', function(){
+    var box = document.getElementById('more-filters');
+    box.hidden = !box.hidden;
+  });
+  var filesMenuBtn = document.getElementById('files-menu-btn');
+  var filesMenu = document.getElementById('files-menu');
+  filesMenuBtn.addEventListener('click', function(e){ e.stopPropagation(); filesMenu.classList.toggle('show'); });
+  document.addEventListener('click', function(e){
+    if (!filesMenu.contains(e.target) && e.target !== filesMenuBtn) filesMenu.classList.remove('show');
+  });
+  document.getElementById('files-menu').querySelectorAll('button').forEach(function(b){
+    b.addEventListener('click', function(){ filesMenu.classList.remove('show'); });
+  });
+  document.querySelectorAll('[data-ftab]').forEach(function(tab){
+    tab.addEventListener('click', function(){
+      document.querySelectorAll('[data-ftab]').forEach(function(t){ t.classList.remove('on'); });
+      tab.classList.add('on');
+      var which = tab.dataset.ftab;
+      document.getElementById('ftab-list').hidden = which !== 'list';
+      document.getElementById('ftab-dups').hidden = which !== 'dups';
+    });
+  });
+  document.querySelectorAll('#view-toggle button').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      document.querySelectorAll('#view-toggle button').forEach(function(b){ b.classList.remove('on'); });
+      btn.classList.add('on');
+    });
+  });
+  document.querySelectorAll('.stat-num').forEach(function(num){
+    num.addEventListener('click', function(){
+      document.getElementById('more-filters').hidden = false;
+      num.style.background = 'rgba(102,126,234,.28)';
+      num.style.color = '#fff';
+    });
+  });
+
+  /* 内容审核：范围分段 */
+  document.querySelectorAll('#review-seg button').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      document.querySelectorAll('#review-seg button').forEach(function(b){ b.classList.remove('on'); });
+      btn.classList.add('on');
+      var seg = btn.dataset.rseg;
+      document.querySelectorAll('[data-rpanel]').forEach(function(p){ p.hidden = p.dataset.rpanel !== seg; });
+    });
+  });
+})();
+</script>
+</body>
+</html>

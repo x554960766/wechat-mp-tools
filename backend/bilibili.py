@@ -17,6 +17,7 @@ from backend.config import (
     get_proxies_dict, report_proxy_status, load_json, save_json
 )
 from backend.bilibili_sign import sign_wbi
+from backend import nas_archive
 
 bilibili_bp = Blueprint("bilibili", __name__, url_prefix="/api/bilibili")
 
@@ -887,6 +888,10 @@ def _run_batch_download_thread(items: list, target_dir: Path, quality: str = Non
                                       quality=quality)
             downloaded += 1
             _set_task_state(downloaded_count=downloaded)
+            # 登记 NAS 自动归档（多 P 用 bvid_pN 区分作品；失败只记日志）
+            if res and res.get("path"):
+                page_suffix = "" if (page_num or 1) == 1 else f"_p{page_num}"
+                nas_archive.submit_path("bilibili", f"{bvid}{page_suffix}", res["path"])
             # Sleep to prevent rate limit
             time.sleep(random.uniform(1.5, 3.0))
         except Exception as e:

@@ -85,7 +85,6 @@ hiddenimports = [
     'backend.rss_feed',
     'backend.avatar_cache',
     'backend.content_filter',
-    'backend.image_filter',
     'backend.proxy',
     'backend.douyin',
     'backend.douyin_login',

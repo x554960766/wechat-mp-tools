@@ -25,6 +25,7 @@ from backend.config import (
     DEFAULT_HEADERS, get_proxies_dict, get_settings, report_proxy_status
 )
 from backend.wechat_url import normalize_wechat_short_url, short_id_from_review_id
+from backend import nas_archive
 from backend.avatar_cache import extract_account_avatar, extract_avatar_account_id
 from backend.request_profile import (
     SIGNATURE_WINDOW,
@@ -35,11 +36,15 @@ from backend.request_profile import (
 
 logger = logging.getLogger(__name__)
 
-# 正文配图下载参数：并发 4 路、单张 15s 超时、最多重试 2 次并附带微信 Referer
+# 正文配图下载口径（与 docs/specs/wmp-hosted-media-service.md §6.1 对齐）
 IMAGE_CONCURRENCY = 4
 IMAGE_TIMEOUT = 15.0
 IMAGE_RETRIES = 2
 IMAGE_REFERER = "https://mp.weixin.qq.com/"
+# 下载落盘筛选：复用 media_service/app/filter.py 的 inspect/judge 口径，
+# 宿主与归档侧共用同一套阈值（WX_FILTER_* 环境变量可调）。
+
+
 DOWNLOAD_IMAGE_FILTER = "WX_DOWNLOAD_IMAGE_FILTER"
 
 
@@ -50,16 +55,18 @@ def _download_filter_enabled() -> bool:
 
 
 def _judge_saved_image(path: Path, seen: list) -> str:
-    """判定一张已落盘的正文配图是否应保留。
+    """用 ai-media 的 inspect/judge 口径判定一张已落盘的正文图。
 
     返回空串表示保留，否则返回原因码（broken/tiny/strip/flat/transparent/dup）。
-    ``seen`` 是同篇已保留图的指标，用于按内容 SHA-256 去重。
-    过滤链路出错（如缺少 Pillow）时按保留处理，避免影响下载主链路。
+    `seen` 是同篇已保留图的指标，用于按内容 SHA-256 去重。
+
+    判定实现在 media_service/app/filter.py，宿主与归档侧共用同一函数与阈值，
+    不在这里复制规则。过滤链路出错时按保留处理——不能让可选能力打断下载主链路。
     """
     if not _download_filter_enabled():
         return ""
     try:
-        from backend import image_filter
+        from media_service.app import filter as image_filter
 
         info = image_filter.inspect(path)
         reason = image_filter.judge(info, seen)
@@ -1398,7 +1405,7 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "", _redi
         video_covers = {normalize_url(v["cover"]) for v in video_iframes if v.get("cover")}
         img_urls = {u for u in img_urls if u not in video_covers}
 
-        # 排序后再编号：集合迭代顺序不稳定，落盘文件名需可复现。
+        # 排序后再编号：集合的迭代顺序不保证稳定，落盘文件名要可复现。
         ordered = sorted(u for u in img_urls if u not in url_map)
         image_stats["expected"] += len(ordered)
 
@@ -1413,7 +1420,9 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "", _redi
             )
             return img_url, real
 
-        # 并发 4 路下载并逐张筛除坏图/小图标/长条/纯色/透明/同篇重复图
+        # 并发 4 路下载：批量归档时逐张串行会把单篇耗时拉成几十秒。
+        # 单张失败只计数，不影响整篇落盘；落盘后过一遍 inspect/judge 口径，
+        # 坏图/图标/长条/纯色/透明/同篇重复直接剔除，不写进 HTML 与 Markdown。
         if ordered:
             with ThreadPoolExecutor(
                 max_workers=IMAGE_CONCURRENCY, thread_name_prefix="img-dl"
@@ -1624,9 +1633,13 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "", _redi
             pass
 
     # 保存元数据
+    from backend import media_sync
+
+    article_key = media_sync.normalize_article_url(url)
     meta = {
         "title": safe_title,
         "url": url,
+        "article_key": article_key,
         "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "publish_time": publish_time,
         "cover_url": cover_url,
@@ -1651,12 +1664,25 @@ def download_single_article(url: str, out_dir: Path, title_hint: str = "", _redi
         encoding="utf-8"
     )
 
+    # 通知媒体服务做一次防抖后的增量扫描；媒体服务没装/没起来时静默跳过。
+    try:
+        media_sync.notify_scan(f"{safe_title}")
+    except Exception:  # noqa: BLE001 - 索引维护不能影响归档结果
+        logger.debug("媒体扫描通知失败", exc_info=True)
+
+    # 登记 NAS 自动归档（后台队列，失败只记日志；作品键 wechat|<短ID>）
+    try:
+        nas_archive.submit_path("wechat", nas_archive.short_id(article_key), art_dir)
+    except Exception:  # noqa: BLE001 - 归档登记不能影响下载结果
+        logger.debug("NAS 归档登记失败", exc_info=True)
+
     return {
         "success": True,
         "title": safe_title,
         "source": source,
         "author": author or source,
         "path": str(art_dir),
+        "article_key": article_key,
         "images": image_stats,
         "resources": len(url_map),
         "cover_url": cover_url,

@@ -8,12 +8,17 @@ const API = {
     async request(url, options = {}) {
         const { method = 'GET', body = null, showError = true } = options;
 
-        const fetchOptions = {
-            method,
-            headers: { 'Content-Type': 'application/json' },
-        };
+        // FormData 必须让浏览器自动补 multipart 的 Content-Type（含 boundary）：
+        // 手工写 application/json，服务端收到的既不是合法 JSON 也不是合法 multipart，
+        // 以图搜图这类文件上传会直接 422/400。
+        const isFormData = typeof FormData !== 'undefined' && body instanceof FormData;
+        const fetchOptions = isFormData
+            ? { method }
+            : { method, headers: { 'Content-Type': 'application/json' } };
 
-        if (body) {
+        if (isFormData) {
+            fetchOptions.body = body;
+        } else if (body) {
             fetchOptions.body = JSON.stringify(body);
         }
 
@@ -30,7 +35,13 @@ const API = {
             }
 
             if (!resp.ok || !isJson) {
-                const errMsg = data.error || data.message || `HTTP ${resp.status}`;
+                // 媒体服务的错误是 {"error":{"code","message"}}，直接拿 data.error 会把对象塞进
+                // new Error()，Toast 里就变成 [object Object]。这里先摊平成字符串。
+                const nested = data && data.error;
+                const errMsg = (typeof nested === 'string' && nested)
+                    || (nested && typeof nested === 'object' && (nested.message || nested.code))
+                    || data.message
+                    || `HTTP ${resp.status}`;
                 if (data && (data.need_verify || data.waterwall)) {
                     if (window.WaterWall && typeof WaterWall.handleDetection === 'function') {
                         WaterWall.handleDetection(data.waterwall || data);
@@ -39,7 +50,7 @@ const API = {
                 if (showError) Toast.error(errMsg);
                 // 保留结构化错误码，便于调用方区分「未登录」「风控」等可引导的场景
                 const error = new Error(errMsg);
-                error.code = data.code || '';
+                error.code = (nested && typeof nested === 'object' && nested.code) || data.code || '';
                 error.status = resp.status;
                 error.data = data;
                 throw error;
@@ -157,6 +168,23 @@ const API = {
         openFolder(account = '') { return API.post('/api/articles/open-folder', { account }); },
         openFile(path, type = null) { return API.post('/api/articles/open-file', { path, type }); },
         openParent(path) { return API.post('/api/articles/open-parent', { path }); },
+    },
+
+    // ── 按号归档 API（宿主侧跨平台适配层）─────────────
+    archive: {
+        platforms() { return API.get('/api/archive/platforms', { showError: false }); },
+        accounts(platform) {
+            return API.get(`/api/archive/accounts?platform=${encodeURIComponent(platform)}`);
+        },
+        start(payload) { return API.post('/api/archive/start', payload); },
+        status(platform, taskId) {
+            const qs = new URLSearchParams({ platform, task_id: taskId });
+            return API.get(`/api/archive/status?${qs.toString()}`, { showError: false });
+        },
+        tasks(platform) {
+            const qs = platform ? `?platform=${encodeURIComponent(platform)}` : '';
+            return API.get(`/api/archive/tasks${qs}`, { showError: false });
+        },
     },
 
     // ── Proxy API ────────────────────────────────────
@@ -320,6 +348,173 @@ const API = {
         openFolder(account = '')    { return API.post('/api/xhs/open-folder', { account }); },
         openFile(path)              { return API.post('/api/xhs/open-file', { path }); },
         openParent(path)            { return API.post('/api/xhs/open-parent', { path }); },
+    },
+
+    // ── Media Service API（经宿主 /media 反代到 ai-media）──
+    // 所有路径都带 /media 前缀：宿主 Flask 只转发该前缀，媒体服务自身不认识它。
+    media: {
+        health() { return API.get('/media/api/health', { showError: false }); },
+        roots() { return API.get('/media/api/media/roots', { showError: false }); },
+        stats() { return API.get('/media/api/search/stats', { showError: false }); },
+        searchText(payload, opts) { return API.post('/media/api/search/text', payload, opts); },
+        /**
+         * 以图搜图。body 必须是 FormData（file + roots[] + k/after/before/review/videos），
+         * 后端走 multipart，见 API.request 对 FormData 的分支处理。
+         */
+        searchImage(formData, opts) { return API.post('/media/api/search/image', formData, opts); },
+        // 两级 NSFW：flagged 列出仍判疑似敏感的图片，review 写人工复核结论（second 级）
+        nsfwFlagged(params = {}, opts) {
+            const query = new URLSearchParams();
+            Object.entries(params).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') query.set(key, value);
+            });
+            const qs = query.toString();
+            return API.get(`/media/api/nsfw/flagged${qs ? '?' + qs : ''}`, opts);
+        },
+        nsfwReview(payload) { return API.post('/media/api/nsfw/review', payload); },
+        // 全局检测：status 给覆盖率与模型可用性；scan 入队，按 job 轮询
+        nsfwStatus(opts) { return API.get('/media/api/nsfw/status', opts); },
+        nsfwScan(payload) { return API.post('/media/api/nsfw/scan', payload); },
+        nsfwScanStatus(jobId) { return API.get(`/media/api/nsfw/scans/${jobId}`, { showError: false }); },
+        cancelNsfwScan(jobId) { return API.post(`/media/api/nsfw/scans/${jobId}/cancel`); },
+        // 配置面：阈值/开关/鉴黄方案。改阈值可 SQL 重算历史结论，换方案必须重扫
+        nsfwSettings(opts) { return API.get('/media/api/settings/nsfw', opts); },
+        nsfwSettingsSave(payload) { return API.put('/media/api/settings/nsfw', payload); },
+        nsfwRecompute() { return API.post('/media/api/nsfw/recompute'); },
+        // 一次性检测（probe）：任意目录或单个文件，结果不进索引、不计覆盖率。
+        // 与上面 nsfw* 的区别只在落库：probe 只产结果文件，需要「入库」才复制进媒体根。
+        nsfwProbeCheck(payload) { return API.post('/media/api/nsfw/probes/check', payload); },
+        nsfwProbeStart(payload) { return API.post('/media/api/nsfw/probes', payload); },
+        nsfwProbeStatus(jobId) { return API.get(`/media/api/nsfw/probes/${jobId}`, { showError: false }); },
+        nsfwProbeItems(jobId, params = {}, opts) {
+            const query = new URLSearchParams();
+            Object.entries(params).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') query.set(key, value);
+            });
+            const qs = query.toString();
+            return API.get(`/media/api/nsfw/probes/${jobId}/items${qs ? '?' + qs : ''}`, opts);
+        },
+        /** 命中帧缩略图：hit 为空取整段视频的代表帧（最高分帧）。 */
+        nsfwProbeThumb(jobId, index, hit) {
+            return `/media/api/nsfw/probes/${encodeURIComponent(jobId)}/thumb/${Number(index)}`
+                + (hit == null ? '' : `?hit=${Number(hit)}`);
+        },
+        nsfwProbeCancel(jobId) { return API.post(`/media/api/nsfw/probes/${jobId}/cancel`); },
+        nsfwProbeImport(jobId, payload) { return API.post(`/media/api/nsfw/probes/${jobId}/import`, payload); },
+        /**
+         * 已入库副本的查看地址：入库后到增量扫描建好索引之间，/api/media/file 一定 404，
+         * 所以按 probe 结果直读副本，不走索引。视频同址按 Range 播放。
+         */
+        nsfwProbeFile(jobId, index) {
+            return `/media/api/nsfw/probes/${encodeURIComponent(jobId)}/file/${Number(index)}`;
+        },
+        /** 撤销入库：删掉媒体根里的副本并清索引；检测结果保留，之后可重新入库。 */
+        nsfwProbeUnimport(jobId, index) {
+            return API.post(`/media/api/nsfw/probes/${jobId}/unimport`, { index });
+        },
+        // 标签：文件标签挂在内容摘要上（同内容副本共享），作品标签挂在 work_key 上
+        tags(opts) { return API.get('/media/api/tags', opts); },
+        imagesByTag(tag, params = {}, opts) {
+            const query = new URLSearchParams({ tag });
+            Object.entries(params).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') query.set(key, value);
+            });
+            return API.get(`/media/api/tags/images?${query.toString()}`, opts);
+        },
+        contentsByTag(tag, params = {}, opts) {
+            const query = new URLSearchParams({ tag });
+            Object.entries(params).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') query.set(key, value);
+            });
+            return API.get(`/media/api/tags/contents?${query.toString()}`, opts);
+        },
+        imageTags(root, relpath, opts) {
+            const query = new URLSearchParams({ root, relpath });
+            return API.get(`/media/api/tags/image?${query.toString()}`, opts);
+        },
+        tagImage(payload) { return API.post('/media/api/tags/image', payload); },
+        contentTags(contentId, opts) {
+            return API.get(`/media/api/tags/content?content_id=${encodeURIComponent(contentId)}`, opts);
+        },
+        tagContent(payload) { return API.post('/media/api/tags/content', payload); },
+        renameTag(oldTag, newTag, opts) { return API.post('/media/api/tags/rename', { old: oldTag, new: newTag }, opts); },
+        contentsSearch(params, opts) {
+            const query = new URLSearchParams();
+            Object.entries(params || {}).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') query.set(key, value);
+            });
+            return API.get(`/media/api/contents/search?${query.toString()}`, opts);
+        },
+        contentsFacets() { return API.get('/media/api/contents/facets', { showError: false }); },
+        contentsDetail(contentId) { return API.get(`/media/api/contents/${encodeURIComponent(contentId)}`); },
+        scan(root = 'articles-full', rebuild = false) {
+            return API.post('/media/api/media/scan', { root, rebuild });
+        },
+        scanStatus(jobId) { return API.get(`/media/api/media/scans/${jobId}`, { showError: false }); },
+        cancelScan(jobId) { return API.post(`/media/api/media/scans/${jobId}/cancel`); },
+        archiveJobs(limit = 10) { return API.get(`/media/api/archive/jobs?limit=${limit}`, { showError: false }); },
+        archiveStatus(jobId) { return API.get(`/media/api/archive/jobs/${jobId}`, { showError: false }); },
+        archiveFromMp(payload) { return API.post('/media/api/archive/from-mp', payload); },
+        // 归档任务（/api/archive/jobs）：建任务、上传 txt/csv/zip、验证窗口、导出与恢复
+        archiveCreate(payload) { return API.post('/media/api/archive/jobs', payload); },
+        /**
+         * 上传 txt/csv/zip 建任务。body 必须是 FormData（file + target_root + target_dir），
+         * 后端收 multipart，见 API.request 的 FormData 分支。
+         */
+        archiveUpload(formData) { return API.post('/media/api/archive/jobs/upload', formData); },
+        archiveVerify(jobId, articleIndex) {
+            const qs = articleIndex === undefined || articleIndex === null
+                ? ''
+                : `?article_index=${encodeURIComponent(articleIndex)}`;
+            return API.post(`/media/api/archive/jobs/${encodeURIComponent(jobId)}/verify${qs}`);
+        },
+        archiveRetry(jobId) { return API.post(`/media/api/archive/jobs/${encodeURIComponent(jobId)}/retry`); },
+        archiveExportStatus(exportId) {
+            return API.get(`/media/api/archive/exports/${encodeURIComponent(exportId)}`, { showError: false });
+        },
+        // 导出 ZIP：就绪直接回文件，未就绪回 202 + export_id，所以调用方自己 fetch 判 content-type
+        archiveDownloadUrl(jobId) { return `/media/api/archive/jobs/${encodeURIComponent(jobId)}/download`; },
+        // NAS 自动归档是宿主侧队列（backend/nas_archive.py），不在 /media 反代之下
+        nasStatus() { return API.get('/api/media/nas-archive/status', { showError: false }); },
+        nasJobs(limit = 20) { return API.get(`/api/media/nas-archive/jobs?limit=${limit}`, { showError: false }); },
+        nasRetry(workKey) { return API.post('/api/media/nas-archive/retry', { work_key: workKey }); },
+        // 手动批量登记某平台历史清单里已下载的作品，只入队不提交
+        nasArchivePlatform(platform, account) {
+            return API.post('/api/media/nas-archive/platform', {
+                platform,
+                account: account || '',
+            });
+        },
+        // 索引返回的 thumb/file 是媒体服务内部路径，经宿主必须补 /media 前缀
+        thumb(item) { return '/media' + item.thumb; },
+        original(item) { return '/media' + item.file; },
+        display(item) { return '/media' + item.file.split('&display=1')[0]; },
+    },
+
+    // ── 全局文件检索与查重 API（媒体服务 /api/files/*）──────────────
+    // 只读：只取已入库索引（images / standalone_texts / videos），不做磁盘扫描。
+    // 公共查询参数一律用 URLSearchParams 组装，空值跳过，避免后端收到空串被当成过滤条件。
+    files: {
+        list(params = {}, opts) {
+            const qs = new URLSearchParams();
+            Object.entries(params || {}).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') qs.set(key, value);
+            });
+            return API.get(`/media/api/files/list?${qs.toString()}`, opts);
+        },
+        duplicates(params = {}, opts) {
+            const qs = new URLSearchParams();
+            Object.entries(params || {}).forEach(([key, value]) => {
+                if (value !== undefined && value !== null && value !== '') qs.set(key, value);
+            });
+            return API.get(`/media/api/files/duplicates?${qs.toString()}`, opts);
+        },
+        group(sha, opts) {
+            return API.get(`/media/api/files/group/${encodeURIComponent(sha)}`, opts);
+        },
+        stats(opts) { return API.get('/media/api/files/stats', { showError: false, ...opts }); },
+        // 删除单个已入库文件：先删物理文件、成功后清索引记录。破坏性写操作，前端需逐条二次确认。
+        deleteFile(payload, opts) { return API.post('/media/api/files/delete', payload, opts); },
     },
 
     // ── Version Update API ──────────────────────────────
