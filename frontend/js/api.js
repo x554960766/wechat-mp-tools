@@ -120,8 +120,10 @@ const API = {
 
     // ── Articles API ─────────────────────────────────
     articles: {
-        list(fakeid, begin = 0, count = 10, keyword = '') {
+        list(fakeid, begin = 0, count = 100, keyword = '', refresh = false, accountName = '') {
             const params = new URLSearchParams({ begin, count, keyword });
+            if (refresh) params.set('refresh', '1');
+            if (accountName) params.set('name', accountName);
             return API.get(`/api/articles/list/${fakeid}?${params}`);
         },
         download(articles, accountName) {

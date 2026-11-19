@@ -8,6 +8,7 @@ import json
 import time
 import sqlite3
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any
 
@@ -19,7 +20,6 @@ from backend.config import (
 logger = logging.getLogger("backend.db")
 
 SQLITE_DB_PATH = DATA_DIR / "wechat_tools.db"
-
 
 def get_db_config() -> Dict[str, Any]:
     """获取当前生效的数据库配置（环境变量优先，其次 app_settings.json）"""
@@ -125,6 +125,24 @@ def init_db():
             cur.execute("""
                 CREATE INDEX IF NOT EXISTS idx_dh_success ON download_history(success);
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS article_list_cache (
+                    cache_key TEXT PRIMARY KEY,
+                    fakeid TEXT NOT NULL,
+                    keyword TEXT NOT NULL DEFAULT '',
+                    account_name TEXT DEFAULT '',
+                    articles_json TEXT NOT NULL,
+                    total INTEGER DEFAULT 0,
+                    buffer_begin INTEGER DEFAULT 0,
+                    buffer_can_continue INTEGER DEFAULT 1,
+                    source TEXT DEFAULT '',
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_alc_fakeid_keyword
+                ON article_list_cache(fakeid, keyword);
+            """)
         else:
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS accounts (
@@ -161,16 +179,36 @@ def init_db():
                     INDEX idx_dh_success (success)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS article_list_cache (
+                    cache_key VARCHAR(300) PRIMARY KEY,
+                    fakeid VARCHAR(128) NOT NULL,
+                    keyword VARCHAR(255) NOT NULL DEFAULT '',
+                    account_name VARCHAR(255) DEFAULT '',
+                    articles_json LONGTEXT NOT NULL,
+                    total BIGINT DEFAULT 0,
+                    buffer_begin INT DEFAULT 0,
+                    buffer_can_continue TINYINT DEFAULT 1,
+                    source VARCHAR(64) DEFAULT '',
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    INDEX idx_alc_fakeid_keyword (fakeid, keyword)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """)
 
         conn.commit()
         # 首次运行时自动从 json 同步存量数据
         _sync_from_json(conn, driver)
+        conn.close()
+        conn = None
+        # 将 data/article_cache/*.json 存量快照迁入新表（已存在则不覆盖）
+        migrate_article_cache_json()
         return True
     except Exception as e:
         logger.error(f"[DB] 初始化表结构异常: {e}")
         return False
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def _sync_from_json(conn, driver):
@@ -232,6 +270,153 @@ def _sync_from_json(conn, driver):
         conn.commit()
     except Exception as e:
         logger.debug(f"[DB] JSON 存量迁移至数据库跳过或异常: {e}")
+
+
+def get_article_list_cache(fakeid: str, keyword: str = "") -> Optional[Dict[str, Any]]:
+    """读取指定 fakeid+keyword 的文章列表缓存；任何异常均返回 None。"""
+    if not fakeid:
+        return None
+    try:
+        conn, driver = get_connection()
+        cur = conn.cursor()
+        placeholder = "%s" if driver == "mysql" else "?"
+        cur.execute(
+            f"""SELECT cache_key, fakeid, keyword, account_name, articles_json,
+                       total, buffer_begin, buffer_can_continue, source, updated_at
+                FROM article_list_cache
+                WHERE fakeid = {placeholder} AND keyword = {placeholder}
+                LIMIT 1""",
+            (fakeid, keyword or ""),
+        )
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return None
+        try:
+            articles = json.loads(row["articles_json"] or "[]")
+        except Exception:
+            articles = []
+        if not isinstance(articles, list):
+            articles = []
+        return {
+            "cache_key": row["cache_key"],
+            "fakeid": row["fakeid"],
+            "keyword": row["keyword"] or "",
+            "account_name": row["account_name"] or "",
+            "articles": articles,
+            "total": int(row["total"] or 0),
+            "buffer_begin": int(row["buffer_begin"] or 0),
+            "buffer_can_continue": bool(row["buffer_can_continue"]),
+            "source": row["source"] or "",
+            "updated_at": str(row["updated_at"] or ""),
+        }
+    except Exception as e:
+        logger.debug(f"[DB] 读取文章列表缓存失败: {e}")
+        return None
+
+
+def save_article_list_cache(
+    fakeid: str,
+    keyword: str,
+    *,
+    articles: List[Dict[str, Any]],
+    account_name: str = "",
+    total: int = 0,
+    buffer_begin: int = 0,
+    buffer_can_continue: bool = False,
+    source: str = "upstream",
+    updated_at: str = "",
+) -> bool:
+    """保存/整表替换文章列表缓存，保留原 created_at。"""
+    if not fakeid or not isinstance(articles, list):
+        return False
+    keyword = keyword or ""
+    cache_key = f"{fakeid}\x1f{keyword}"
+    updated_at = updated_at or datetime.now().astimezone().isoformat(timespec="seconds")
+    payload = json.dumps(articles, ensure_ascii=False, separators=(",", ":"))
+    try:
+        conn, driver = get_connection()
+        cur = conn.cursor()
+        placeholder = "%s" if driver == "mysql" else "?"
+        params = (
+            cache_key,
+            fakeid,
+            keyword,
+            account_name or "",
+            payload,
+            int(total or 0),
+            int(buffer_begin or 0),
+            1 if buffer_can_continue else 0,
+            source or "upstream",
+            updated_at,
+        )
+        verb = "INSERT OR REPLACE" if driver == "sqlite" else "REPLACE INTO"
+        cur.execute(
+            f"""{verb} INTO article_list_cache
+                (cache_key, fakeid, keyword, account_name, articles_json,
+                 total, buffer_begin, buffer_can_continue, source, updated_at)
+                VALUES ({placeholder}, {placeholder}, {placeholder}, {placeholder},
+                        {placeholder}, {placeholder}, {placeholder}, {placeholder},
+                        {placeholder}, {placeholder})""",
+            params,
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.debug(f"[DB] 写入文章列表缓存失败: {e}")
+        return False
+
+
+def migrate_article_cache_json() -> int:
+    """将 data/article_cache/*.json 迁入数据库；相同 key 已有记录时跳过。"""
+    cache_dir = DATA_DIR / "article_cache"
+    if not cache_dir.exists():
+        return 0
+    migrated = 0
+    for path in sorted(cache_dir.glob("*.json")):
+        try:
+            data = load_json(path, {})
+            if not isinstance(data, dict):
+                continue
+            fakeid = str(data.get("fakeid") or "").strip()
+            articles = data.get("articles")
+            if not fakeid or not isinstance(articles, list):
+                continue
+            deduped = []
+            seen = set()
+            for item in articles:
+                if not isinstance(item, dict):
+                    continue
+                key = item.get("id") or item.get("link") or item.get("title")
+                if key and key in seen:
+                    continue
+                if key:
+                    seen.add(key)
+                deduped.append(item)
+            articles = deduped
+            keyword = str(data.get("keyword") or "").strip()
+            if get_article_list_cache(fakeid, keyword) is not None:
+                continue
+            exported_at = str(data.get("exported_at") or "").strip()
+            if not exported_at:
+                exported_at = datetime.fromtimestamp(path.stat().st_mtime).astimezone().isoformat(timespec="seconds")
+            saved = save_article_list_cache(
+                fakeid,
+                keyword,
+                articles=articles,
+                account_name=str(data.get("account_name") or ""),
+                total=len(articles),
+                buffer_begin=int(data.get("bufferBegin") or 0),
+                buffer_can_continue=bool(data.get("bufferCanContinue")),
+                source="legacy_json",
+                updated_at=exported_at,
+            )
+            if saved:
+                migrated += 1
+        except Exception as e:
+            logger.debug(f"[DB] 迁移文章缓存 JSON {path.name} 失败: {e}")
+    return migrated
 
 
 def is_article_downloaded(account_name: str, link: str, title: str) -> Tuple[bool, Optional[str]]:
