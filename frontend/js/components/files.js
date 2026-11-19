@@ -286,7 +286,7 @@ const FilesPage = {
             <aside class="files-drawer" id="files-review-drawer" hidden aria-label="内容审核">
                 <div class="files-drawer-head">
                     <h3>内容审核（NSFW）</h3>
-                    <button class="btn btn-secondary btn-sm" id="files-review-close" type="button">关闭</button>
+                    <button class="modal-close" id="files-review-close" type="button" aria-label="关闭内容审核" title="关闭">✕</button>
                 </div>
                 <p class="form-hint">
                     检测范围一次只选一种：媒体库（已入库索引）、任意目录（临时检测）、单个文件。

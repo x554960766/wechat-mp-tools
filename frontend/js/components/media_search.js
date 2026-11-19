@@ -121,7 +121,7 @@ const MediaSearchPage = {
             <aside class="ms-drawer" id="ms-filter-drawer" hidden aria-label="筛选">
                 <div class="ms-drawer-head">
                     <h3>筛选</h3>
-                    <button class="btn btn-secondary btn-sm" id="ms-filter-close" type="button">关闭</button>
+                    <button class="modal-close" id="ms-filter-close" type="button" aria-label="关闭筛选" title="关闭">✕</button>
                 </div>
                 <p class="form-hint">更改后立即生效；「重置全部」会清空关键词、平台、账号、标签与查询图。</p>
 

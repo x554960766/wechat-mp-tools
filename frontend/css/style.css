@@ -3435,12 +3435,21 @@ body {
     display: none;
 }
 
-/* 筛选抽屉：右侧滑出，遮罩吃掉页面滚动 */
+/* 筛选抽屉：右侧滑出；底色、圆角、阴影、标题与 .modal-dialog 保持一致 */
+@keyframes drawerFade {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+@keyframes drawerSlideIn {
+    from { opacity: 0; transform: translateX(24px); }
+    to { opacity: 1; transform: translateX(0); }
+}
 .ms-drawer-mask {
     position: fixed;
     inset: 0;
-    z-index: 60;
-    background: rgba(6, 8, 16, 0.55);
+    z-index: 900;
+    background: rgba(0, 0, 0, 0.65);
+    animation: drawerFade 0.15s ease;
 }
 .ms-drawer-mask[hidden] {
     display: none;
@@ -3449,19 +3458,21 @@ body {
     position: fixed;
     top: 0;
     right: 0;
-    z-index: 61;
+    z-index: 901;
     display: flex;
     flex-direction: column;
     gap: var(--spacing-md);
-    width: 360px;
+    width: 380px;
     max-width: 92vw;
     height: 100vh;
-    padding: 20px;
+    padding: var(--spacing-xl) var(--spacing-lg);
     overflow: auto;
     /* 抽屉要挡住底下的页面：--bg-card 是半透明卡片色，直接用会透出页面文字 */
-    background: #14142b;
+    background: var(--bg-secondary);
     border-left: 1px solid var(--border-color);
-    box-shadow: -20px 0 40px rgba(0, 0, 0, 0.45);
+    border-radius: var(--radius-xl) 0 0 var(--radius-xl);
+    box-shadow: var(--shadow-lg);
+    animation: drawerSlideIn 0.2s ease;
 }
 .ms-drawer[hidden] {
     display: none;
@@ -3470,10 +3481,22 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    padding-bottom: var(--spacing-md);
+    border-bottom: 1px solid var(--border-color);
 }
 .ms-drawer-head h3 {
     margin: 0;
-    font-size: 1rem;
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+.ms-drawer-foot {
+    display: flex;
+    justify-content: flex-end;
+    gap: var(--spacing-sm);
+    margin-top: auto;
+    padding-top: var(--spacing-md);
+    border-top: 1px solid var(--border-color);
 }
 .ms-drawer-field {
     margin: 0;
@@ -3483,8 +3506,11 @@ body {
 }
 .ms-tag-row {
     display: flex;
-    align-items: center;
+    align-items: stretch;
     gap: 8px;
+}
+.ms-tag-row .btn-sm {
+    align-self: stretch;
 }
 .ms-tag-row .ms-tag-filter {
     flex: 1;
@@ -3688,8 +3714,9 @@ body {
 .files-drawer-mask {
     position: fixed;
     inset: 0;
-    z-index: 60;
-    background: rgba(6, 8, 16, 0.55);
+    z-index: 900;
+    background: rgba(0, 0, 0, 0.65);
+    animation: drawerFade 0.15s ease;
 }
 .files-drawer-mask[hidden] {
     display: none;
@@ -3698,17 +3725,19 @@ body {
     position: fixed;
     top: 0;
     right: 0;
-    z-index: 61;
+    z-index: 901;
     display: flex;
     flex-direction: column;
     gap: var(--spacing-md);
     width: min(720px, 94vw);
     height: 100vh;
-    padding: 20px;
+    padding: var(--spacing-xl) var(--spacing-lg);
     overflow: auto;
-    background: #14142b;
+    background: var(--bg-secondary);
     border-left: 1px solid var(--border-color);
-    box-shadow: -20px 0 40px rgba(0, 0, 0, 0.45);
+    border-radius: var(--radius-xl) 0 0 var(--radius-xl);
+    box-shadow: var(--shadow-lg);
+    animation: drawerSlideIn 0.2s ease;
 }
 .files-drawer[hidden] {
     display: none;
@@ -3717,10 +3746,14 @@ body {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    padding-bottom: var(--spacing-md);
+    border-bottom: 1px solid var(--border-color);
 }
 .files-drawer-head h3 {
     margin: 0;
-    font-size: 1rem;
+    font-size: 1.2rem;
+    font-weight: 700;
+    color: var(--text-primary);
 }
 .files-drawer-card {
     margin: 0;
