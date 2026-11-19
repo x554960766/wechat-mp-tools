@@ -30,6 +30,7 @@ from backend.accounts import biz_to_book_id
 from backend.wechat_url import normalize_wechat_short_url, short_id_from_review_id
 from backend.runtime import desktop_available, host_path_hint, release_memory
 from backend.request_profile import sleep_backoff, sleep_throttled
+from backend.db import get_article_list_cache, save_article_list_cache
 
 articles_bp = Blueprint("articles", __name__, url_prefix="/api/articles")
 logger = logging.getLogger("backend.articles")
@@ -575,6 +576,8 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
 
 _WEREAD_LIST_PAGE_SIZE = 20
 _MAX_LIST_COUNT = 500
+_ARTICLE_CACHE_REFRESH_BATCH = 20
+_ARTICLE_CACHE_REFRESH_MAX_SCAN = 500
 
 
 def _fetch_articles_accumulated(
@@ -636,47 +639,385 @@ def _fetch_articles_accumulated(
     return articles[:count], total, can_msg_continue, pages_fetched
 
 
+def _cache_article_key(item):
+    """文章去重键，与上游聚合逻辑保持一致。"""
+    if not isinstance(item, dict):
+        return None
+    return item.get("id") or item.get("link") or item.get("title")
+
+
+def _cache_slice(cache, begin, count):
+    """从完整缓存中切出调用方请求的页，并判断前端是否还能继续翻页。"""
+    all_articles = (cache or {}).get("articles") or []
+    buffer_begin = int((cache or {}).get("buffer_begin") or 0)
+    available_end = buffer_begin + len(all_articles)
+
+    if begin >= available_end or begin + count <= buffer_begin:
+        page = []
+    else:
+        local_start = max(0, begin - buffer_begin)
+        local_end = min(len(all_articles), begin + count - buffer_begin)
+        page = all_articles[local_start:local_end]
+
+    cache_can_continue = bool((cache or {}).get("buffer_can_continue"))
+    has_more_cached = available_end > begin + len(page)
+    can_msg_continue = 1 if (has_more_cached or cache_can_continue) else 0
+
+    total = int((cache or {}).get("total") or 0)
+    if total <= available_end:
+        total = available_end + (100 if cache_can_continue else 0)
+    return page, total, can_msg_continue
+
+
+def _cache_info(cache, *, hit, source, stale=False):
+    """生成响应中的缓存状态对象。"""
+    all_articles = (cache or {}).get("articles") or []
+    return {
+        "hit": bool(hit),
+        "source": source or (cache or {}).get("source") or "db_cache",
+        "updated_at": (cache or {}).get("updated_at") or "",
+        "cached_count": len(all_articles),
+        "can_continue": bool((cache or {}).get("buffer_can_continue")),
+        "stale": bool(stale),
+    }
+
+
+def _article_response(cache, page, begin, total, can_continue, *, hit, source, stale=False):
+    """统一构造文章列表响应，避免多处重复。"""
+    return {
+        "articles": page,
+        "total": total,
+        "can_msg_continue": can_continue,
+        "begin": begin,
+        "count": len(page),
+        "next_begin": begin + len(page),
+        "cache": _cache_info(cache, hit=hit, source=source, stale=stale),
+    }
+
+
+def _rebuild_article_cache(fakeid, keyword, account_name, from_article_id=""):
+    """整表重建：从 0 开始拉到上游明确没有更多为止，不设篇数上限。"""
+    all_articles = []
+    seen = set()
+    cursor = 0
+    can_continue = True
+    pages_fetched = 0
+    batches = 0
+
+    while can_continue:
+        batch, _, batch_can_continue, pages = _fetch_articles_accumulated(
+            fakeid,
+            cursor,
+            100,
+            keyword,
+            account_name=account_name,
+            from_article_id=from_article_id if batches == 0 else "",
+        )
+        batches += 1
+        pages_fetched += pages
+
+        if not batch:
+            can_continue = False
+            break
+
+        before = len(all_articles)
+        for item in batch:
+            key = _cache_article_key(item)
+            if key in seen:
+                continue
+            seen.add(key)
+            all_articles.append(item)
+
+        cursor += len(batch)
+        can_continue = bool(batch_can_continue)
+        if len(all_articles) == before and can_continue:
+            logger.warning(
+                "[ArticleCache] 上游重复返回同一批文章，停止整表重建 fakeid=%s keyword=%s",
+                fakeid, keyword,
+            )
+            can_continue = False
+
+    cache = {
+        "articles": all_articles,
+        "total": len(all_articles),
+        "buffer_begin": 0,
+        "buffer_can_continue": False,
+        "source": "upstream",
+        "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    return cache, pages_fetched
+
+
+def _extend_article_cache(fakeid, keyword, cache, account_name):
+    """缓存不足且上游仍有更多时，续拉一批并写回数据库。"""
+    all_articles = list((cache or {}).get("articles") or [])
+    buffer_begin = int((cache or {}).get("buffer_begin") or 0)
+    fetch_begin = buffer_begin + len(all_articles)
+
+    batch, _, can_continue, _ = _fetch_articles_accumulated(
+        fakeid,
+        fetch_begin,
+        100,
+        keyword,
+        account_name=account_name,
+    )
+    if not batch:
+        updated = dict(cache or {})
+        updated["buffer_can_continue"] = False
+        save_article_list_cache(
+            fakeid,
+            keyword,
+            articles=all_articles,
+            account_name=account_name or (cache or {}).get("account_name", ""),
+            total=buffer_begin + len(all_articles),
+            buffer_begin=buffer_begin,
+            buffer_can_continue=False,
+            source=(cache or {}).get("source") or "db_cache",
+        )
+        return updated
+
+    seen = {_cache_article_key(item) for item in all_articles}
+    for item in batch:
+        key = _cache_article_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        all_articles.append(item)
+
+    updated = dict(cache or {})
+    updated.update({
+        "articles": all_articles,
+        "total": buffer_begin + len(all_articles) + (100 if can_continue else 0),
+        "buffer_can_continue": bool(can_continue),
+        "source": "upstream",
+        "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    })
+    save_article_list_cache(
+        fakeid,
+        keyword,
+        articles=all_articles,
+        account_name=updated.get("account_name", ""),
+        total=int(updated["total"]),
+        buffer_begin=buffer_begin,
+        buffer_can_continue=bool(can_continue),
+        source="upstream",
+    )
+    return updated
+
+
+def _refresh_article_cache(fakeid, keyword, cache, account_name, from_article_id=""):
+    """
+    增量刷新缓存头部：每批 20 篇从最新往前拉，遇到数据库已有文章即停止，
+    将新文章合并到现有缓存前面并去重；更老的文章不再重拉。
+    """
+    db_articles = list((cache or {}).get("articles") or [])
+    known_keys = set()
+    for item in db_articles:
+        key = _cache_article_key(item)
+        if key:
+            known_keys.add(key)
+
+    new_items = []
+    seen_new = set()
+    cursor = 0
+    scanned = 0
+    pages_fetched = 0
+    found_existing = False
+    upstream_can_continue = True
+
+    while upstream_can_continue and scanned < _ARTICLE_CACHE_REFRESH_MAX_SCAN:
+        batch, _, upstream_can_continue, pages = _fetch_articles_accumulated(
+            fakeid,
+            cursor,
+            _ARTICLE_CACHE_REFRESH_BATCH,
+            keyword,
+            account_name=account_name,
+            from_article_id=from_article_id if pages_fetched == 0 else "",
+        )
+        pages_fetched += 1
+        if not batch:
+            break
+
+        for item in batch:
+            key = _cache_article_key(item)
+            if key and key in known_keys:
+                found_existing = True
+                if key not in seen_new:
+                    seen_new.add(key)
+                    new_items.append(item)
+                break
+            if key:
+                if key in seen_new:
+                    continue
+                seen_new.add(key)
+            new_items.append(item)
+
+        scanned += len(batch)
+        cursor += len(batch)
+        if found_existing:
+            break
+
+    merged = []
+    seen = set()
+    for item in new_items + db_articles:
+        key = _cache_article_key(item)
+        if key:
+            if key in seen:
+                continue
+            seen.add(key)
+        merged.append(item)
+
+    previous_can_continue = bool((cache or {}).get("buffer_can_continue"))
+    if found_existing:
+        final_can_continue = previous_can_continue
+    else:
+        final_can_continue = bool(upstream_can_continue and scanned >= _ARTICLE_CACHE_REFRESH_MAX_SCAN)
+
+    updated = {
+        "articles": merged,
+        "total": len(merged) + (100 if final_can_continue else 0),
+        "buffer_begin": 0,
+        "buffer_can_continue": final_can_continue,
+        "source": "upstream",
+        "updated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    save_article_list_cache(
+        fakeid,
+        keyword,
+        articles=merged,
+        account_name=account_name or (cache or {}).get("account_name", ""),
+        total=int(updated["total"]),
+        buffer_begin=0,
+        buffer_can_continue=final_can_continue,
+        source="upstream",
+    )
+    return updated, pages_fetched, len(new_items), found_existing
+
+
 @articles_bp.route("/list/<fakeid>", methods=["GET"])
 def get_articles(fakeid):
-    """获取指定公众号的文章列表"""
+    """获取指定公众号的文章列表（数据库缓存优先）"""
     begin = request.args.get("begin", 0, type=int)
     count = request.args.get("count", 100, type=int)
     keyword = request.args.get("keyword", "").strip()
+    account_name = request.args.get("name", "").strip() or keyword
     from_article_id = request.args.get("from_article_id", "").strip()
+    refresh = str(request.args.get("refresh", "")).lower() in ("1", "true", "yes")
 
     t_start = time.time()
-    print(f"[Articles API] Start fetching articles for fakeid={fakeid} begin={begin} count={count} from_article_id={from_article_id}", flush=True)
+    print(
+        f"[Articles API] Start fakeid={fakeid} begin={begin} count={count} keyword={keyword!r} refresh={refresh}",
+        flush=True,
+    )
 
     try:
-        articles, total_count, can_continue, pages_fetched = _fetch_articles_accumulated(
-            fakeid, begin, count, keyword, account_name=keyword, from_article_id=from_article_id
-        )
-        print(
-            f"[Articles API] Aggregated {pages_fetched} upstream pages in {time.time() - t_start:.2f}s, got {len(articles)} articles, next_begin={begin + len(articles)}",
-            flush=True,
-        )
-
         from backend.waterwall import is_waterwall_active, waterwall_snapshot
         from backend.weread_signer import get_rate_limit_status
-        res_data = {
-            "articles": articles,
-            "total": total_count,
-            "can_msg_continue": can_continue,
-            "begin": begin,
-            "count": len(articles),
-            "next_begin": begin + len(articles),
-        }
-        throttled_now, cooldown_left = get_rate_limit_status()
-        if throttled_now and len(articles) == 0:
-            res_data["throttled"] = True
-            res_data["errcode"] = -2014
-            res_data["cooldown_left"] = cooldown_left
-            res_data["error"] = f"触发微信读书频控 (-2014)，请 {cooldown_left} 秒后重试"
-        if is_waterwall_active():
-            res_data["need_verify"] = True
-            res_data["waterwall"] = waterwall_snapshot()
 
-        return jsonify(res_data)
+        throttled_now, cooldown_left = get_rate_limit_status()
+        waterwall_active = is_waterwall_active()
+
+        def _with_runtime_status(data):
+            if throttled_now and not data.get("articles"):
+                data.update({
+                    "throttled": True,
+                    "errcode": -2014,
+                    "cooldown_left": cooldown_left,
+                    "error": f"触发微信读书频控 (-2014)，请 {cooldown_left} 秒后重试",
+                })
+            if waterwall_active:
+                data["need_verify"] = True
+                data["waterwall"] = waterwall_snapshot()
+            return data
+
+        cache = get_article_list_cache(fakeid, keyword)
+
+        if refresh:
+            refreshed_count = 0
+            stopped_at_existing = False
+            saved_by_refresh = False
+            if cache and cache.get("articles"):
+                cache, pages_fetched, refreshed_count, stopped_at_existing = _refresh_article_cache(
+                    fakeid, keyword, cache, account_name, from_article_id=from_article_id
+                )
+                saved_by_refresh = True
+            else:
+                cache, pages_fetched = _rebuild_article_cache(
+                    fakeid, keyword, account_name, from_article_id=from_article_id
+                )
+
+            if not saved_by_refresh and not (throttled_now and not cache.get("articles")):
+                save_article_list_cache(
+                    fakeid,
+                    keyword,
+                    articles=cache["articles"],
+                    account_name=account_name,
+                    total=int(cache["total"]),
+                    buffer_begin=int(cache["buffer_begin"]),
+                    buffer_can_continue=bool(cache["buffer_can_continue"]),
+                    source="upstream",
+                )
+
+            page, total_count, can_continue = _cache_slice(cache, begin, count)
+            res_data = _article_response(
+                cache, page, begin, total_count, can_continue, hit=False, source="upstream"
+            )
+            res_data["cache"]["refreshed_count"] = refreshed_count
+            res_data["cache"]["stopped_at_existing"] = stopped_at_existing
+            print(
+                f"[Articles API] Refreshed cache head with {pages_fetched} batches in {time.time() - t_start:.2f}s, "
+                f"new={refreshed_count}, stopped_at_existing={stopped_at_existing}, "
+                f"cached={len(cache.get('articles') or [])}, returned={len(page)}",
+                flush=True,
+            )
+            return jsonify(_with_runtime_status(res_data))
+
+        if cache:
+            cached_end = int(cache.get("buffer_begin") or 0) + len(cache.get("articles") or [])
+            if begin + count > cached_end and cache.get("buffer_can_continue"):
+                try:
+                    cache = _extend_article_cache(fakeid, keyword, cache, account_name)
+                except Exception as ext_e:
+                    logger.warning("[ArticleCache] 续拉缓存失败，返回现有缓存: %s", ext_e)
+
+            page, total_count, can_continue = _cache_slice(cache, begin, count)
+            res_data = _article_response(
+                cache, page, begin, total_count, can_continue,
+                hit=True, source=cache.get("source") or "db_cache",
+            )
+            print(
+                f"[Articles API] Cache hit fakeid={fakeid} begin={begin} got={len(page)} "
+                f"cached={len(cache.get('articles') or [])} in {time.time() - t_start:.2f}s",
+                flush=True,
+            )
+            return jsonify(_with_runtime_status(res_data))
+
+        # 未命中缓存且未要求刷新：整表重建
+        cache, pages_fetched = _rebuild_article_cache(
+            fakeid, keyword, account_name, from_article_id=from_article_id
+        )
+        if not (throttled_now and not cache.get("articles")):
+            save_article_list_cache(
+                fakeid,
+                keyword,
+                articles=cache["articles"],
+                account_name=account_name,
+                total=int(cache["total"]),
+                buffer_begin=int(cache["buffer_begin"]),
+                buffer_can_continue=bool(cache["buffer_can_continue"]),
+                source="upstream",
+            )
+
+        page, total_count, can_continue = _cache_slice(cache, begin, count)
+        res_data = _article_response(
+            cache, page, begin, total_count, can_continue, hit=False, source="upstream"
+        )
+        print(
+            f"[Articles API] Rebuilt cache with {pages_fetched} upstream pages in {time.time() - t_start:.2f}s, "
+            f"cached={len(cache.get('articles') or [])}, returned={len(page)}",
+            flush=True,
+        )
+        return jsonify(_with_runtime_status(res_data))
 
     except PermissionError as e:
         print(f"[Articles API] PermissionError in {time.time() - t_start:.2f}s: {e}", flush=True)
@@ -685,6 +1026,27 @@ def get_articles(fakeid):
         import traceback
         traceback.print_exc()
         print(f"[Articles API] Exception in {time.time() - t_start:.2f}s: {e}", flush=True)
+
+        old_cache = None
+        try:
+            old_cache = get_article_list_cache(fakeid, keyword)
+        except Exception:
+            pass
+        if old_cache:
+            page, total_count, can_continue = _cache_slice(old_cache, begin, count)
+            res_data = _article_response(
+                old_cache, page, begin, total_count, can_continue,
+                hit=True, source="stale_cache", stale=True,
+            )
+            try:
+                from backend.waterwall import is_waterwall_active, waterwall_snapshot
+                if is_waterwall_active():
+                    res_data["need_verify"] = True
+                    res_data["waterwall"] = waterwall_snapshot()
+            except Exception:
+                pass
+            return jsonify(res_data)
+
         from backend.waterwall import is_waterwall_active, waterwall_snapshot
         err_res = {"error": f"网络请求失败: {str(e)}", "articles": [], "total": 0, "count": 0}
         if is_waterwall_active():

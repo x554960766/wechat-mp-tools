@@ -16,6 +16,8 @@ const ArticlesPage = {
     bufferBegin: 0,
     bufferCanContinue: true,
     _batchPromise: null,
+    cacheMeta: null,
+    _forceRefresh: false,
     total: 0,
     keyword: '',
     downloadTaskId: null,
@@ -93,6 +95,11 @@ const ArticlesPage = {
                             </button>
                         </div>
                     </div>
+
+                    <div class="article-cache-status" id="article-cache-status-row" style="display: none; align-items: center; gap: 10px; flex-wrap: wrap; margin: 8px 0 12px; color: var(--text-secondary, #666); font-size: 0.82rem;">
+                        <span id="article-cache-status">缓存状态：加载中…</span>
+                        <button class="btn btn-secondary btn-sm" id="btn-refresh-article-cache" onclick="ArticlesPage.refreshCache()">🔄 刷新缓存</button>
+                    </div>
                 </div>
 
                 <!-- 文章列表 -->
@@ -153,6 +160,7 @@ const ArticlesPage = {
         this.bufferBegin = 0;
         this.bufferCanContinue = true;
         this._batchPromise = null;
+        this.cacheMeta = null;
     },
 
     async init(params = {}) {
@@ -240,16 +248,22 @@ const ArticlesPage = {
 
         this._batchPromise = (async () => {
             const nextBegin = this.bufferBegin + this.buffer.length;
+            const refresh = this._forceRefresh && nextBegin === 0;
             const data = await API.articles.list(
                 this.currentFakeid,
                 nextBegin,
                 this.batchSize,
-                this.keyword
+                this.keyword,
+                refresh,
+                this.currentName
             );
             const batch = data.articles || [];
 
             this.buffer.push(...batch);
             this.bufferCanContinue = !!data.can_msg_continue;
+            this.cacheMeta = data.cache || null;
+            this.updateCacheStatus();
+            if (refresh) this._forceRefresh = false;
             this.total = data.total || 0;
             this.canMsgContinue = this.bufferCanContinue ? 1 : 0;
         })();
@@ -261,6 +275,51 @@ const ArticlesPage = {
         }
     },
 
+    updateCacheStatus() {
+        const row = document.getElementById('article-cache-status-row');
+        const label = document.getElementById('article-cache-status');
+        if (!row || !label) return;
+        if (!this.currentFakeid) {
+            row.style.display = 'none';
+            return;
+        }
+        row.style.display = 'flex';
+
+        const meta = this.cacheMeta || {};
+        let source;
+        if (meta.stale || meta.source === 'stale_cache') {
+            source = '旧缓存（离线）';
+        } else if (!meta.hit) {
+            source = '上游刷新';
+        } else if (meta.source === 'legacy_json') {
+            source = '旧JSON迁移';
+        } else {
+            source = '本地缓存';
+        }
+        const updated = meta.updated_at
+            ? String(meta.updated_at).replace('T', ' ').slice(0, 19)
+            : '-';
+        const count = meta.cached_count !== undefined
+            ? meta.cached_count
+            : this.buffer.length;
+        const stale = meta.stale ? ' · 上游暂不可用' : '';
+        label.textContent = `来源：${source} · 已缓存 ${count} 篇 · 更新于 ${updated}${stale}`;
+    },
+
+    async refreshCache() {
+        if (!this.currentFakeid) {
+            Toast.info('请先选择一个公众号');
+            return;
+        }
+        if (!confirm('将从最新文章开始增量刷新，遇到已缓存文章即停止，最多扫描 500 篇。继续吗？')) return;
+
+        this._forceRefresh = true;
+        this.resetListState();
+        this.updateCacheStatus();
+        Toast.info('正在增量刷新缓存...');
+        await this.loadArticles();
+    },
+
     async loadArticles() {
         const container = document.getElementById('articles-list');
 
@@ -270,6 +329,8 @@ const ArticlesPage = {
             this.articles = cached.articles;
             this.total = cached.total;
             this.canMsgContinue = cached.canMsgContinue;
+            this.cacheMeta = cached.cacheMeta || null;
+            this.updateCacheStatus();
             this.renderArticles();
             this.updatePagination();
             this.updateSelectedCount();
@@ -293,7 +354,8 @@ const ArticlesPage = {
             this.pageCache[this.currentPage] = {
                 articles: this.articles,
                 total: this.total,
-                canMsgContinue: this.canMsgContinue
+                canMsgContinue: this.canMsgContinue,
+                cacheMeta: this.cacheMeta
             };
 
             // 索引到已加载列表映射，供跨页多选与全选使用
