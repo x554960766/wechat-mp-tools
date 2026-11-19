@@ -408,7 +408,8 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
     cached_chap = get_cached_chapters(book_id, begin, 0)
     if cached_chap and isinstance(cached_chap, dict):
         raw_items = cached_chap.get("data") or cached_chap.get("chapters") or cached_chap.get("list") or []
-        has_more = bool(cached_chap.get("hasMore", len(raw_items) >= count))
+        # 微信读书 mp/chapters 常省略 hasMore；不能把“不足 20 篇”当成结束。
+        has_more = bool(cached_chap.get("hasMore", len(raw_items) > 0))
     else:
         try:
             # 遵循 APK MpRemoteService: 首页拉取走 syncChapters (带 pf=android, synckey=0)，翻页走 loadMoreChapters (带 offset，不带 synckey/pf)
@@ -426,7 +427,9 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
                     ttl = 60 if begin == 0 else 300
                     set_cached_chapters(book_id, begin, 0, data, ttl=ttl)
                     raw_items = data.get("data") or data.get("chapters") or data.get("list") or []
-                    has_more = bool(data.get("hasMore", len(raw_items) >= count))
+                    # 微信读书 mp/chapters 常省略 hasMore；不能把“不足 20 篇”当成结束。
+                    # 只有显式 hasMore=false 或后续空页才真正停止翻页。
+                    has_more = bool(data.get("hasMore", len(raw_items) > 0))
                 elif resp_chap.status_code in (429, 499):
                     print(f"[_fetch_articles_page] mp/chapters 返回 HTTP {resp_chap.status_code}，启用多级聚合引擎安全平滑降级...", flush=True)
         except Exception as e:
@@ -570,11 +573,74 @@ def _fetch_articles_page(fakeid: str, begin: int, count: int, keyword: str = "",
     return articles, total_count, can_continue
 
 
+_WEREAD_LIST_PAGE_SIZE = 20
+_MAX_LIST_COUNT = 500
+
+
+def _fetch_articles_accumulated(
+    fakeid: str,
+    begin: int,
+    count: int,
+    keyword: str = "",
+    account_name: str = "",
+    from_article_id: str = "",
+):
+    """
+    内部仍按 20 篇/页调用微信读书，聚合到调用方要求的 count 篇后返回。
+    对外 begin/count 是逻辑下标；对内 cursor 按上游实际返回条数推进。
+    """
+    count = max(1, min(int(count or 100), _MAX_LIST_COUNT))
+    page_size = _WEREAD_LIST_PAGE_SIZE
+
+    articles = []
+    seen = set()
+    cursor = begin
+    has_more = True
+    pages_fetched = 0
+
+    while len(articles) < count and has_more:
+        page, _, can_continue = _fetch_articles_page(
+            fakeid,
+            cursor,
+            page_size,
+            keyword,
+            account_name=account_name,
+            from_article_id=from_article_id if pages_fetched == 0 else "",
+        )
+        pages_fetched += 1
+
+        if not page:
+            has_more = False
+            break
+
+        for item in page:
+            key = item.get("id") or item.get("link") or item.get("title")
+            if key in seen:
+                continue
+            seen.add(key)
+            articles.append(item)
+            if len(articles) >= count:
+                break
+
+        # 必须用上游实际返回条数推进 cursor，而不是去重后的条数
+        cursor += len(page)
+        has_more = bool(can_continue)
+
+        if has_more and len(articles) < count:
+            time.sleep(0.3)
+
+    can_msg_continue = 1 if has_more else 0
+    # 保持旧格式：total 仍是估算值，避免前端改动过大
+    total = begin + len(articles) + (count if can_msg_continue else 0)
+
+    return articles[:count], total, can_msg_continue, pages_fetched
+
+
 @articles_bp.route("/list/<fakeid>", methods=["GET"])
 def get_articles(fakeid):
     """获取指定公众号的文章列表"""
     begin = request.args.get("begin", 0, type=int)
-    count = request.args.get("count", 10, type=int)
+    count = request.args.get("count", 100, type=int)
     keyword = request.args.get("keyword", "").strip()
     from_article_id = request.args.get("from_article_id", "").strip()
 
@@ -582,10 +648,13 @@ def get_articles(fakeid):
     print(f"[Articles API] Start fetching articles for fakeid={fakeid} begin={begin} count={count} from_article_id={from_article_id}", flush=True)
 
     try:
-        articles, total_count, can_continue = _fetch_articles_page(
+        articles, total_count, can_continue, pages_fetched = _fetch_articles_accumulated(
             fakeid, begin, count, keyword, account_name=keyword, from_article_id=from_article_id
         )
-        print(f"[Articles API] Fetch finished in {time.time() - t_start:.2f}s, got {len(articles)} articles", flush=True)
+        print(
+            f"[Articles API] Aggregated {pages_fetched} upstream pages in {time.time() - t_start:.2f}s, got {len(articles)} articles, next_begin={begin + len(articles)}",
+            flush=True,
+        )
 
         from backend.waterwall import is_waterwall_active, waterwall_snapshot
         from backend.weread_signer import get_rate_limit_status
@@ -595,6 +664,7 @@ def get_articles(fakeid):
             "can_msg_continue": can_continue,
             "begin": begin,
             "count": len(articles),
+            "next_begin": begin + len(articles),
         }
         throttled_now, cooldown_left = get_rate_limit_status()
         if throttled_now and len(articles) == 0:

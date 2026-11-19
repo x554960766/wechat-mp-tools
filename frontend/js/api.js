@@ -120,7 +120,7 @@ const API = {
 
     // ── Articles API ─────────────────────────────────
     articles: {
-        list(fakeid, begin = 0, count = 10, keyword = '') {
+        list(fakeid, begin = 0, count = 100, keyword = '') {
             const params = new URLSearchParams({ begin, count, keyword });
             return API.get(`/api/articles/list/${fakeid}?${params}`);
         },

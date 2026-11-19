@@ -11,6 +11,11 @@ const ArticlesPage = {
     selectionMode: 'single',
     currentPage: 0,
     pageSize: 20,
+    batchSize: 100,
+    buffer: [],
+    bufferBegin: 0,
+    bufferCanContinue: true,
+    _batchPromise: null,
     total: 0,
     keyword: '',
     downloadTaskId: null,
@@ -139,6 +144,17 @@ const ArticlesPage = {
         `;
     },
 
+    resetListState() {
+        this.currentPage = 0;
+        this.selectedArticles.clear();
+        this.pageCache = {};
+        this.loadedArticlesMap.clear();
+        this.buffer = [];
+        this.bufferBegin = 0;
+        this.bufferCanContinue = true;
+        this._batchPromise = null;
+    },
+
     async init(params = {}) {
         await this.loadAccountSelector();
         if (params.fakeid && params.name) {
@@ -183,10 +199,7 @@ const ArticlesPage = {
     async selectAccount(fakeid, name) {
         this.currentFakeid = fakeid;
         this.currentName = name;
-        this.currentPage = 0;
-        this.selectedArticles.clear();
-        this.pageCache = {};
-        this.loadedArticlesMap.clear();
+        this.resetListState();
         this.selectionMode = 'single';
         this.keyword = '';
 
@@ -210,10 +223,48 @@ const ArticlesPage = {
         await this.loadArticles();
     },
 
+    async ensureBatchFor(start) {
+        const bufferEnd = this.bufferBegin + this.buffer.length;
+
+        // 当前缓冲已覆盖目标位置
+        if (start < bufferEnd) return;
+
+        // 后端已明确没有更多文章
+        if (!this.bufferCanContinue) return;
+
+        // 已有相同批次的请求在飞行中，等待它完成后再判断
+        if (this._batchPromise) {
+            await this._batchPromise;
+            if (start < this.bufferBegin + this.buffer.length) return;
+        }
+
+        this._batchPromise = (async () => {
+            const nextBegin = this.bufferBegin + this.buffer.length;
+            const data = await API.articles.list(
+                this.currentFakeid,
+                nextBegin,
+                this.batchSize,
+                this.keyword
+            );
+            const batch = data.articles || [];
+
+            this.buffer.push(...batch);
+            this.bufferCanContinue = !!data.can_msg_continue;
+            this.total = data.total || 0;
+            this.canMsgContinue = this.bufferCanContinue ? 1 : 0;
+        })();
+
+        try {
+            await this._batchPromise;
+        } finally {
+            this._batchPromise = null;
+        }
+    },
+
     async loadArticles() {
         const container = document.getElementById('articles-list');
 
-        // ⚡ 1. 内存缓存检查：已加载过的数据直接调取，无需重复请求接口
+        // ⚡ 页码缓存：已渲染过的页直接复用
         if (this.pageCache[this.currentPage]) {
             const cached = this.pageCache[this.currentPage];
             this.articles = cached.articles;
@@ -228,12 +279,15 @@ const ArticlesPage = {
         container.innerHTML = '<div class="loading-screen" style="min-height: 200px;"><div class="spinner"></div><p>加载文章列表...</p></div>';
 
         try {
-            const begin = this.currentPage * this.pageSize;
-            const data = await API.articles.list(this.currentFakeid, begin, this.pageSize, this.keyword);
+            const start = this.currentPage * this.pageSize;
+            const end = start + this.pageSize;
 
-            this.articles = data.articles || [];
-            this.total = data.total || 0;
-            this.canMsgContinue = data.can_msg_continue !== undefined ? data.can_msg_continue : (this.articles.length > 0 ? 1 : 0);
+            // 缓冲不足时，向后端拉取下一批 100 篇
+            await this.ensureBatchFor(start);
+
+            const localStart = start - this.bufferBegin;
+            const localEnd = end - this.bufferBegin;
+            this.articles = this.buffer.slice(localStart, localEnd);
 
             // 写入页码缓存
             this.pageCache[this.currentPage] = {
@@ -483,10 +537,7 @@ const ArticlesPage = {
     searchArticles() {
         const input = document.getElementById('search-article-input');
         this.keyword = input?.value.trim() || '';
-        this.currentPage = 0;
-        this.selectedArticles.clear();
-        this.pageCache = {};
-        this.loadedArticlesMap.clear();
+        this.resetListState();
         this.loadArticles();
     },
 
@@ -497,10 +548,7 @@ const ArticlesPage = {
         const endDateEl = document.getElementById('article-end-date');
         if (startDateEl) startDateEl.value = '';
         if (endDateEl) endDateEl.value = '';
-        this.currentPage = 0;
-        this.selectedArticles.clear();
-        this.pageCache = {};
-        this.loadedArticlesMap.clear();
+        this.resetListState();
         this.loadArticles();
     },
 
@@ -620,12 +668,17 @@ const ArticlesPage = {
         const nextBtn = document.getElementById('btn-next-page');
 
         const currentPageNum = this.currentPage + 1;
-        const hasNext = (this.canMsgContinue === 1 || this.canMsgContinue === undefined) && this.articles.length > 0;
+        const bufferEnd = this.bufferBegin + this.buffer.length;
+        const nextPageStart = (this.currentPage + 1) * this.pageSize;
+
+        const hasBufferedNext = nextPageStart < bufferEnd;
+        const hasRemoteNext = !!this.bufferCanContinue;
 
         paginationEl.style.display = (this.articles.length > 0 || this.currentPage > 0) ? 'flex' : 'none';
         infoEl.textContent = `第 ${currentPageNum} 页 · 本页 ${this.articles.length} 篇`;
+
         prevBtn.disabled = this.currentPage <= 0;
-        nextBtn.disabled = !hasNext;
+        nextBtn.disabled = !(hasBufferedNext || hasRemoteNext);
     },
 
     prevPage() {
